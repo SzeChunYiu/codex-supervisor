@@ -48,7 +48,14 @@ set -u
 
 SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
 CODEX_CMD="${CODEX_SUPERVISOR_CMD:-codex --dangerously-bypass-approvals-and-sandbox}"
-POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-30}"
+POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-60}"
+# Per-pane respawn cooldown -- after a respawn, ignore further limit hits for
+# this many seconds. Prevents thrashing the system with back-to-back MCP
+# server reloads when a pane is in a sustained error/limit state.
+RESPAWN_COOLDOWN_SECS="${CODEX_SUPERVISOR_RESPAWN_COOLDOWN:-300}"
+# Bytes/lines of pane scrollback to inspect per check. Codex's status bar
+# is always at the bottom; capturing the full pane (~30KB) is wasteful.
+CAPTURE_TAIL_LINES="${CODEX_SUPERVISOR_CAPTURE_LINES:-80}"
 READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-600}"
 # Default contains an apostrophe -- can't put it inside ${VAR:-...} (the
 # apostrophe opens an unbalanced single-quoted region in parameter expansion).
@@ -116,6 +123,12 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FI
 
 declare -a PANE_IDX=()
 declare -A LIMIT_STREAK=()
+declare -A LAST_RESPAWN=()  # epoch seconds of last respawn per pane
+
+# Cheap pane snapshot: tail-bounded, single capture-pane call.
+capture_tail() {
+  tmux capture-pane -t "$1" -p 2>/dev/null | tail -n "$CAPTURE_TAIL_LINES"
+}
 
 pane_target() { printf '%s:0.%d' "$SESSION" "${PANE_IDX[$1]}"; }
 
@@ -204,13 +217,13 @@ wait_ready_and_send() {
   # "Starting MCP" line (MCP server load complete). Then wait READY_SETTLE_SECS
   # and re-verify before sending -- the input handler attaches a beat after
   # MCP completes, and codex can briefly flip back to a transitional state.
-  for ((s=1; s<=READY_TIMEOUT; s++)); do
-    cap=$(tmux capture-pane -t "$target" -p 2>/dev/null)
+  for ((s=2; s<=READY_TIMEOUT; s+=2)); do
+    cap=$(capture_tail "$target")
     if printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
        && ! printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
       log "[pane $i] ready candidate after ${s}s, settling for ${READY_SETTLE_SECS}s..."
       sleep "$READY_SETTLE_SECS"
-      cap=$(tmux capture-pane -t "$target" -p 2>/dev/null)
+      cap=$(capture_tail "$target")
       if ! printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
          || printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
         log "[pane $i] state regressed during settle, re-waiting"
@@ -224,21 +237,29 @@ wait_ready_and_send() {
       log "[pane $i] sent after settle: $(printf '%.80s' "$prompt")..."
       return 0
     fi
-    sleep 1
+    sleep 2
   done
   log "[pane $i] ERROR: ready timeout (${READY_TIMEOUT}s)"
   return 1
 }
 
 check_pane() {
-  local i=$1 prompt=$2 target
+  local i=$1 prompt=$2 target now since_last
   target=$(pane_target "$i")
-  if tmux capture-pane -t "$target" -p 2>/dev/null | grep -qF "$LIMIT_PATTERN"; then
+  if capture_tail "$target" | grep -qF "$LIMIT_PATTERN"; then
     LIMIT_STREAK[$i]=$(( ${LIMIT_STREAK[$i]:-0} + 1 ))
     log "[pane $i] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL}"
     if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then
+      now=$(date +%s)
+      since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
+      if (( since_last < RESPAWN_COOLDOWN_SECS )); then
+        log "[pane $i] cooldown active (last respawn ${since_last}s ago, need ${RESPAWN_COOLDOWN_SECS}s) -- skipping respawn, resetting streak"
+        LIMIT_STREAK[$i]=0
+        return
+      fi
       log "[pane $i] respawning with fresh codex + resending prompt"
       tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+      LAST_RESPAWN[$i]=$now
       LIMIT_STREAK[$i]=0
       ( wait_ready_and_send "$i" "$prompt" ) &
     fi
@@ -268,6 +289,13 @@ main() {
 
   # Pane 0 from new-session, then one split per remaining prompt; tile after each.
   tmux new-session -d -s "$SESSION" -x 240 -y 70 "$CODEX_CMD"
+  # Render-cost reductions for the attached client:
+  #   - drop the bottom status bar (one less line redrawn per refresh)
+  #   - drop the green pane border highlight on the active pane (no extra paint when focus moves)
+  #   - widen escape-time so 8 codex renders don't fight tmux's input parser
+  tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-active-border-style 'fg=default' >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g escape-time 50 >/dev/null 2>&1 || true
   local i
   for ((i=1; i<${#PROMPTS[@]}; i++)); do
     tmux split-window -t "$SESSION:0" "$CODEX_CMD"
