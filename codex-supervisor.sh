@@ -49,12 +49,16 @@ set -u
 SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
 CODEX_CMD="${CODEX_SUPERVISOR_CMD:-codex --dangerously-bypass-approvals-and-sandbox}"
 POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-30}"
-READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-180}"
+READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-600}"
 # Default contains an apostrophe -- can't put it inside ${VAR:-...} (the
 # apostrophe opens an unbalanced single-quoted region in parameter expansion).
 LIMIT_PATTERN="You've hit your usage limit"
 [[ -n "${CODEX_SUPERVISOR_LIMIT:-}" ]] && LIMIT_PATTERN="$CODEX_SUPERVISOR_LIMIT"
-READY_PATTERN="${CODEX_SUPERVISOR_READY:-Ready · Context}"
+# Default `Tip: ` rather than `Ready · Context` -- the latter gets visually
+# truncated by codex when a pane is narrower than ~50 columns, so capture-pane
+# never sees the full string. `Tip: ` always sits at column 2 of the help line
+# that codex prints once it's ready for input.
+READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
 LIMIT_HITS_BEFORE_KILL="${CODEX_SUPERVISOR_HITS:-3}"
 LOG_FILE="${CODEX_SUPERVISOR_LOG:-$HOME/codex-supervisor.log}"
 AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
