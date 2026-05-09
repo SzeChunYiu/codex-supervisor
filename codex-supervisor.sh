@@ -53,7 +53,19 @@ set -u
 # ---------------------------------------------------------------------------
 
 SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
-CODEX_CMD="${CODEX_SUPERVISOR_CMD:-codex --dangerously-bypass-approvals-and-sandbox}"
+# When DISABLE_MCP=1, prepend `-c mcp_servers={}` to clear the MCP server
+# table for these sessions. Each codex instance otherwise spawns one node
+# process per configured MCP server (~14-17 typical), which costs ~500MB
+# RAM and 60-180s of startup time per pane. Lanes do not need MCP servers
+# for git/gh/npm/build work -- those go through codex's built-in shell tool.
+DISABLE_MCP="${CODEX_SUPERVISOR_DISABLE_MCP:-1}"
+if [[ -n "${CODEX_SUPERVISOR_CMD:-}" ]]; then
+  CODEX_CMD="$CODEX_SUPERVISOR_CMD"
+elif (( DISABLE_MCP )); then
+  CODEX_CMD="codex -c mcp_servers={} --dangerously-bypass-approvals-and-sandbox"
+else
+  CODEX_CMD="codex --dangerously-bypass-approvals-and-sandbox"
+fi
 POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-60}"
 READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-600}"
 READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
@@ -151,27 +163,88 @@ resolve_pane() {
 }
 
 # Cross-platform: open the tmux session in a new terminal window.
+# Prefers GPU-accelerated terminals (Ghostty / Alacritty / WezTerm / Kitty)
+# over the system default -- they handle 8-10 simultaneously-redrawing TUI
+# panes far more efficiently than CPU-bound renderers like macOS Terminal.app.
+# Override with CODEX_SUPERVISOR_TERMINAL=<one of: ghostty alacritty wezterm kitty terminal iterm2 gnome-terminal konsole xterm>
 open_terminal_attached() {
   local cmd="tmux attach -t $SESSION"
-  case "$(uname -s)" in
-    Darwin)
-      if command -v osascript >/dev/null 2>&1; then
+  local pref="${CODEX_SUPERVISOR_TERMINAL:-}"
+  local sys; sys=$(uname -s)
+
+  # Try a single explicit choice if the user pinned one.
+  if [[ -n "$pref" ]]; then
+    _open_in_terminal "$pref" "$cmd" && return 0
+    log "preferred terminal '$pref' not available; falling back"
+  fi
+
+  if [[ "$sys" == "Darwin" ]]; then
+    for t in ghostty alacritty wezterm kitty iterm2 terminal; do
+      _open_in_terminal "$t" "$cmd" && return 0
+    done
+  else
+    for t in ghostty alacritty wezterm kitty x-terminal-emulator gnome-terminal konsole xfce4-terminal xterm; do
+      _open_in_terminal "$t" "$cmd" && return 0
+    done
+  fi
+  return 1
+}
+
+# Try to launch one specific terminal app with the given command.
+_open_in_terminal() {
+  local name="$1" cmd="$2"
+  case "$name" in
+    ghostty)
+      [[ -d /Applications/Ghostty.app ]] && {
+        open -na Ghostty.app --args -e "$cmd" >/dev/null 2>&1 && return 0
+      }
+      command -v ghostty >/dev/null 2>&1 && { ghostty -e "$cmd" >/dev/null 2>&1 & return 0; }
+      return 1
+      ;;
+    alacritty)
+      command -v alacritty >/dev/null 2>&1 && { alacritty -e bash -lc "$cmd" >/dev/null 2>&1 & return 0; }
+      [[ -d /Applications/Alacritty.app ]] && { open -na Alacritty.app --args -e "$cmd" >/dev/null 2>&1 && return 0; }
+      return 1
+      ;;
+    wezterm)
+      command -v wezterm >/dev/null 2>&1 && { wezterm start -- bash -lc "$cmd" >/dev/null 2>&1 & return 0; }
+      [[ -d /Applications/WezTerm.app ]] && { open -na WezTerm.app --args -e bash -lc "$cmd" >/dev/null 2>&1 && return 0; }
+      return 1
+      ;;
+    kitty)
+      command -v kitty >/dev/null 2>&1 && { kitty bash -lc "$cmd" >/dev/null 2>&1 & return 0; }
+      [[ -d /Applications/kitty.app ]] && { open -na kitty.app --args bash -lc "$cmd" >/dev/null 2>&1 && return 0; }
+      return 1
+      ;;
+    terminal)
+      [[ "$(uname -s)" == "Darwin" ]] || return 1
+      command -v osascript >/dev/null 2>&1 && {
         osascript \
           -e "tell application \"Terminal\" to do script \"$cmd\"" \
-          -e 'tell application "Terminal" to activate' >/dev/null 2>&1 \
-          && return 0
-      fi
+          -e 'tell application "Terminal" to activate' >/dev/null 2>&1 && return 0
+      }
+      return 1
       ;;
-    Linux)
-      for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal alacritty kitty wezterm xterm; do
-        if command -v "$term" >/dev/null 2>&1; then
-          case "$term" in
-            gnome-terminal) "$term" -- bash -lc "$cmd" >/dev/null 2>&1 & return 0 ;;
-            konsole)        "$term" -e bash -lc "$cmd" >/dev/null 2>&1 & return 0 ;;
-            *)              "$term" -e "bash -lc '$cmd'" >/dev/null 2>&1 & return 0 ;;
-          esac
-        fi
-      done
+    iterm2|iterm)
+      [[ "$(uname -s)" == "Darwin" ]] || return 1
+      [[ -d /Applications/iTerm.app ]] && command -v osascript >/dev/null 2>&1 && {
+        osascript \
+          -e "tell application \"iTerm\" to create window with default profile command \"$cmd\"" \
+          -e 'tell application "iTerm" to activate' >/dev/null 2>&1 && return 0
+      }
+      return 1
+      ;;
+    gnome-terminal)
+      command -v gnome-terminal >/dev/null 2>&1 && { gnome-terminal -- bash -lc "$cmd" >/dev/null 2>&1 & return 0; }
+      return 1
+      ;;
+    konsole)
+      command -v konsole >/dev/null 2>&1 && { konsole -e bash -lc "$cmd" >/dev/null 2>&1 & return 0; }
+      return 1
+      ;;
+    xfce4-terminal|xterm|x-terminal-emulator)
+      command -v "$name" >/dev/null 2>&1 && { "$name" -e "bash -lc '$cmd'" >/dev/null 2>&1 & return 0; }
+      return 1
       ;;
   esac
   return 1
