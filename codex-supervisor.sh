@@ -562,10 +562,27 @@ pop_next_task() {
 cleanup_session() {
   log "shutting down session '$SESSION'"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  # Sweep up any MCP child processes that were re-parented to PID 1 when
-  # their codex exited. These don't auto-die when codex dies; without this
-  # they leak ~100-300MB each across many node processes.
   reap_orphan_mcps
+  # Also kill any stale supervisor daemons (other than ourselves). Each
+  # `start` forks a daemon; without this they accumulate across restarts
+  # and fight over the same panes.
+  reap_stale_daemons
+}
+
+# Kill any other codex-supervisor daemon processes for this session,
+# excluding the current process tree.
+reap_stale_daemons() {
+  local self="$$" parent
+  parent=$(ps -o ppid= -p "$self" 2>/dev/null | tr -d ' ')
+  local n=0
+  for pid in $(pgrep -f "codex-supervisor\.sh" 2>/dev/null); do
+    [[ "$pid" == "$self" || "$pid" == "$parent" ]] && continue
+    # Inspect command line for our session name to be safe
+    if ps -p "$pid" -o command= 2>/dev/null | grep -qF "$SESSION"; then
+      kill -TERM "$pid" 2>/dev/null && n=$((n+1))
+    fi
+  done
+  (( n > 0 )) && log "reap_stale_daemons: killed $n stale supervisor process(es)"
 }
 
 # Kill any orphaned MCP node processes (parent PID == 1 and the command
@@ -613,6 +630,11 @@ cmd_start() {
   command -v tmux >/dev/null || { err "tmux not on PATH"; exit 1; }
   local first_word; first_word=$(awk '{print $1}' <<<"$CODEX_CMD")
   command -v "$first_word" >/dev/null || { err "$first_word not on PATH"; exit 1; }
+
+  # Reap any stale daemon processes from prior runs before forking a new one.
+  # `stop` doesn't always get called between restarts, and the daemon
+  # survives terminal close, so they accumulate.
+  reap_stale_daemons
 
   # Don't double-launch: if a session of this name is already up, just attach.
   if tmux has-session -t "$SESSION" 2>/dev/null; then
