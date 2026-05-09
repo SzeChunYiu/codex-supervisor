@@ -274,6 +274,10 @@ _open_in_terminal() {
 apply_tmux_config() {
   # Cosmetic + speed
   tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
+  # Keep dead panes visible so we can diagnose why a codex exited (instead
+  # of having the pane silently disappear). Press Enter on a dead pane to
+  # close it, or use respawn-pane to relaunch.
+  tmux set-option -t "$SESSION" -g remain-on-exit on >/dev/null 2>&1 || true
   tmux set-option -t "$SESSION" -g pane-active-border-style 'fg=default' >/dev/null 2>&1 || true
   tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
   # Format: ' [bold]<pane_index> · <pane_title> '. In tmux format strings,
@@ -384,8 +388,9 @@ apply_pane_titles() {
 send_prompt_to_pane() {
   local target="$1" prompt="$2" attempt cap
   for attempt in 1 2 3; do
-    # Clear any stale input first so retries don't stack the prompt
-    tmux send-keys -t "$target" C-c 2>/dev/null
+    # Cancel any open popup / partial state. NEVER send C-c -- that exits
+    # codex (which kills the pane). Esc closes its slash-command popup.
+    tmux send-keys -t "$target" Escape 2>/dev/null
     sleep 0.2
     tmux send-keys -t "$target" "$prompt"
     sleep 0.5
