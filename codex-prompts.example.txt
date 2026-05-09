@@ -1,0 +1,8 @@
+# codex-supervisor prompts -- one prompt per non-blank, non-comment line.
+# Each line spawns one tiled tmux pane and is sent VERBATIM to its codex.
+# Include `/goal ` (or any slash command) yourself if you want it.
+#
+# Lines must NOT contain literal newlines (newlines submit prematurely).
+
+/goal Fix all the linting errors in this repo, one file at a time, opening a PR per file and merging after CI green.
+/goal Add unit tests for every untested module in src/lib, one module per PR, until coverage exceeds 80%.

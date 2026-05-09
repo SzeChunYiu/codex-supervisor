@@ -1,0 +1,13 @@
+# local prompts (per-project, not shared)
+codex-prompts.txt
+
+# logs
+*.log
+codex-supervisor.log
+
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
