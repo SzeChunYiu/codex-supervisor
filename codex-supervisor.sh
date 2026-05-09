@@ -200,10 +200,17 @@ _open_in_terminal() {
   local name="$1" cmd="$2"
   case "$name" in
     ghostty)
+      # Ghostty's `-e` runs the command via `/usr/bin/login -flp <user> <argv>`,
+      # so multi-word / shell-syntax commands fail. Wrap in `bash -lc`.
+      # Even with the wrapper, AppleScript -> Ghostty handoff hits issues
+      # in some installs, so we prefer a single-arg shell exec.
+      if command -v ghostty >/dev/null 2>&1; then
+        ghostty -e bash -lc "$cmd" >/dev/null 2>&1 & return 0
+      fi
       [[ -d /Applications/Ghostty.app ]] && {
-        open -na Ghostty.app --args -e "$cmd" >/dev/null 2>&1 && return 0
+        # Pass `-e bash -lc <cmd>` as separate argv to Ghostty.
+        open -na Ghostty.app --args -e bash -lc "$cmd" >/dev/null 2>&1 && return 0
       }
-      command -v ghostty >/dev/null 2>&1 && { ghostty -e "$cmd" >/dev/null 2>&1 & return 0; }
       return 1
       ;;
     alacritty)
@@ -582,6 +589,10 @@ cmd_status() {
   for i in "${!PANE_IDX[@]}"; do
     cap=$(capture_tail "$(pane_target "$i")")
     label="${LANE_LABELS[$i]:-pane$i}"
+    # Order: most-specific first; READY is the catch-all for "codex is up
+    # but idle". The status bar always contains the model name (gpt-x.y),
+    # so its presence is a reliable "codex alive" signal even after the
+    # welcome banner (`Tip:`) scrolls off.
     state="?"
     if   printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then state="LIMITED"
     elif printf '%s' "$cap" | grep -qF "Starting MCP"; then state="STARTING"
@@ -589,6 +600,7 @@ cmd_status() {
     elif printf '%s' "$cap" | grep -qF "Pursuing goal"; then state="WORKING"
     elif printf '%s' "$cap" | grep -qF "Working"; then state="WORKING"
     elif printf '%s' "$cap" | grep -qF "$READY_PATTERN"; then state="READY"
+    elif printf '%s' "$cap" | grep -qE "gpt-[0-9]"; then state="READY"
     fi
     tail=$(printf '%s' "$cap" | grep -v '^$' | tail -1 | tr -s ' \t' ' ' | head -c 60)
     printf '%-5s %-12s %-12s %s\n' "${PANE_IDX[$i]}" "$label" "$state" "$tail"
