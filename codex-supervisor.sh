@@ -183,14 +183,18 @@ else:
     for r in range(rows):
         y = r * (ch + 1)
         rh = ch if r < rows - 1 else last_h
+        # When the last row is partial, its cells must still fill the full
+        # row width; otherwise tmux rejects the layout for not summing to
+        # the parent dimensions. So compute per-row cell widths.
+        cells_this_row = min(cols, N - r * cols)
+        avail_x_row = W - (cells_this_row - 1)
+        cw_row = avail_x_row // cells_this_row
+        last_w_row = avail_x_row - cw_row * (cells_this_row - 1)
         cells = []
-        for c in range(cols):
-            idx = r * cols + c
-            if idx >= N:
-                break
-            x = c * (cw + 1)
-            cwid = cw if c < cols - 1 else last_w
-            cells.append(cell(cwid, rh, x, y, panes[idx]))
+        for c in range(cells_this_row):
+            x = c * (cw_row + 1)
+            cwid = cw_row if c < cells_this_row - 1 else last_w_row
+            cells.append(cell(cwid, rh, x, y, panes[r * cols + c]))
         row_parts.append(f"{W}x{rh},0,{y}" + "{" + SEP.join(cells) + "}")
     body = f"{W}x{H},0,0[" + SEP.join(row_parts) + "]"
 
