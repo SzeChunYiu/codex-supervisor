@@ -173,7 +173,10 @@ main() {
   tmux select-layout -t "$SESSION:0" tiled >/dev/null
 
   # Capture actual pane indices in creation order (handles base-index ≠ 0 configs).
-  mapfile -t PANE_IDX < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}')
+  # Avoid `mapfile` -- it's bash 4+; macOS still ships bash 3.2 by default.
+  PANE_IDX=()
+  while IFS= read -r _idx; do PANE_IDX+=("$_idx"); done \
+    < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}')
   if (( ${#PANE_IDX[@]} != ${#PROMPTS[@]} )); then
     log "ERROR: pane count ${#PANE_IDX[@]} != prompt count ${#PROMPTS[@]}"
     exit 1
