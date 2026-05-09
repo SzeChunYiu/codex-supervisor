@@ -377,14 +377,33 @@ apply_pane_titles() {
   done
 }
 
-# Send a prompt to a pane with the codex-aware double-Enter sequence.
+# Send a prompt to a pane with the codex-aware double-Enter sequence,
+# then verify codex actually started processing it. If the input box still
+# looks idle (no Working/Pursuing) within ~10s, retry up to 2 more times.
+# Returns 0 on confirmed-active, 1 on give-up.
 send_prompt_to_pane() {
-  local target="$1" prompt="$2"
-  tmux send-keys -t "$target" "$prompt"
-  sleep 0.5
-  tmux send-keys -t "$target" Enter   # /-command popup eats this one
-  sleep 0.4
-  tmux send-keys -t "$target" Enter   # actual submit
+  local target="$1" prompt="$2" attempt cap
+  for attempt in 1 2 3; do
+    # Clear any stale input first so retries don't stack the prompt
+    tmux send-keys -t "$target" C-c 2>/dev/null
+    sleep 0.2
+    tmux send-keys -t "$target" "$prompt"
+    sleep 0.5
+    tmux send-keys -t "$target" Enter   # /-command popup eats this one
+    sleep 0.4
+    tmux send-keys -t "$target" Enter   # actual submit
+    # Verify within ~10s that codex started processing
+    local s
+    for ((s=1; s<=10; s++)); do
+      sleep 1
+      cap=$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -n 30)
+      if printf '%s' "$cap" | grep -qE "Pursuing goal|Working \(|Goal active"; then
+        return 0
+      fi
+    done
+    # No confirmation -- retry (up to 3 attempts total)
+  done
+  return 1
 }
 
 # Wait for a pane to become ready, then send its prompt.
@@ -403,8 +422,11 @@ wait_ready_and_send() {
         log "[pane $i ${LANE_LABELS[$i]}] state regressed during settle, re-waiting"
         continue
       fi
-      send_prompt_to_pane "$target" "$prompt"
-      log "[pane $i ${LANE_LABELS[$i]}] sent: $(printf '%.80s' "$prompt")..."
+      if send_prompt_to_pane "$target" "$prompt"; then
+        log "[pane $i ${LANE_LABELS[$i]}] sent + verified active: $(printf '%.60s' "$prompt")..."
+      else
+        log "[pane $i ${LANE_LABELS[$i]}] sent but UNCONFIRMED (retries exhausted): $(printf '%.60s' "$prompt")..."
+      fi
       return 0
     fi
     sleep 2
