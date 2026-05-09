@@ -59,6 +59,10 @@ LIMIT_PATTERN="You've hit your usage limit"
 # never sees the full string. `Tip: ` always sits at column 2 of the help line
 # that codex prints once it's ready for input.
 READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
+# Substring that must be ABSENT for the pane to be considered ready -- codex
+# shows "Starting MCP servers" while MCP plugins are loading, and during that
+# window keystrokes can be silently lost.
+NOT_READY_PATTERN="${CODEX_SUPERVISOR_NOT_READY:-Starting MCP}"
 LIMIT_HITS_BEFORE_KILL="${CODEX_SUPERVISOR_HITS:-3}"
 LOG_FILE="${CODEX_SUPERVISOR_LOG:-$HOME/codex-supervisor.log}"
 AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
@@ -188,10 +192,16 @@ print(f"{csum:x},{body}")
 }
 
 wait_ready_and_send() {
-  local i=$1 prompt=$2 target s
+  local i=$1 prompt=$2 target s cap
   target=$(pane_target "$i")
+  # Codex shows the welcome banner (with `Tip: ...`) BEFORE it starts loading
+  # MCP servers, and during that pre-MCP window keystrokes can be silently
+  # swallowed. Require both: Tip line visible (welcome rendered) AND no
+  # "Starting MCP" line (MCP server load complete).
   for ((s=1; s<=READY_TIMEOUT; s++)); do
-    if tmux capture-pane -t "$target" -p 2>/dev/null | grep -qF "$READY_PATTERN"; then
+    cap=$(tmux capture-pane -t "$target" -p 2>/dev/null)
+    if printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
+       && ! printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
       log "[pane $i] ready after ${s}s"
       tmux send-keys -t "$target" "$prompt"
       sleep 0.5
