@@ -58,7 +58,12 @@ SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
 # process per configured MCP server (~14-17 typical), which costs ~500MB
 # RAM and 60-180s of startup time per pane. Lanes do not need MCP servers
 # for git/gh/npm/build work -- those go through codex's built-in shell tool.
-DISABLE_MCP="${CODEX_SUPERVISOR_DISABLE_MCP:-1}"
+# Default OFF: codex's `-c mcp_servers={}` only merges (does not replace),
+# so MCP servers still attempt to load and time out instead of being skipped.
+# That actually leaves orphaned node processes around. To genuinely disable
+# MCPs, edit ~/.codex/config.toml and remove (or set startup_timeout_sec=1
+# on) the [mcp_servers.*] blocks you don't want.
+DISABLE_MCP="${CODEX_SUPERVISOR_DISABLE_MCP:-0}"
 if [[ -n "${CODEX_SUPERVISOR_CMD:-}" ]]; then
   CODEX_CMD="$CODEX_SUPERVISOR_CMD"
 elif (( DISABLE_MCP )); then
@@ -460,6 +465,26 @@ populate_pane_idx_from_running() {
 cleanup_session() {
   log "shutting down session '$SESSION'"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
+  # Sweep up any MCP child processes that were re-parented to PID 1 when
+  # their codex exited. These don't auto-die when codex dies; without this
+  # they leak ~100-300MB each across many node processes.
+  reap_orphan_mcps
+}
+
+# Kill any orphaned MCP node processes (parent PID == 1 and the command
+# matches typical MCP-server invocations). Safe: only orphans are killed.
+reap_orphan_mcps() {
+  local pids n=0
+  pids=$(ps -axo pid,ppid,command \
+    | awk '$2==1 && /node.*\b(mcp|context7|figma|notion|playwright|macos-tools|sequential-thinking|memory-mcp|openalex|arxiv|semanticscholar|filesystem-mcp|github-mcp|token-savior)\b/ {print $1}')
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null && n=$((n+1))
+  done
+  # Also npm exec wrappers that linger
+  for pid in $(ps -axo pid,ppid,command | awk '$2==1 && /npm exec/ {print $1}'); do
+    kill -TERM "$pid" 2>/dev/null && n=$((n+1))
+  done
+  (( n > 0 )) && log "reap_orphan_mcps: killed $n orphan process(es)"
 }
 
 # ---------------------------------------------------------------------------
@@ -535,11 +560,14 @@ cmd_start() {
 }
 
 cmd_stop() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "no session '$SESSION' running"; return 0
-  fi
+  local was_running=0
+  tmux has-session -t "$SESSION" 2>/dev/null && was_running=1
   cleanup_session
-  echo "stopped session '$SESSION'"
+  if (( was_running )); then
+    echo "stopped session '$SESSION' and reaped orphan MCP children"
+  else
+    echo "no session '$SESSION' running; reaped any leftover MCP orphans"
+  fi
 }
 
 cmd_status() {
