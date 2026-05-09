@@ -86,6 +86,14 @@ LOG_FILE="${CODEX_SUPERVISOR_LOG:-$HOME/codex-supervisor.log}"
 AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
 AUTO_RESEND="${CODEX_SUPERVISOR_AUTO_RESEND:-1}"
 RESEND_GRACE_SECS="${CODEX_SUPERVISOR_RESEND_GRACE:-30}"
+# What to do when a pane shows "Goal achieved" and stays idle past grace.
+#   queue       - pop next line from codex-tasks/<lane>.txt; if empty, rest. (default)
+#   queue-redo  - pop next line from queue; if empty, resend original prompt.
+#   redo        - always resend the original prompt.
+#   rest        - leave the pane idle.
+ON_COMPLETE="${CODEX_SUPERVISOR_ON_COMPLETE:-queue}"
+# Where per-lane task queues live. Auto-discovered: ./codex-tasks/ then ~/codex-tasks/.
+TASKS_DIR="${CODEX_SUPERVISOR_TASKS_DIR:-}"
 PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
 
 # ---------------------------------------------------------------------------
@@ -268,7 +276,11 @@ apply_tmux_config() {
   tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
   tmux set-option -t "$SESSION" -g pane-active-border-style 'fg=default' >/dev/null 2>&1 || true
   tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g pane-border-format ' #[bold]##{pane_index} #{?pane_title,#{pane_title},} ' >/dev/null 2>&1 || true
+  # Format: ' [bold]<pane_index> · <pane_title> '. In tmux format strings,
+  # `#{...}` is an expansion; `##` is a literal `#`. Earlier this was
+  # `##{pane_index}` which rendered the literal text `{pane_index}` instead
+  # of the index value.
+  tmux set-option -t "$SESSION" -g pane-border-format ' #[bold]#{pane_index} · #{?pane_title,#{pane_title},} ' >/dev/null 2>&1 || true
   tmux set-option -t "$SESSION" -g escape-time 50 >/dev/null 2>&1 || true
   # Mouse: click to focus, drag to resize, scroll to scroll back.
   tmux set-option -t "$SESSION" -g mouse on >/dev/null 2>&1 || true
@@ -435,24 +447,44 @@ check_pane() {
     LIMIT_STREAK[$i]=0
   fi
 
-  # Goal-completion auto-resend
-  if (( AUTO_RESEND )); then
+  # Goal-completion handling. Modes (ON_COMPLETE):
+  #   queue       - pop next from codex-tasks/<lane>.txt; if empty, rest
+  #   queue-redo  - pop next from queue; if empty, resend original prompt
+  #   redo        - always resend original
+  #   rest        - leave idle
+  if (( AUTO_RESEND )) && [[ "$ON_COMPLETE" != "rest" ]]; then
     if printf '%s' "$cap" | grep -qiE "Goal (achieved|complete|reached)"; then
-      # First time we see it, mark; on later check, if still idle past grace, resend.
       if (( ${LAST_GOAL_DONE[$i]:-0} == 0 )); then
         LAST_GOAL_DONE[$i]=$now
-        log "[pane $i ${LANE_LABELS[$i]}] goal achieved; auto-resend in ${RESEND_GRACE_SECS}s if still idle"
+        log "[pane $i ${LANE_LABELS[$i]}] goal achieved; on-complete=$ON_COMPLETE in ${RESEND_GRACE_SECS}s"
       else
         local idle=$(( now - LAST_GOAL_DONE[$i] ))
         if (( idle >= RESEND_GRACE_SECS )); then
-          # Confirm not actively working before resending
-          if ! printf '%s' "$cap" | grep -qF "Working" \
-             && ! printf '%s' "$cap" | grep -qF "Pursuing goal"; then
-            log "[pane $i ${LANE_LABELS[$i]}] auto-resending prompt for next iteration"
-            send_prompt_to_pane "$target" "$prompt"
-            LAST_GOAL_DONE[$i]=0
+          # Reset BEFORE deciding to avoid re-firing if the action takes time
+          LAST_GOAL_DONE[$i]=0
+          # Skip if pane has gotten busy again in the meantime
+          if printf '%s' "$cap" | grep -qF "Working" \
+             || printf '%s' "$cap" | grep -qF "Pursuing goal"; then
+            return
+          fi
+          local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
+          case "$ON_COMPLETE" in
+            queue|queue-redo)
+              if next_task=$(pop_next_task "$lane") && [[ -n "$next_task" ]]; then
+                sent_label="next from queue"
+              elif [[ "$ON_COMPLETE" == "queue-redo" ]]; then
+                next_task="$prompt"; sent_label="redo (queue empty)"
+              fi
+              ;;
+            redo)
+              next_task="$prompt"; sent_label="redo"
+              ;;
+          esac
+          if [[ -n "$next_task" ]]; then
+            log "[pane $i $lane] sending $sent_label: $(printf '%.60s' "$next_task")..."
+            send_prompt_to_pane "$target" "$next_task"
           else
-            LAST_GOAL_DONE[$i]=0  # actually working again, reset
+            log "[pane $i $lane] resting (no queued task)"
           fi
         fi
       fi
@@ -467,6 +499,37 @@ populate_pane_idx_from_running() {
   PANE_IDX=()
   while IFS= read -r _idx; do PANE_IDX+=("$_idx"); done \
     < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}' 2>/dev/null)
+}
+
+resolve_tasks_dir() {
+  [[ -n "$TASKS_DIR" ]] && return 0
+  if   [[ -d "./codex-tasks" ]]; then TASKS_DIR="./codex-tasks"
+  elif [[ -d "$HOME/codex-tasks" ]]; then TASKS_DIR="$HOME/codex-tasks"
+  fi
+}
+
+# Pop the first non-blank, non-comment line from the lane's queue file and
+# echo it to stdout. Removes the line from the file (atomic via tmp+mv).
+# Returns 0 if a task was popped, 1 if queue was empty/missing.
+pop_next_task() {
+  local lane="$1"
+  resolve_tasks_dir
+  [[ -n "$TASKS_DIR" && -d "$TASKS_DIR" ]] || return 1
+  local file="$TASKS_DIR/${lane}.txt"
+  [[ -f "$file" ]] || return 1
+  # Find first non-blank, non-comment line
+  local task line_no=0 found=0
+  while IFS= read -r line; do
+    line_no=$((line_no + 1))
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    task="$line"
+    found=1
+    break
+  done < "$file"
+  (( found )) || return 1
+  # Remove that specific line, preserving the rest verbatim
+  awk -v ln="$line_no" 'NR != ln' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  printf '%s' "$task"
 }
 
 cleanup_session() {
