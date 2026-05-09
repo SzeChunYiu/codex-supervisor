@@ -503,20 +503,74 @@ cmd_help() {
 }
 
 cmd_start() {
-  local attach_after=1
+  local attach_after=1 daemon_mode=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-attach) attach_after=0; shift ;;
       --prompts)   PROMPTS_FILE="$2"; shift 2 ;;
       --session)   SESSION="$2"; shift 2 ;;
+      --daemon)    daemon_mode=1; shift ;;   # internal: do the actual work
       *) err "start: unknown arg $1"; return 1 ;;
     esac
   done
 
-  command -v tmux  >/dev/null || { err "tmux not on PATH";  exit 1; }
+  # If we're invoked with --daemon, skip the launcher fork and just run.
+  if (( daemon_mode )); then
+    _start_supervisor_main
+    return
+  fi
+
+  command -v tmux >/dev/null || { err "tmux not on PATH"; exit 1; }
   local first_word; first_word=$(awk '{print $1}' <<<"$CODEX_CMD")
   command -v "$first_word" >/dev/null || { err "$first_word not on PATH"; exit 1; }
 
+  # Don't double-launch: if a session of this name is already up, just attach.
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    log "session '$SESSION' already running; attaching"
+  else
+    # Fork ourselves as a background daemon. nohup + &  + disown means the
+    # daemon survives even when the launcher window closes. Pass --daemon so
+    # the forked invocation skips this branch and runs _start_supervisor_main.
+    local fork_args=("start" "--daemon" "--session" "$SESSION")
+    [[ -n "$PROMPTS_FILE" ]] && fork_args+=("--prompts" "$PROMPTS_FILE")
+    log "forking supervisor daemon..."
+    nohup bash "$0" "${fork_args[@]}" >/dev/null 2>&1 &
+    disown $!
+
+    # Wait for the daemon to spin the tmux session up.
+    local i
+    for ((i=0; i<60; i++)); do
+      tmux has-session -t "$SESSION" 2>/dev/null && break
+      sleep 1
+    done
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      err "daemon did not bring up session within 60s; check $LOG_FILE"
+      exit 1
+    fi
+  fi
+
+  if (( ! attach_after )); then
+    echo "session '$SESSION' running in background; attach: tmux attach -t $SESSION"
+    return 0
+  fi
+
+  # Single window: replace this launcher with `tmux attach`. The daemon
+  # keeps running independently, so detaching (Ctrl+b d) or closing the
+  # window does not stop the supervisor.
+  if [[ -t 0 && -t 1 ]]; then
+    exec tmux attach -t "$SESSION"
+  fi
+  # Non-TTY launcher (e.g. invoked from another script): open a terminal.
+  if (( AUTO_OPEN_TERMINAL )); then
+    open_terminal_attached \
+      || echo "attach: tmux attach -t $SESSION"
+  else
+    echo "attach: tmux attach -t $SESSION"
+  fi
+}
+
+# The actual supervisor body, run by the daemon child.
+_start_supervisor_main() {
   load_prompts
   trap 'cleanup_session; exit 0' INT TERM
 
@@ -541,16 +595,6 @@ cmd_start() {
   apply_even_grid
   apply_pane_titles
 
-  if (( attach_after && AUTO_OPEN_TERMINAL )); then
-    if open_terminal_attached; then
-      log "opened terminal attached to '$SESSION'"
-    else
-      log "auto-open unavailable; attach manually: tmux attach -t $SESSION"
-    fi
-  else
-    log "attach manually: tmux attach -t $SESSION"
-  fi
-
   for i in "${!PROMPTS[@]}"; do
     LIMIT_STREAK[$i]=0; LAST_RESPAWN[$i]=0; LAST_GOAL_DONE[$i]=0
     ( wait_ready_and_send "$i" "${PROMPTS[$i]}" ) &
@@ -560,6 +604,11 @@ cmd_start() {
 
   while true; do
     sleep "$POLL_INTERVAL"
+    # If the tmux session is gone (e.g. user ran `stop`), exit cleanly.
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      log "tmux session disappeared; daemon exiting"
+      exit 0
+    fi
     for i in "${!PROMPTS[@]}"; do
       check_pane "$i" "${PROMPTS[$i]}"
     done
