@@ -1,145 +1,208 @@
 #!/usr/bin/env bash
-# codex-supervisor.sh -- run multiple codex CLI sessions in parallel tmux panes,
-# auto-send a per-pane prompt once each session is ready, and respawn any pane
-# whose codex hits the usage limit so the prompt resumes after the reset window.
+# codex-supervisor -- run multiple codex CLI sessions in parallel tmux panes.
 #
-# Architecture: ONE tmux session, ONE window, N tiled panes -- one pane per
-# prompt. All panes are visible simultaneously when attached. On startup the
-# script auto-opens Terminal.app attached to the session (configurable).
+# Single tmux session, single window, N tiled panes -- one pane per prompt.
+# Auto-sends each prompt once its pane is ready, respawns panes whose codex
+# hits the usage limit, auto-resends prompts when a /goal completes, and
+# applies an even MxN grid layout so cells stay equal.
 #
-# Per pane: launch codex, wait for the ready marker, send the prompt verbatim
-# (with a double-Enter so a slash-command popup doesn't eat the submit). A
-# poll loop checks each pane every POLL_INTERVAL seconds for the usage-limit
-# message; LIMIT_HITS_BEFORE_KILL consecutive hits respawns that pane (fresh
-# codex) and resends its prompt. Pane index/layout are preserved across
-# respawns via `tmux respawn-pane -k`.
+# Subcommands:
+#   start [--no-attach]       launch the session (default if no subcommand)
+#   stop                      kill the session and all panes
+#   status                    print pane states (lane, state, last activity)
+#   attach                    attach (or open a terminal attached) to the session
+#   logs [-f]                 show or tail the supervisor log
+#   send <pane> <text>        send text to a specific pane (handles /-command popup)
+#   restart <pane>            respawn one pane with a fresh codex
+#   relayout                  re-apply the equal MxN grid (use after window resize)
+#   prompts                   print the resolved prompts file
+#   help                      this help text
 #
-# Usage:
-#   codex-supervisor.sh [--prompts <file>] [--session <name>] [--no-open]
+# Run without a subcommand to start (legacy behavior).
 #
-# Prompts file: one prompt per line. Blank lines and lines starting with `#`
-# are ignored. Each non-empty line is sent verbatim to its codex pane, so
-# include the `/goal ` (or any other slash command) prefix yourself if you
-# want it.
+# Pane controls (inside the attached tmux):
+#   Mouse:  click pane to focus, drag border to resize, scroll to scroll back.
+#   Alt+0 .. Alt+9                jump to pane 0..9
+#   Ctrl+b z                      zoom focused pane fullscreen / restore
+#   Ctrl+b d                      detach without killing
+#   Ctrl+b [   then q             scroll mode in/out
 #
-# Discovery order for the prompts file:
-#   1. --prompts <path> CLI flag
-#   2. CODEX_SUPERVISOR_PROMPTS env var
-#   3. ./codex-prompts.txt in the current directory
-#   4. ~/codex-prompts.txt
-#
-# Environment overrides (all optional):
-#   CODEX_SUPERVISOR_PROMPTS       prompts file path
-#   CODEX_SUPERVISOR_SESSION       tmux session name (default codex-supervisor)
-#   CODEX_SUPERVISOR_CMD           codex command (default `codex --dangerously-bypass-approvals-and-sandbox`)
-#   CODEX_SUPERVISOR_POLL          seconds between limit checks (default 30)
-#   CODEX_SUPERVISOR_READY_TIMEOUT seconds to wait for Ready (default 180)
-#   CODEX_SUPERVISOR_READY         ready marker substring (default `Ready · Context`)
-#   CODEX_SUPERVISOR_LIMIT         usage-limit substring (default `You've hit your usage limit`)
-#   CODEX_SUPERVISOR_HITS          consecutive limit polls before respawn (default 3)
-#   CODEX_SUPERVISOR_LOG           log file path (default ~/codex-supervisor.log)
-#   CODEX_SUPERVISOR_OPEN          1 = auto-open Terminal.app, 0 = print attach hint
-#
-# Stop everything: Ctrl+C in the supervisor terminal (kills tmux session + panes).
-# Detach without killing (from inside the attached tmux): Ctrl+b then d.
-# Cycle pane focus: Ctrl+b then o.   Zoom one pane fullscreen: Ctrl+b then z.
+# Configuration (all env vars, all overridable):
+#   CODEX_SUPERVISOR_PROMPTS         prompts file path
+#                                    (auto-discovers ./codex-prompts.txt then ~/codex-prompts.txt)
+#   CODEX_SUPERVISOR_SESSION         tmux session name (default: codex-supervisor)
+#   CODEX_SUPERVISOR_CMD             codex command (default: codex --dangerously-bypass-approvals-and-sandbox)
+#   CODEX_SUPERVISOR_POLL            seconds between health checks (default: 60)
+#   CODEX_SUPERVISOR_READY_TIMEOUT   seconds to wait for Ready (default: 600)
+#   CODEX_SUPERVISOR_READY           ready-marker substring (default: "Tip: ")
+#   CODEX_SUPERVISOR_NOT_READY       must-be-absent substring (default: "Starting MCP")
+#   CODEX_SUPERVISOR_READY_SETTLE    seconds to settle after first Ready (default: 5)
+#   CODEX_SUPERVISOR_LIMIT           usage-limit substring (default: "You've hit your usage limit")
+#   CODEX_SUPERVISOR_HITS            consecutive limit polls before respawn (default: 3)
+#   CODEX_SUPERVISOR_RESPAWN_COOLDOWN  per-pane respawn cooldown secs (default: 300)
+#   CODEX_SUPERVISOR_CAPTURE_LINES   tail size for capture-pane scans (default: 80)
+#   CODEX_SUPERVISOR_LOG             log file path (default: ~/codex-supervisor.log)
+#   CODEX_SUPERVISOR_OPEN            1 = auto-open terminal, 0 = print attach hint (default: 1)
+#   CODEX_SUPERVISOR_AUTO_RESEND     1 = auto-resend prompt when /goal completes, 0 = stay idle (default: 1)
+#   CODEX_SUPERVISOR_RESEND_GRACE    seconds idle after Goal achieved before resend (default: 30)
 
 set -u
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
 CODEX_CMD="${CODEX_SUPERVISOR_CMD:-codex --dangerously-bypass-approvals-and-sandbox}"
 POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-60}"
-# Per-pane respawn cooldown -- after a respawn, ignore further limit hits for
-# this many seconds. Prevents thrashing the system with back-to-back MCP
-# server reloads when a pane is in a sustained error/limit state.
-RESPAWN_COOLDOWN_SECS="${CODEX_SUPERVISOR_RESPAWN_COOLDOWN:-300}"
-# Bytes/lines of pane scrollback to inspect per check. Codex's status bar
-# is always at the bottom; capturing the full pane (~30KB) is wasteful.
-CAPTURE_TAIL_LINES="${CODEX_SUPERVISOR_CAPTURE_LINES:-80}"
 READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-600}"
-# Default contains an apostrophe -- can't put it inside ${VAR:-...} (the
-# apostrophe opens an unbalanced single-quoted region in parameter expansion).
+READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
+NOT_READY_PATTERN="${CODEX_SUPERVISOR_NOT_READY:-Starting MCP}"
+READY_SETTLE_SECS="${CODEX_SUPERVISOR_READY_SETTLE:-5}"
+# Apostrophe-bearing default can't go in ${VAR:-...} form.
 LIMIT_PATTERN="You've hit your usage limit"
 [[ -n "${CODEX_SUPERVISOR_LIMIT:-}" ]] && LIMIT_PATTERN="$CODEX_SUPERVISOR_LIMIT"
-# Default `Tip: ` rather than `Ready · Context` -- the latter gets visually
-# truncated by codex when a pane is narrower than ~50 columns, so capture-pane
-# never sees the full string. `Tip: ` always sits at column 2 of the help line
-# that codex prints once it's ready for input.
-READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
-# Substring that must be ABSENT for the pane to be considered ready -- codex
-# shows "Starting MCP servers" while MCP plugins are loading, and during that
-# window keystrokes can be silently lost.
-NOT_READY_PATTERN="${CODEX_SUPERVISOR_NOT_READY:-Starting MCP}"
-# After the ready condition is first met, wait this long for the input handler
-# to fully attach, then re-verify the ready condition before sending. Codex's
-# UI sometimes flips back to "Starting" briefly even after Tip first appears.
-READY_SETTLE_SECS="${CODEX_SUPERVISOR_READY_SETTLE:-5}"
 LIMIT_HITS_BEFORE_KILL="${CODEX_SUPERVISOR_HITS:-3}"
+RESPAWN_COOLDOWN_SECS="${CODEX_SUPERVISOR_RESPAWN_COOLDOWN:-300}"
+CAPTURE_TAIL_LINES="${CODEX_SUPERVISOR_CAPTURE_LINES:-80}"
 LOG_FILE="${CODEX_SUPERVISOR_LOG:-$HOME/codex-supervisor.log}"
 AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
+AUTO_RESEND="${CODEX_SUPERVISOR_AUTO_RESEND:-1}"
+RESEND_GRACE_SECS="${CODEX_SUPERVISOR_RESEND_GRACE:-30}"
 PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
 
-usage() {
-  sed -n '2,46p' "$0"
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+    | tee -a "$LOG_FILE" >&2
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --prompts)  PROMPTS_FILE="$2"; shift 2 ;;
-    --session)  SESSION="$2"; shift 2 ;;
-    --no-open)  AUTO_OPEN_TERMINAL=0; shift ;;
-    -h|--help)  usage; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
-  esac
-done
+err() { echo "error: $*" >&2; }
 
-# Discover prompts file if not set explicitly.
-if [[ -z "$PROMPTS_FILE" ]]; then
+# Discover the prompts file across CLI / env / cwd / home.
+resolve_prompts_file() {
+  if [[ -n "$PROMPTS_FILE" ]]; then return 0; fi
   if   [[ -f "./codex-prompts.txt" ]]; then PROMPTS_FILE="./codex-prompts.txt"
   elif [[ -f "$HOME/codex-prompts.txt" ]]; then PROMPTS_FILE="$HOME/codex-prompts.txt"
   fi
-fi
-
-[[ -n "$PROMPTS_FILE" && -f "$PROMPTS_FILE" ]] || {
-  echo "prompts file not found." >&2
-  echo "use --prompts <file>, set CODEX_SUPERVISOR_PROMPTS, or create ./codex-prompts.txt" >&2
-  exit 1
 }
 
-# One prompt per non-blank, non-comment line.
+# Load prompts and lane labels from the prompts file.
+# Sets PROMPTS array (one prompt per non-blank, non-comment line) and LANE_LABELS
+# (best-effort lane name extracted from each prompt for pane border titles).
 declare -a PROMPTS=()
-while IFS= read -r line; do
-  [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-  PROMPTS+=("$line")
-done < "$PROMPTS_FILE"
+declare -a LANE_LABELS=()
+load_prompts() {
+  resolve_prompts_file
+  if [[ -z "$PROMPTS_FILE" || ! -f "$PROMPTS_FILE" ]]; then
+    err "prompts file not found"
+    err "use --prompts <file>, set CODEX_SUPERVISOR_PROMPTS, or create ./codex-prompts.txt"
+    exit 1
+  fi
+  PROMPTS=(); LANE_LABELS=()
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    PROMPTS+=("$line")
+    # Best-effort lane label: prefer "lane FOO" / "lane: FOO" / "[FOO]" / first quoted word
+    local label=""
+    if   [[ "$line" =~ lane[[:space:]]+([A-Za-z0-9_-]+) ]]; then label="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ \[([^]]+)\] ]]; then label="${BASH_REMATCH[1]}"
+    else label="pane$((${#LANE_LABELS[@]}))"
+    fi
+    LANE_LABELS+=("$label")
+  done < "$PROMPTS_FILE"
+  if (( ${#PROMPTS[@]} == 0 )); then
+    err "no prompts found in $PROMPTS_FILE"; exit 1
+  fi
+}
 
-(( ${#PROMPTS[@]} > 0 )) || { echo "no prompts found in $PROMPTS_FILE" >&2; exit 1; }
+# Per-pane state used by `start` / poll loop.
+# Plain indexed arrays (bash 3.2-compatible: macOS ships 3.2 by default,
+# which lacks `declare -A`). Pane index is integer so indexed arrays suffice.
+PANE_IDX=()
+LIMIT_STREAK=()
+LAST_RESPAWN=()
+LAST_GOAL_DONE=()  # epoch seconds when a "Goal achieved" was first seen per pane
 
-# ----------------------------------------------------------------------------
-# implementation
-# ----------------------------------------------------------------------------
-
-log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE" >&2; }
-
-declare -a PANE_IDX=()
-declare -A LIMIT_STREAK=()
-declare -A LAST_RESPAWN=()  # epoch seconds of last respawn per pane
-
-# Cheap pane snapshot: tail-bounded, single capture-pane call.
+# Bounded pane snapshot -- single capture-pane call, last N lines only.
 capture_tail() {
   tmux capture-pane -t "$1" -p 2>/dev/null | tail -n "$CAPTURE_TAIL_LINES"
 }
 
 pane_target() { printf '%s:0.%d' "$SESSION" "${PANE_IDX[$1]}"; }
 
-# Force an even MxN grid so cells are equal (tmux's `tiled` algorithm gives
-# the last row extra height when N isn't a perfect square -- e.g. N=8 in a
-# 3-col layout leaves 2 cells in the bottom row that get the row's full
-# height, making them taller than the 6 cells above).
-apply_even_grid() {
-  local n=${#PROMPTS[@]} session=$1 cols rows W H
-  read W H < <(tmux display-message -p -t "$session:0" '#{window_width} #{window_height}')
+# Resolve a user-supplied pane reference (numeric index or lane label) to
+# a tmux pane index. Echoes the index on stdout, returns 0 on success.
+resolve_pane() {
+  local ref="$1" i
+  if [[ "$ref" =~ ^[0-9]+$ ]]; then
+    for i in "${!PANE_IDX[@]}"; do
+      [[ "${PANE_IDX[$i]}" == "$ref" ]] && { echo "$i"; return 0; }
+    done
+    return 1
+  fi
+  for i in "${!LANE_LABELS[@]}"; do
+    if [[ "${LANE_LABELS[$i],,}" == "${ref,,}" ]]; then echo "$i"; return 0; fi
+  done
+  return 1
+}
 
+# Cross-platform: open the tmux session in a new terminal window.
+open_terminal_attached() {
+  local cmd="tmux attach -t $SESSION"
+  case "$(uname -s)" in
+    Darwin)
+      if command -v osascript >/dev/null 2>&1; then
+        osascript \
+          -e "tell application \"Terminal\" to do script \"$cmd\"" \
+          -e 'tell application "Terminal" to activate' >/dev/null 2>&1 \
+          && return 0
+      fi
+      ;;
+    Linux)
+      for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal alacritty kitty wezterm xterm; do
+        if command -v "$term" >/dev/null 2>&1; then
+          case "$term" in
+            gnome-terminal) "$term" -- bash -lc "$cmd" >/dev/null 2>&1 & return 0 ;;
+            konsole)        "$term" -e bash -lc "$cmd" >/dev/null 2>&1 & return 0 ;;
+            *)              "$term" -e "bash -lc '$cmd'" >/dev/null 2>&1 & return 0 ;;
+          esac
+        fi
+      done
+      ;;
+  esac
+  return 1
+}
+
+# Apply tmux configuration to make the session easy to control.
+apply_tmux_config() {
+  # Cosmetic + speed
+  tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-active-border-style 'fg=default' >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-border-status top >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g pane-border-format ' #[bold]##{pane_index} #{?pane_title,#{pane_title},} ' >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" -g escape-time 50 >/dev/null 2>&1 || true
+  # Mouse: click to focus, drag to resize, scroll to scroll back.
+  tmux set-option -t "$SESSION" -g mouse on >/dev/null 2>&1 || true
+  # Alt+0..9 jump directly to a pane (no Ctrl+b prefix).
+  for n in 0 1 2 3 4 5 6 7 8 9; do
+    tmux bind-key -T root "M-$n" select-pane -t ":.$n" 2>/dev/null || true
+  done
+}
+
+# Build and apply an even MxN grid layout (equal cell sizes). Falls back
+# silently to tmux's default `tiled` if python3 is missing or layout is rejected.
+apply_even_grid() {
+  local n=${#PANE_IDX[@]} cols rows W H
+  if (( n == 0 )); then return; fi
+  if ! command -v python3 >/dev/null; then
+    tmux select-layout -t "$SESSION:0" tiled >/dev/null 2>&1 || true
+    return
+  fi
+  read W H < <(tmux display-message -p -t "$SESSION:0" '#{window_width} #{window_height}')
   case $n in
     1)        cols=1 ;;
     2)        cols=2 ;;
@@ -162,10 +225,6 @@ cols = int(os.environ["LAYOUT_COLS"])
 rows = int(os.environ["LAYOUT_ROWS"])
 panes = os.environ["LAYOUT_PANES"].split()
 SEP = ","
-
-avail_x = W - (cols - 1)
-cw = avail_x // cols
-last_w = avail_x - cw * (cols - 1)
 avail_y = H - (rows - 1)
 ch = avail_y // rows
 last_h = avail_y - ch * (rows - 1)
@@ -176,6 +235,9 @@ def cell(w, h, x, y, pid):
 if N == 1:
     body = f"{W}x{H},0,0,{panes[0]}"
 elif rows == 1:
+    avail_x = W - (cols - 1)
+    cw = avail_x // cols
+    last_w = avail_x - cw * (cols - 1)
     parts = [cell(cw if c < cols - 1 else last_w, H, c * (cw + 1), 0, panes[c]) for c in range(N)]
     body = f"{W}x{H},0,0" + "{" + SEP.join(parts) + "}"
 else:
@@ -183,9 +245,6 @@ else:
     for r in range(rows):
         y = r * (ch + 1)
         rh = ch if r < rows - 1 else last_h
-        # When the last row is partial, its cells must still fill the full
-        # row width; otherwise tmux rejects the layout for not summing to
-        # the parent dimensions. So compute per-row cell widths.
         cells_this_row = min(cols, N - r * cols)
         avail_x_row = W - (cells_this_row - 1)
         cw_row = avail_x_row // cells_this_row
@@ -203,137 +262,192 @@ for c in body.encode():
     csum = ((csum >> 1) | ((csum & 1) << 15)) & 0xFFFF
     csum = (csum + c) & 0xFFFF
 print(f"{csum:x},{body}")
-') || { log "apply_even_grid: python3 failed, leaving tiled layout in place"; return 1; }
+') || { log "apply_even_grid: python3 failed, leaving tiled in place"; tmux select-layout -t "$SESSION:0" tiled >/dev/null 2>&1; return; }
 
-  if tmux select-layout -t "$session:0" "$body" >/dev/null 2>&1; then
+  if tmux select-layout -t "$SESSION:0" "$body" >/dev/null 2>&1; then
     log "applied even ${cols}x${rows} grid for $n panes"
   else
-    log "apply_even_grid: select-layout rejected layout, leaving tiled in place"
+    log "apply_even_grid: select-layout rejected layout, using tiled"
+    tmux select-layout -t "$SESSION:0" tiled >/dev/null 2>&1
   fi
 }
 
+# Set each pane's border title to its lane label (visible on attached client).
+apply_pane_titles() {
+  local i
+  for i in "${!PANE_IDX[@]}"; do
+    tmux select-pane -t "$(pane_target "$i")" -T "${LANE_LABELS[$i]}" >/dev/null 2>&1 || true
+  done
+}
+
+# Send a prompt to a pane with the codex-aware double-Enter sequence.
+send_prompt_to_pane() {
+  local target="$1" prompt="$2"
+  tmux send-keys -t "$target" "$prompt"
+  sleep 0.5
+  tmux send-keys -t "$target" Enter   # /-command popup eats this one
+  sleep 0.4
+  tmux send-keys -t "$target" Enter   # actual submit
+}
+
+# Wait for a pane to become ready, then send its prompt.
 wait_ready_and_send() {
   local i=$1 prompt=$2 target s cap
   target=$(pane_target "$i")
-  # Codex shows the welcome banner (with `Tip: ...`) BEFORE it starts loading
-  # MCP servers, and during that pre-MCP window keystrokes can be silently
-  # swallowed. Require both: Tip line visible (welcome rendered) AND no
-  # "Starting MCP" line (MCP server load complete). Then wait READY_SETTLE_SECS
-  # and re-verify before sending -- the input handler attaches a beat after
-  # MCP completes, and codex can briefly flip back to a transitional state.
   for ((s=2; s<=READY_TIMEOUT; s+=2)); do
     cap=$(capture_tail "$target")
     if printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
        && ! printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
-      log "[pane $i] ready candidate after ${s}s, settling for ${READY_SETTLE_SECS}s..."
+      log "[pane $i ${LANE_LABELS[$i]}] ready candidate after ${s}s, settling for ${READY_SETTLE_SECS}s..."
       sleep "$READY_SETTLE_SECS"
       cap=$(capture_tail "$target")
       if ! printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
          || printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
-        log "[pane $i] state regressed during settle, re-waiting"
+        log "[pane $i ${LANE_LABELS[$i]}] state regressed during settle, re-waiting"
         continue
       fi
-      tmux send-keys -t "$target" "$prompt"
-      sleep 0.5
-      tmux send-keys -t "$target" Enter   # slash-command popup eats this one
-      sleep 0.4
-      tmux send-keys -t "$target" Enter   # actual submit
-      log "[pane $i] sent after settle: $(printf '%.80s' "$prompt")..."
+      send_prompt_to_pane "$target" "$prompt"
+      log "[pane $i ${LANE_LABELS[$i]}] sent: $(printf '%.80s' "$prompt")..."
       return 0
     fi
     sleep 2
   done
-  log "[pane $i] ERROR: ready timeout (${READY_TIMEOUT}s)"
+  log "[pane $i ${LANE_LABELS[$i]}] ERROR: ready timeout (${READY_TIMEOUT}s)"
   return 1
 }
 
+# Per-pane health check called by the poll loop.
+# Detects: usage-limit hit (with cooldown-bounded respawn) and goal-completion
+# (with grace-bounded auto-resend).
 check_pane() {
   local i=$1 prompt=$2 target now since_last
   target=$(pane_target "$i")
-  if capture_tail "$target" | grep -qF "$LIMIT_PATTERN"; then
+  local cap; cap=$(capture_tail "$target")
+  now=$(date +%s)
+
+  # Usage limit handling
+  if printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then
     LIMIT_STREAK[$i]=$(( ${LIMIT_STREAK[$i]:-0} + 1 ))
-    log "[pane $i] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL}"
+    log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL}"
     if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then
-      now=$(date +%s)
       since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
       if (( since_last < RESPAWN_COOLDOWN_SECS )); then
-        log "[pane $i] cooldown active (last respawn ${since_last}s ago, need ${RESPAWN_COOLDOWN_SECS}s) -- skipping respawn, resetting streak"
+        log "[pane $i ${LANE_LABELS[$i]}] cooldown active (${since_last}s/${RESPAWN_COOLDOWN_SECS}s) -- skipping respawn"
         LIMIT_STREAK[$i]=0
         return
       fi
-      log "[pane $i] respawning with fresh codex + resending prompt"
+      log "[pane $i ${LANE_LABELS[$i]}] respawning + resending prompt"
       tmux respawn-pane -k -t "$target" "$CODEX_CMD"
       LAST_RESPAWN[$i]=$now
       LIMIT_STREAK[$i]=0
+      LAST_GOAL_DONE[$i]=0
       ( wait_ready_and_send "$i" "$prompt" ) &
     fi
-  else
-    if (( ${LIMIT_STREAK[$i]:-0} > 0 )); then
-      log "[pane $i] limit cleared, streak reset"
-    fi
+    return
+  fi
+  if (( ${LIMIT_STREAK[$i]:-0} > 0 )); then
+    log "[pane $i ${LANE_LABELS[$i]}] limit cleared, streak reset"
     LIMIT_STREAK[$i]=0
+  fi
+
+  # Goal-completion auto-resend
+  if (( AUTO_RESEND )); then
+    if printf '%s' "$cap" | grep -qiE "Goal (achieved|complete|reached)"; then
+      # First time we see it, mark; on later check, if still idle past grace, resend.
+      if (( ${LAST_GOAL_DONE[$i]:-0} == 0 )); then
+        LAST_GOAL_DONE[$i]=$now
+        log "[pane $i ${LANE_LABELS[$i]}] goal achieved; auto-resend in ${RESEND_GRACE_SECS}s if still idle"
+      else
+        local idle=$(( now - LAST_GOAL_DONE[$i] ))
+        if (( idle >= RESEND_GRACE_SECS )); then
+          # Confirm not actively working before resending
+          if ! printf '%s' "$cap" | grep -qF "Working" \
+             && ! printf '%s' "$cap" | grep -qF "Pursuing goal"; then
+            log "[pane $i ${LANE_LABELS[$i]}] auto-resending prompt for next iteration"
+            send_prompt_to_pane "$target" "$prompt"
+            LAST_GOAL_DONE[$i]=0
+          else
+            LAST_GOAL_DONE[$i]=0  # actually working again, reset
+          fi
+        fi
+      fi
+    else
+      LAST_GOAL_DONE[$i]=0
+    fi
   fi
 }
 
-cleanup() {
-  log "shutting down: killing session '$SESSION'"
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
-  exit 0
+# Populate PANE_IDX from a running tmux session (used by status / send / restart).
+populate_pane_idx_from_running() {
+  PANE_IDX=()
+  while IFS= read -r _idx; do PANE_IDX+=("$_idx"); done \
+    < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}' 2>/dev/null)
 }
-trap cleanup INT TERM
 
-main() {
-  command -v tmux  >/dev/null || { echo "tmux not on PATH"  >&2; exit 1; }
-  # Codex command is checked by attempting to launch; we only check the first word
-  # exists on PATH so aliases / flags pass through.
+cleanup_session() {
+  log "shutting down session '$SESSION'"
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_help() {
+  sed -n '2,30p' "$0"
+}
+
+cmd_start() {
+  local attach_after=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-attach) attach_after=0; shift ;;
+      --prompts)   PROMPTS_FILE="$2"; shift 2 ;;
+      --session)   SESSION="$2"; shift 2 ;;
+      *) err "start: unknown arg $1"; return 1 ;;
+    esac
+  done
+
+  command -v tmux  >/dev/null || { err "tmux not on PATH";  exit 1; }
   local first_word; first_word=$(awk '{print $1}' <<<"$CODEX_CMD")
-  command -v "$first_word" >/dev/null || { echo "$first_word not on PATH" >&2; exit 1; }
+  command -v "$first_word" >/dev/null || { err "$first_word not on PATH"; exit 1; }
+
+  load_prompts
+  trap 'cleanup_session; exit 0' INT TERM
 
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-
-  # Pane 0 from new-session, then one split per remaining prompt; tile after each.
   tmux new-session -d -s "$SESSION" -x 240 -y 70 "$CODEX_CMD"
-  # Render-cost reductions for the attached client:
-  #   - drop the bottom status bar (one less line redrawn per refresh)
-  #   - drop the green pane border highlight on the active pane (no extra paint when focus moves)
-  #   - widen escape-time so 8 codex renders don't fight tmux's input parser
-  tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g pane-active-border-style 'fg=default' >/dev/null 2>&1 || true
-  tmux set-option -t "$SESSION" -g escape-time 50 >/dev/null 2>&1 || true
+  apply_tmux_config
+
   local i
   for ((i=1; i<${#PROMPTS[@]}; i++)); do
     tmux split-window -t "$SESSION:0" "$CODEX_CMD"
     tmux select-layout -t "$SESSION:0" tiled >/dev/null
   done
-  tmux select-layout -t "$SESSION:0" tiled >/dev/null
 
-  # Capture actual pane indices in creation order (handles base-index ≠ 0 configs).
-  # Avoid `mapfile` -- it's bash 4+; macOS still ships bash 3.2 by default.
-  PANE_IDX=()
-  while IFS= read -r _idx; do PANE_IDX+=("$_idx"); done \
-    < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}')
+  populate_pane_idx_from_running
   if (( ${#PANE_IDX[@]} != ${#PROMPTS[@]} )); then
     log "ERROR: pane count ${#PANE_IDX[@]} != prompt count ${#PROMPTS[@]}"
     exit 1
   fi
-  log "tmux session '$SESSION' has ${#PROMPTS[@]} tiled panes (indices: ${PANE_IDX[*]})"
-  log "prompts loaded from: $PROMPTS_FILE"
+  log "session '$SESSION': ${#PROMPTS[@]} panes (lanes: ${LANE_LABELS[*]})"
+  log "prompts: $PROMPTS_FILE"
 
-  # Force exact equal cell sizes (tmux's tiled is uneven for non-perfect-square N).
-  apply_even_grid "$SESSION"
+  apply_even_grid
+  apply_pane_titles
 
-  if (( AUTO_OPEN_TERMINAL )) && command -v osascript >/dev/null; then
-    osascript -e "tell application \"Terminal\" to do script \"tmux attach -t $SESSION\"" \
-              -e 'tell application "Terminal" to activate' >/dev/null 2>&1 \
-      && log "opened Terminal.app attached to session" \
-      || log "auto-open failed; attach manually: tmux attach -t $SESSION"
+  if (( attach_after && AUTO_OPEN_TERMINAL )); then
+    if open_terminal_attached; then
+      log "opened terminal attached to '$SESSION'"
+    else
+      log "auto-open unavailable; attach manually: tmux attach -t $SESSION"
+    fi
   else
-    log "auto-open disabled; attach manually: tmux attach -t $SESSION"
+    log "attach manually: tmux attach -t $SESSION"
   fi
 
-  # Parallel fill: wait-for-ready + send-prompt for every pane concurrently.
   for i in "${!PROMPTS[@]}"; do
-    LIMIT_STREAK[$i]=0
+    LIMIT_STREAK[$i]=0; LAST_RESPAWN[$i]=0; LAST_GOAL_DONE[$i]=0
     ( wait_ready_and_send "$i" "${PROMPTS[$i]}" ) &
   done
   wait
@@ -347,4 +461,129 @@ main() {
   done
 }
 
-main "$@"
+cmd_stop() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "no session '$SESSION' running"; return 0
+  fi
+  cleanup_session
+  echo "stopped session '$SESSION'"
+}
+
+cmd_status() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "no session '$SESSION' running"; return 1
+  fi
+  load_prompts
+  populate_pane_idx_from_running
+  printf '%-5s %-12s %-12s %s\n' 'PANE' 'LANE' 'STATE' 'TAIL'
+  printf '%-5s %-12s %-12s %s\n' '----' '----' '-----' '----'
+  local i state tail label cap
+  for i in "${!PANE_IDX[@]}"; do
+    cap=$(capture_tail "$(pane_target "$i")")
+    label="${LANE_LABELS[$i]:-pane$i}"
+    state="?"
+    if   printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then state="LIMITED"
+    elif printf '%s' "$cap" | grep -qF "Starting MCP"; then state="STARTING"
+    elif printf '%s' "$cap" | grep -qiE "Goal (achieved|complete|reached)"; then state="DONE"
+    elif printf '%s' "$cap" | grep -qF "Pursuing goal"; then state="WORKING"
+    elif printf '%s' "$cap" | grep -qF "Working"; then state="WORKING"
+    elif printf '%s' "$cap" | grep -qF "$READY_PATTERN"; then state="READY"
+    fi
+    tail=$(printf '%s' "$cap" | grep -v '^$' | tail -1 | tr -s ' \t' ' ' | head -c 60)
+    printf '%-5s %-12s %-12s %s\n' "${PANE_IDX[$i]}" "$label" "$state" "$tail"
+  done
+}
+
+cmd_attach() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    err "no session '$SESSION' running"; return 1
+  fi
+  if [[ -t 0 && -t 1 ]]; then
+    exec tmux attach -t "$SESSION"
+  fi
+  if open_terminal_attached; then
+    echo "opened a new terminal attached to '$SESSION'"
+  else
+    echo "no TTY and no auto-open available; run: tmux attach -t $SESSION"
+  fi
+}
+
+cmd_logs() {
+  local follow=0
+  [[ "${1:-}" == "-f" ]] && follow=1
+  [[ -f "$LOG_FILE" ]] || { echo "log not found: $LOG_FILE"; return 1; }
+  if (( follow )); then tail -f "$LOG_FILE"; else cat "$LOG_FILE"; fi
+}
+
+cmd_send() {
+  if (( $# < 2 )); then err "usage: send <pane|lane> <text>"; return 1; fi
+  local ref="$1"; shift
+  local text="$*"
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    err "no session '$SESSION' running"; return 1
+  fi
+  load_prompts
+  populate_pane_idx_from_running
+  local idx; idx=$(resolve_pane "$ref") || { err "no pane matches '$ref'"; return 1; }
+  send_prompt_to_pane "$(pane_target "$idx")" "$text"
+  echo "sent to pane ${PANE_IDX[$idx]} (${LANE_LABELS[$idx]:-?}): $(printf '%.60s' "$text")..."
+}
+
+cmd_restart() {
+  if (( $# < 1 )); then err "usage: restart <pane|lane>"; return 1; fi
+  local ref="$1"
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    err "no session '$SESSION' running"; return 1
+  fi
+  load_prompts
+  populate_pane_idx_from_running
+  local idx; idx=$(resolve_pane "$ref") || { err "no pane matches '$ref'"; return 1; }
+  log "[pane ${PANE_IDX[$idx]} ${LANE_LABELS[$idx]:-?}] manual restart"
+  tmux respawn-pane -k -t "$(pane_target "$idx")" "$CODEX_CMD"
+  ( wait_ready_and_send "$idx" "${PROMPTS[$idx]}" ) &
+  echo "restarted pane ${PANE_IDX[$idx]}; prompt will be re-sent when ready"
+}
+
+cmd_relayout() {
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    err "no session '$SESSION' running"; return 1
+  fi
+  load_prompts
+  populate_pane_idx_from_running
+  apply_even_grid
+  apply_pane_titles
+  echo "re-applied layout"
+}
+
+cmd_prompts() {
+  resolve_prompts_file
+  if [[ -z "$PROMPTS_FILE" || ! -f "$PROMPTS_FILE" ]]; then
+    err "no prompts file resolved"; return 1
+  fi
+  echo "# $PROMPTS_FILE"
+  cat "$PROMPTS_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+if (( $# == 0 )); then
+  cmd_start; exit $?
+fi
+
+case "$1" in
+  start)    shift; cmd_start "$@" ;;
+  stop)     shift; cmd_stop  "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  attach)   shift; cmd_attach "$@" ;;
+  logs)     shift; cmd_logs "$@" ;;
+  send)     shift; cmd_send "$@" ;;
+  restart)  shift; cmd_restart "$@" ;;
+  relayout) shift; cmd_relayout ;;
+  prompts)  shift; cmd_prompts ;;
+  -h|--help|help) cmd_help ;;
+  # Backwards-compat: legacy flags went straight to start
+  --prompts|--session|--no-open|--no-attach) cmd_start "$@" ;;
+  *) err "unknown subcommand: $1"; cmd_help; exit 1 ;;
+esac
