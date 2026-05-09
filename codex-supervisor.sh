@@ -136,8 +136,11 @@ apply_even_grid() {
          LAYOUT_ROWS="$rows" LAYOUT_PANES="${PANE_IDX[*]}" python3 -c '
 import os
 W, H = int(os.environ["LAYOUT_W"]), int(os.environ["LAYOUT_H"])
-N, cols, rows = int(os.environ["LAYOUT_N"]), int(os.environ["LAYOUT_COLS"]), int(os.environ["LAYOUT_ROWS"])
+N = int(os.environ["LAYOUT_N"])
+cols = int(os.environ["LAYOUT_COLS"])
+rows = int(os.environ["LAYOUT_ROWS"])
 panes = os.environ["LAYOUT_PANES"].split()
+SEP = ","
 
 avail_x = W - (cols - 1)
 cw = avail_x // cols
@@ -152,25 +155,23 @@ def cell(w, h, x, y, pid):
 if N == 1:
     body = f"{W}x{H},0,0,{panes[0]}"
 elif rows == 1:
-    inner = ",".join(
-        cell(cw if c < cols - 1 else last_w, H, c * (cw + 1), 0, panes[c])
-        for c in range(N)
-    )
-    body = f"{W}x{H},0,0{{{inner}}}"
+    parts = [cell(cw if c < cols - 1 else last_w, H, c * (cw + 1), 0, panes[c]) for c in range(N)]
+    body = f"{W}x{H},0,0" + "{" + SEP.join(parts) + "}"
 else:
-    rows_str = []
+    row_parts = []
     for r in range(rows):
         y = r * (ch + 1)
         rh = ch if r < rows - 1 else last_h
         cells = []
         for c in range(cols):
             idx = r * cols + c
-            if idx >= N: break
+            if idx >= N:
+                break
             x = c * (cw + 1)
             cwid = cw if c < cols - 1 else last_w
             cells.append(cell(cwid, rh, x, y, panes[idx]))
-        rows_str.append(f"{W}x{rh},0,{y}{{{\",\".join(cells)}}}")
-    body = f"{W}x{H},0,0[{\",\".join(rows_str)}]"
+        row_parts.append(f"{W}x{rh},0,{y}" + "{" + SEP.join(cells) + "}")
+    body = f"{W}x{H},0,0[" + SEP.join(row_parts) + "]"
 
 csum = 0
 for c in body.encode():
