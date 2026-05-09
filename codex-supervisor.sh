@@ -107,6 +107,81 @@ declare -A LIMIT_STREAK=()
 
 pane_target() { printf '%s:0.%d' "$SESSION" "${PANE_IDX[$1]}"; }
 
+# Force an even MxN grid so cells are equal (tmux's `tiled` algorithm gives
+# the last row extra height when N isn't a perfect square -- e.g. N=8 in a
+# 3-col layout leaves 2 cells in the bottom row that get the row's full
+# height, making them taller than the 6 cells above).
+apply_even_grid() {
+  local n=${#PROMPTS[@]} session=$1 cols rows W H
+  read W H < <(tmux display-message -p -t "$session:0" '#{window_width} #{window_height}')
+
+  case $n in
+    1)        cols=1 ;;
+    2)        cols=2 ;;
+    3|4)      cols=2 ;;
+    5|6)      cols=3 ;;
+    7|8)      cols=4 ;;
+    9)        cols=3 ;;
+    10|11|12) cols=4 ;;
+    *)        cols=4 ;;
+  esac
+  rows=$(( (n + cols - 1) / cols ))
+
+  local body
+  body=$(LAYOUT_W="$W" LAYOUT_H="$H" LAYOUT_N="$n" LAYOUT_COLS="$cols" \
+         LAYOUT_ROWS="$rows" LAYOUT_PANES="${PANE_IDX[*]}" python3 -c '
+import os
+W, H = int(os.environ["LAYOUT_W"]), int(os.environ["LAYOUT_H"])
+N, cols, rows = int(os.environ["LAYOUT_N"]), int(os.environ["LAYOUT_COLS"]), int(os.environ["LAYOUT_ROWS"])
+panes = os.environ["LAYOUT_PANES"].split()
+
+avail_x = W - (cols - 1)
+cw = avail_x // cols
+last_w = avail_x - cw * (cols - 1)
+avail_y = H - (rows - 1)
+ch = avail_y // rows
+last_h = avail_y - ch * (rows - 1)
+
+def cell(w, h, x, y, pid):
+    return f"{w}x{h},{x},{y},{pid}"
+
+if N == 1:
+    body = f"{W}x{H},0,0,{panes[0]}"
+elif rows == 1:
+    inner = ",".join(
+        cell(cw if c < cols - 1 else last_w, H, c * (cw + 1), 0, panes[c])
+        for c in range(N)
+    )
+    body = f"{W}x{H},0,0{{{inner}}}"
+else:
+    rows_str = []
+    for r in range(rows):
+        y = r * (ch + 1)
+        rh = ch if r < rows - 1 else last_h
+        cells = []
+        for c in range(cols):
+            idx = r * cols + c
+            if idx >= N: break
+            x = c * (cw + 1)
+            cwid = cw if c < cols - 1 else last_w
+            cells.append(cell(cwid, rh, x, y, panes[idx]))
+        rows_str.append(f"{W}x{rh},0,{y}{{{\",\".join(cells)}}}")
+    body = f"{W}x{H},0,0[{\",\".join(rows_str)}]"
+
+csum = 0
+for c in body.encode():
+    csum = ((csum >> 1) | ((csum & 1) << 15)) & 0xFFFF
+    csum = (csum + c) & 0xFFFF
+print(f"{csum:x},{body}")
+') || { log "apply_even_grid: python3 failed, leaving tiled layout in place"; return 1; }
+
+  if tmux select-layout -t "$session:0" "$body" >/dev/null 2>&1; then
+    log "applied even ${cols}x${rows} grid for $n panes"
+  else
+    log "apply_even_grid: select-layout rejected layout, leaving tiled in place"
+  fi
+}
+
 wait_ready_and_send() {
   local i=$1 prompt=$2 target s
   target=$(pane_target "$i")
@@ -183,6 +258,9 @@ main() {
   fi
   log "tmux session '$SESSION' has ${#PROMPTS[@]} tiled panes (indices: ${PANE_IDX[*]})"
   log "prompts loaded from: $PROMPTS_FILE"
+
+  # Force exact equal cell sizes (tmux's tiled is uneven for non-perfect-square N).
+  apply_even_grid "$SESSION"
 
   if (( AUTO_OPEN_TERMINAL )) && command -v osascript >/dev/null; then
     osascript -e "tell application \"Terminal\" to do script \"tmux attach -t $SESSION\"" \
