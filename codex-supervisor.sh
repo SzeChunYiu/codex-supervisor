@@ -63,6 +63,10 @@ READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
 # shows "Starting MCP servers" while MCP plugins are loading, and during that
 # window keystrokes can be silently lost.
 NOT_READY_PATTERN="${CODEX_SUPERVISOR_NOT_READY:-Starting MCP}"
+# After the ready condition is first met, wait this long for the input handler
+# to fully attach, then re-verify the ready condition before sending. Codex's
+# UI sometimes flips back to "Starting" briefly even after Tip first appears.
+READY_SETTLE_SECS="${CODEX_SUPERVISOR_READY_SETTLE:-5}"
 LIMIT_HITS_BEFORE_KILL="${CODEX_SUPERVISOR_HITS:-3}"
 LOG_FILE="${CODEX_SUPERVISOR_LOG:-$HOME/codex-supervisor.log}"
 AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
@@ -197,18 +201,27 @@ wait_ready_and_send() {
   # Codex shows the welcome banner (with `Tip: ...`) BEFORE it starts loading
   # MCP servers, and during that pre-MCP window keystrokes can be silently
   # swallowed. Require both: Tip line visible (welcome rendered) AND no
-  # "Starting MCP" line (MCP server load complete).
+  # "Starting MCP" line (MCP server load complete). Then wait READY_SETTLE_SECS
+  # and re-verify before sending -- the input handler attaches a beat after
+  # MCP completes, and codex can briefly flip back to a transitional state.
   for ((s=1; s<=READY_TIMEOUT; s++)); do
     cap=$(tmux capture-pane -t "$target" -p 2>/dev/null)
     if printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
        && ! printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
-      log "[pane $i] ready after ${s}s"
+      log "[pane $i] ready candidate after ${s}s, settling for ${READY_SETTLE_SECS}s..."
+      sleep "$READY_SETTLE_SECS"
+      cap=$(tmux capture-pane -t "$target" -p 2>/dev/null)
+      if ! printf '%s' "$cap" | grep -qF "$READY_PATTERN" \
+         || printf '%s' "$cap" | grep -qF "$NOT_READY_PATTERN"; then
+        log "[pane $i] state regressed during settle, re-waiting"
+        continue
+      fi
       tmux send-keys -t "$target" "$prompt"
       sleep 0.5
       tmux send-keys -t "$target" Enter   # slash-command popup eats this one
       sleep 0.4
       tmux send-keys -t "$target" Enter   # actual submit
-      log "[pane $i] sent: $(printf '%.80s' "$prompt")..."
+      log "[pane $i] sent after settle: $(printf '%.80s' "$prompt")..."
       return 0
     fi
     sleep 1
