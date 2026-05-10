@@ -3,6 +3,26 @@
 # Include `/goal ` (or any slash command) yourself if you want it.
 #
 # Lines must NOT contain literal newlines (newlines submit prematurely).
+#
+# RULE: keep prompts SHORT (~20 words, one line). Put details in
+# docs/parallel-sessions.md (shared protocol) and per-lane spec files
+# under docs/parallel-sessions/<lane>.md. Long prompts get truncated
+# when the supervisor types them character-by-character into the codex
+# TUI, and they hide the rules from the agent after iteration 1. See
+# the "Prompt design" section in the README.
+#
+# Recommended pattern: `/goal You are PANE <N>, lane <X>. Read
+# docs/parallel-sessions.md and docs/parallel-sessions/<X>.md, then
+# iterate per the protocol until rate-limited.`
+#
+# Anti-pattern (do NOT do this):
+#   /goal LANE X. Working dir: /abs/path. Branch: feature/x. Sole
+#   writable target: docs/foo.md. Read CODING_STANDARDS.md and ...
+#   [continues for several hundred chars] ... iterate per cycle
+#   (a) (b) (c) (d) commit, run merge.sh, ...
+# That kind of prompt times out at the readiness gate, hides the rules
+# after iteration 1, and is unreviewable. Move it all to the per-lane
+# .md.
 
-/goal Fix all the linting errors in this repo, one file at a time, opening a PR per file and merging after CI green.
-/goal Add unit tests for every untested module in src/lib, one module per PR, until coverage exceeds 80%.
+/goal You are PANE 0, lane bugs. Read docs/parallel-sessions.md and docs/parallel-sessions/bugs.md, then iterate per the protocol until rate-limited.
+/goal You are PANE 1, lane perf. Read docs/parallel-sessions.md and docs/parallel-sessions/perf.md, then iterate per the protocol until rate-limited.

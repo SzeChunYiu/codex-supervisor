@@ -60,6 +60,100 @@ the supervisor auto-types the prompt and submits it.
 
 ---
 
+## Prompt design — short prompts, details in `.md`
+
+The supervisor types each `/goal` prompt **character-by-character** into
+the codex TUI. Multi-paragraph prompts get truncated, scrambled, or
+rejected, and panes time out at the readiness gate. Long prompts also
+hide the rules from the lane after its first iteration, since codex
+won't re-type them.
+
+**Pattern (recommended): one-line `/goal` that names per-lane `.md`.**
+
+`codex-prompts.txt`:
+
+```
+/goal You are PANE 0, lane bugs. Read docs/parallel-sessions.md and docs/parallel-sessions/bugs.md, then iterate per the protocol until rate-limited.
+/goal You are PANE 1, lane perf. Read docs/parallel-sessions.md and docs/parallel-sessions/perf.md, then iterate per the protocol until rate-limited.
+```
+
+Each prompt is ~20 words, one line, no embedded newlines.
+
+Detail lives in `.md` files under your repo:
+
+- `docs/parallel-sessions.md` — **shared protocol** (lanes table,
+  per-iteration cycle, branching/merging rules, stop conditions, "when
+  to ask" exceptions). Lanes re-read this at the start of every
+  iteration so edits flow without re-typing prompts.
+- `docs/parallel-sessions/<lane>.md` — **per-lane spec** (branch
+  prefix, writable targets, required reading, working rhythm, scope
+  guardrails, stop condition).
+
+Why this works:
+
+- The TUI only has to receive ~20 chars before pressing enter.
+- Codex `cd`s, reads the doc, and follows it — exactly as a human would.
+- Editing the lane spec edits everyone's behaviour at the next
+  iteration; you don't have to stop the supervisor.
+- Each lane pane stays comprehensible at the next code review:
+  "what is pane 3 doing?" → open `docs/parallel-sessions/<lane>.md`.
+
+What goes in the **prompt** (verbatim, every char counts):
+
+- A pane identifier (`PANE N`).
+- A lane label (`lane bugs`).
+- Two doc paths to read (relative to codex's CWD).
+- A loop directive (`iterate per the protocol until rate-limited`).
+
+What goes in the **shared `.md`**:
+
+- Lanes table (pane → branch → worktree → focus).
+- Rules every session follows: re-read protocol; stay in lane; commit
+  message format; one PR per iteration; rebase before push; status
+  board entry; conflict policy; "when to stop and ask".
+
+What goes in the **per-lane `.md`**:
+
+- Branch prefix and worktree path.
+- Writable targets (which files this lane is allowed to touch).
+- Goal (one paragraph).
+- Working rhythm (numbered iteration cycle).
+- Scope guardrails ("don't write a scraper if the spec says no scrapers").
+- Required reading.
+- Stop condition.
+
+Reference example: <https://github.com/SzeChunYiu/babbloo> demonstrates
+this pattern at scale (8 lanes, dedicated + worker pool).
+
+### Anti-pattern: long inline prompts
+
+```
+/goal LANE L0. Working directory: /Volumes/MyDrive/.../simulation-L0. Branch: lane/L0. Sole writable target: docs/foo.md. Read CODING_STANDARDS.md and docs/foo.md first. Then for each X under Y/*.cc and each Z under W/*.cc, expand the relevant § with a long list of requirements ... Per-iteration cycle: (a) one X or Z per iteration; (b) edit only the target file; (c) keep every file <= 500 lines; (d) git add, git commit with message "..." and trailers ...; (e) run bash /path/to/merge.sh ...; (f) continue. Stop only when ...
+```
+
+This kind of multi-clause prompt fails reliably:
+
+- Backslash-escaping into the TUI input gets out of sync.
+- The pane status reads "Press enter to continue" forever.
+- Even when delivered, the agent sees the rules only once and forgets
+  the merge step on iteration 2.
+
+If you find yourself writing > 30 words in a `/goal`, move detail to a
+`.md`.
+
+### Cwd matters
+
+Codex panes inherit the working directory of `codex-supervisor` when
+launched. If your prompts use relative paths like
+`docs/parallel-sessions.md`, invoke the supervisor from the repo root
+that contains those paths, **not** from the directory holding
+`codex-prompts.txt` if that directory is a sub-folder.
+
+A common pattern is a thin `start.sh` that `cd`s to the repo root and
+sets `CODEX_SUPERVISOR_PROMPTS=$REPO/scripts/codex-supervisor/codex-prompts.txt`.
+
+---
+
 ## Subcommands
 
 ```
