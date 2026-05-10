@@ -129,10 +129,24 @@ PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
 # supervisor dies mid-spin and orphans MCP children.
 MIN_FREE_GB="${CODEX_SUPERVISOR_MIN_FREE_GB:-5}"
 WARN_FREE_GB="${CODEX_SUPERVISOR_WARN_FREE_GB:-10}"
+# RAM pre-flight. Mac mini has 16 GB; with 8 panes spawning npm/playwright,
+# swap fills and tmux gets sniped. Below MIN_FREE_RAM_MB, the poll loop
+# runs cleanup and skips respawn for one tick instead of OOM-ing.
+MIN_FREE_RAM_MB="${CODEX_SUPERVISOR_MIN_FREE_RAM_MB:-512}"
 # Auto-prune worktrees older than this many hours on `cleanup` subcommand.
 # -1 disables. Note: PERIODIC_WORKTREE_AGE_MIN (default 30 min) is used by
 # the in-loop cleanup; this is the slower-cadence manual `cleanup` knob.
 PRUNE_WORKTREE_AGE_HOURS="${CODEX_SUPERVISOR_PRUNE_AGE_HOURS:-1}"
+# Codex CLI log directory cap (GB). When ~/.codex/log exceeds this, contents are
+# wiped. Observed in the wild: ~/.codex/log grew to 34 GB on a single Mac mini
+# running 8 panes for ~24h. Default 2 GB. Set to 0 to disable.
+CODEX_LOG_MAX_GB="${CODEX_SUPERVISOR_CODEX_LOG_MAX_GB:-2}"
+# Codex CLI sessions retention (days). ~/.codex/sessions accumulates per-task
+# JSONL transcripts; default 7 days keeps recent forensics but bounds growth.
+# Set to 0 to disable session pruning.
+CODEX_SESSIONS_RETAIN_DAYS="${CODEX_SUPERVISOR_CODEX_SESSIONS_RETAIN_DAYS:-7}"
+# Supervisor log rotation cap (MB). LOG_FILE is truncated when above this.
+SUPERVISOR_LOG_MAX_MB="${CODEX_SUPERVISOR_LOG_MAX_MB:-50}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -624,7 +638,25 @@ check_pane() {
               ;;
           esac
           if [[ -n "$next_task" ]]; then
-            if (( RESPAWN_ON_GOAL_DONE )); then
+            # RAM pre-flight: if free RAM is below threshold, run cleanup
+            # and skip respawn this tick. The pane stays idle (cheap)
+            # rather than spawning into OOM and killing the tmux server.
+            local _ram; _ram=$(free_ram_mb)
+            local _disk; _disk=$(free_gb_on_cwd)
+            if (( _ram < MIN_FREE_RAM_MB )); then
+              log "[pane $i $lane] low RAM (${_ram}MB < ${MIN_FREE_RAM_MB}MB) — running cleanup, deferring respawn"
+              run_periodic_cleanup
+              # Reset iteration timer so we don't trip the MAX_ITERATION_SECS cap
+              # while we're intentionally deferring.
+              ITERATION_STARTED[$i]=$now
+            elif (( _disk < MIN_FREE_GB )); then
+              # Disk pre-flight: same logic as RAM. Codex respawn writes
+              # session JSONL + ~/.codex/log + sometimes spawns worktrees;
+              # skipping respawn under disk pressure prevents the cascade.
+              log "[pane $i $lane] low disk (${_disk}G < ${MIN_FREE_GB}G) — running cleanup, deferring respawn"
+              run_periodic_cleanup
+              ITERATION_STARTED[$i]=$now
+            elif (( RESPAWN_ON_GOAL_DONE )); then
               log "[pane $i $lane] respawning codex before next task ($sent_label)"
               tmux respawn-pane -k -t "$target" "$CODEX_CMD"
               # Send the next prompt once codex is ready again (background).
@@ -798,6 +830,20 @@ free_gb_on_cwd() {
   df -k . 2>/dev/null | awk 'NR==2 { printf "%d\n", $4/1024/1024 }' || echo 0
 }
 
+# Free RAM in MB. Pages are 16 KB on Apple Silicon, 4 KB on Intel.
+# vm_stat reports "Pages free", "Pages inactive" — both are reclaimable.
+# We use free+inactive because macOS aggressively keeps "inactive" cached
+# memory that the kernel will return to processes on demand.
+free_ram_mb() {
+  local pgsz; pgsz=$(vm_stat 2>/dev/null | awk '/page size of/{print $8}')
+  [[ -z "$pgsz" ]] && pgsz=16384
+  vm_stat 2>/dev/null | awk -v pg="$pgsz" '
+    /Pages free/     { f=$3+0 }
+    /Pages inactive/ { i=$3+0 }
+    END { printf "%d\n", (f+i)*pg/1024/1024 }
+  '
+}
+
 # Refuse to start when free space is dangerously low. Each codex pane will
 # spawn a git worktree + node_modules + its own MCP server tree; we've seen
 # 8 panes blow through ~15 GB in an hour. Refusing under MIN_FREE_GB
@@ -908,6 +954,50 @@ cmd_cleanup() {
   #    Try without sudo first; if it fails the user can rerun by hand.
   if command -v tmutil >/dev/null 2>&1; then
     tmutil deletelocalsnapshots / >/dev/null 2>&1 || true
+  fi
+
+  # 10) Codex CLI log directory. THIS IS THE #1 DISK EATER. Observed at 34 GB
+  #     on a single Mac mini after ~24h of 8-pane operation. Codex writes
+  #     verbose per-turn JSONL here; safe to wipe — codex regenerates as it
+  #     runs. We empty the directory but keep the dir itself so codex's
+  #     in-flight handle stays valid.
+  if [[ -d "$HOME/.codex/log" ]]; then
+    local log_kb log_gb
+    log_kb=$(du -sk "$HOME/.codex/log" 2>/dev/null | awk '{print $1}')
+    log_gb=$(( log_kb / 1024 / 1024 ))
+    if (( log_gb >= 1 )); then
+      log "cleanup: clearing ~/.codex/log (${log_gb}G)"
+      find "$HOME/.codex/log" -mindepth 1 -delete 2>/dev/null
+    fi
+  fi
+
+  # 11) Codex CLI sessions older than CODEX_SESSIONS_RETAIN_DAYS. Per-task
+  #     JSONL transcripts. Default 7 days. Skipped if retention is 0.
+  if (( CODEX_SESSIONS_RETAIN_DAYS > 0 )) && [[ -d "$HOME/.codex/sessions" ]]; then
+    find "$HOME/.codex/sessions" -type f -mtime +"${CODEX_SESSIONS_RETAIN_DAYS}" \
+      -delete 2>/dev/null
+  fi
+
+  # 12) Supervisor's own log. Truncate if oversized.
+  if [[ -f "$LOG_FILE" ]]; then
+    local sv_mb
+    sv_mb=$(du -sm "$LOG_FILE" 2>/dev/null | awk '{print $1}')
+    if (( sv_mb > SUPERVISOR_LOG_MAX_MB )); then
+      log "cleanup: rotating supervisor log (${sv_mb}M -> 0)"
+      : > "$LOG_FILE"
+    fi
+  fi
+
+  # 13) uv cache prune (Python tool venv wheels). Cheap; redownloads on demand.
+  command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 || true
+
+  # 14) npm _npx cache. Codex spawns `npx` heavily; npx caches whole node
+  #     project trees here. Safe to wipe.
+  rm -rf "$HOME/.npm/_npx" 2>/dev/null
+
+  # 15) macOS-specific app caches that codex/playwright/claude write.
+  if [[ -d "$HOME/Library/Caches/com.openai.codex" ]]; then
+    find "$HOME/Library/Caches/com.openai.codex" -mindepth 1 -delete 2>/dev/null
   fi
 
   after=$(free_gb_on_cwd)
@@ -1106,10 +1196,20 @@ run_periodic_cleanup() {
   done
 
   # 3) Stale superpowers worktree dirs not registered (mmin +PERIODIC).
-  if [[ -d "$HOME/.config/superpowers/worktrees" ]]; then
-    find "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
+  # `~/.config/superpowers/worktrees` may be a symlink to MyDrive — find -L
+  # follows symlinks so MyDrive contents get swept just like local would.
+  if [[ -e "$HOME/.config/superpowers/worktrees" ]]; then
+    find -L "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
       -exec rm -rf {} + 2>/dev/null
   fi
+
+  # 3b) Direct MyDrive paths (cleanup external drive too — runner _work
+  # caches and worktree dirs accumulate there as well).
+  for d in /Volumes/MyDrive/superpowers/worktrees /Volumes/MyDrive/actions-runner-work; do
+    [[ -d "$d" ]] || continue
+    find "$d" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
+      -exec rm -rf {} + 2>/dev/null
+  done
 
   # 4) Orphan sibling clones in ~/Desktop/projects/<repo>-*.
   find "$HOME/Desktop/projects" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
@@ -1117,6 +1217,78 @@ run_periodic_cleanup() {
     [[ -d "$d/.git" ]] && continue   # main checkout
     rm -rf "$d"
   done
+
+  # 5) Kill orphan dev/test processes that lost their parent codex pane.
+  #    These pile up across iterations and are the #1 RAM eater. Only kill
+  #    procs whose parent is PID 1 (init) — anything still under codex
+  #    is in-flight and must not be touched.
+  local p ppid kc=0
+  for pat in "next-server" "next dev" "chrome-headless-shell" "chrome_crashpad_handler"; do
+    while read -r p; do
+      [[ -z "$p" ]] && continue
+      ppid=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+      [[ "$ppid" == "1" ]] && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
+    done < <(pgrep -f "$pat" 2>/dev/null)
+  done
+  # npm-exec / npm-cli orphans (parent gone). pgrep -f matches the long
+  # node /path/to/npm-cli.js form codex spawns.
+  while read -r p; do
+    [[ -z "$p" ]] && continue
+    ppid=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [[ "$ppid" == "1" ]] && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
+  done < <(pgrep -f "npm-cli.js\|npm exec" 2>/dev/null)
+  (( kc > 0 )) && log "periodic cleanup: killed $kc orphan dev/test procs"
+
+  # 6) HIBEAM/babbloo/weather-market scratch dirs in /private/tmp older
+  #    than 1 day. These came from physics + research scratchpads and
+  #    never get reclaimed otherwise.
+  find /private/tmp -maxdepth 1 -type d \
+    \( -name 'HIBEAM_*' -o -name 'babbloo-*' -o -name 'wm-*' \) \
+    -mtime +1 -exec rm -rf {} + 2>/dev/null
+
+  # 7) uv cache prune (Python tool). 6 GB+ accumulates from agent venvs.
+  #    --ci keeps recently used wheels but drops stale ones. Cheap enough
+  #    to run every cleanup tick.
+  command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 &
+
+  # 8) APFS local snapshots. macOS keeps Time Machine local snapshots
+  #    indefinitely when the destination is offline; they hold space
+  #    that df shows as "used" but is reclaimable.
+  command -v tmutil >/dev/null 2>&1 && \
+    tmutil listlocalsnapshots / 2>/dev/null \
+      | awk -F. '/com.apple.TimeMachine/{print $NF}' \
+      | while read -r s; do
+          [[ -z "$s" ]] && continue
+          tmutil deletelocalsnapshots "$s" >/dev/null 2>&1 || true
+        done
+
+  # 9) Truncate macOS DiagnosticMessages older than 7 days. They grow
+  #    silently to hundreds of MB.
+  find /private/var/log/DiagnosticMessages -name '*.asl' -mtime +7 \
+    -exec rm -f {} + 2>/dev/null
+
+  # 10) Codex CLI log directory — capped at CODEX_LOG_MAX_GB. This is the
+  #     single biggest disk eater for long-running supervisor sessions.
+  #     Triggered ONLY when oversized; cheap when within bounds (one du call).
+  if (( CODEX_LOG_MAX_GB > 0 )) && [[ -d "$HOME/.codex/log" ]]; then
+    local log_kb log_gb
+    log_kb=$(du -sk "$HOME/.codex/log" 2>/dev/null | awk '{print $1}')
+    log_gb=$(( log_kb / 1024 / 1024 ))
+    if (( log_gb >= CODEX_LOG_MAX_GB )); then
+      log "periodic cleanup: ~/.codex/log at ${log_gb}G > cap ${CODEX_LOG_MAX_GB}G; clearing"
+      find "$HOME/.codex/log" -mindepth 1 -delete 2>/dev/null
+    fi
+  fi
+
+  # 11) Supervisor's own log — truncate if oversized. Cheap stat.
+  if [[ -f "$LOG_FILE" ]]; then
+    local sv_mb
+    sv_mb=$(du -sm "$LOG_FILE" 2>/dev/null | awk '{print $1}')
+    if (( sv_mb > SUPERVISOR_LOG_MAX_MB )); then
+      log "periodic cleanup: rotating supervisor log (${sv_mb}M)"
+      : > "$LOG_FILE"
+    fi
+  fi
 
   after=$(free_gb_on_cwd)
   if (( after != before )); then
