@@ -8,7 +8,10 @@
 #
 # Subcommands:
 #   start [--no-attach]       launch the session (default if no subcommand)
-#   stop                      kill the session and all panes
+#                             refuses if free disk < CODEX_SUPERVISOR_MIN_FREE_GB (default 5)
+#   stop                      kill session, reap MCP orphans, prune git worktrees
+#   cleanup                   prune worktrees, npm cache, old /private/tmp/claude-501,
+#                             Time Machine local snapshots
 #   status                    print pane states (lane, state, last activity)
 #   attach                    attach (or open a terminal attached) to the session
 #   logs [-f]                 show or tail the supervisor log
@@ -16,6 +19,7 @@
 #   restart <pane>            respawn one pane with a fresh codex
 #   relayout                  re-apply the equal MxN grid (use after window resize)
 #   prompts                   print the resolved prompts file
+#   queue                     show queued tasks per lane (count + next preview)
 #   help                      this help text
 #
 # Run without a subcommand to start (legacy behavior).
@@ -92,9 +96,43 @@ RESEND_GRACE_SECS="${CODEX_SUPERVISOR_RESEND_GRACE:-30}"
 #   redo        - always resend the original prompt.
 #   rest        - leave the pane idle.
 ON_COMPLETE="${CODEX_SUPERVISOR_ON_COMPLETE:-queue}"
+# Lane names that are "continuous" — they have no queue file and should
+# always re-run their original prompt when goal achieved (instead of
+# resting). Space-separated, lowercased. Match is on the lane label
+# parsed from the /goal prompt.
+CONTINUOUS_LANES="${CODEX_SUPERVISOR_CONTINUOUS_LANES:-bugs optimize}"
+# When 1, on "Goal achieved" the supervisor respawns the codex process in
+# the pane (kills + restarts) before sending the next task. Gives each
+# iteration a fresh codex with no accumulated context/memory and severs
+# any worktree the previous iteration was holding open. Trade-off: ~10s
+# of MCP boot per iteration.
+RESPAWN_ON_GOAL_DONE="${CODEX_SUPERVISOR_RESPAWN_ON_GOAL:-1}"
+# How often (seconds) the main poll loop runs an in-flight cleanup
+# (worktree prune + tmp sweep). 0 disables.
+PERIODIC_CLEANUP_SECS="${CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS:-300}"
+# Worktree age threshold for periodic cleanup (minutes). Codex creates
+# fresh worktrees per iteration; abandoning them after ~30 min is safe
+# given typical iteration is ≤25 min.
+PERIODIC_WORKTREE_AGE_MIN="${CODEX_SUPERVISOR_PERIODIC_WORKTREE_AGE_MIN:-15}"
+# Hard cap on a single goal iteration before we forcibly respawn the pane
+# to prevent the conversation from growing long enough to need a remote
+# compaction step (which can fail under usage-limit and brick the pane).
+# 0 disables. Default 90 minutes — long enough for any normal task to
+# finish, short enough to bound context growth.
+MAX_ITERATION_SECS="${CODEX_SUPERVISOR_MAX_ITERATION_SECS:-5400}"
 # Where per-lane task queues live. Auto-discovered: ./codex-tasks/ then ~/codex-tasks/.
 TASKS_DIR="${CODEX_SUPERVISOR_TASKS_DIR:-}"
 PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
+# Disk-space guard. start refuses below MIN_FREE_GB; warns below WARN_FREE_GB.
+# 8 codex panes with their own worktrees + node_modules can blow through ~10 GB
+# fast; refusing under 5 GB prevents the disk-full crash mode where the
+# supervisor dies mid-spin and orphans MCP children.
+MIN_FREE_GB="${CODEX_SUPERVISOR_MIN_FREE_GB:-5}"
+WARN_FREE_GB="${CODEX_SUPERVISOR_WARN_FREE_GB:-10}"
+# Auto-prune worktrees older than this many hours on `cleanup` subcommand.
+# -1 disables. Note: PERIODIC_WORKTREE_AGE_MIN (default 30 min) is used by
+# the in-loop cleanup; this is the slower-cadence manual `cleanup` knob.
+PRUNE_WORKTREE_AGE_HOURS="${CODEX_SUPERVISOR_PRUNE_AGE_HOURS:-1}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,12 +145,39 @@ log() {
 
 err() { echo "error: $*" >&2; }
 
-# Discover the prompts file across CLI / env / cwd / home.
+# Per-session state file remembers the prompts file path the supervisor was
+# started with, so subsequent `status` / `send` / `restart` etc. don't have
+# to be invoked from the project dir or with the env var set.
+STATE_FILE="${CODEX_SUPERVISOR_STATE_FILE:-$HOME/.codex-supervisor-${SESSION}.state}"
+
+# Discover the prompts file across CLI / env / cwd / state-file / walk-up / home.
 resolve_prompts_file() {
   if [[ -n "$PROMPTS_FILE" ]]; then return 0; fi
-  if   [[ -f "./codex-prompts.txt" ]]; then PROMPTS_FILE="./codex-prompts.txt"
-  elif [[ -f "$HOME/codex-prompts.txt" ]]; then PROMPTS_FILE="$HOME/codex-prompts.txt"
+  if [[ -f "./codex-prompts.txt" ]]; then PROMPTS_FILE="$(pwd)/codex-prompts.txt"; return 0; fi
+  # Walk up from cwd looking for codex-prompts.txt.
+  local d="$PWD"
+  while [[ "$d" != "/" && -n "$d" ]]; do
+    if [[ -f "$d/codex-prompts.txt" ]]; then PROMPTS_FILE="$d/codex-prompts.txt"; return 0; fi
+    d="${d%/*}"
+  done
+  # Fall back to the state file the daemon wrote on `start`.
+  if [[ -f "$STATE_FILE" ]]; then
+    local saved
+    saved=$(grep -E '^PROMPTS_FILE=' "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [[ -n "$saved" && -f "$saved" ]]; then PROMPTS_FILE="$saved"; return 0; fi
   fi
+  if [[ -f "$HOME/codex-prompts.txt" ]]; then PROMPTS_FILE="$HOME/codex-prompts.txt"; fi
+}
+
+# Persist resolved state so future commands don't need env vars or cwd.
+write_state_file() {
+  resolve_prompts_file
+  resolve_tasks_dir
+  {
+    echo "PROMPTS_FILE=${PROMPTS_FILE}"
+    echo "TASKS_DIR=${TASKS_DIR}"
+    echo "STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S')"
+  } > "$STATE_FILE" 2>/dev/null
 }
 
 # Load prompts and lane labels from the prompts file.
@@ -151,6 +216,7 @@ PANE_IDX=()
 LIMIT_STREAK=()
 LAST_RESPAWN=()
 LAST_GOAL_DONE=()  # epoch seconds when a "Goal achieved" was first seen per pane
+ITERATION_STARTED=()  # epoch seconds when current iteration started (after goal-done respawn or after start)
 
 # Bounded pane snapshot -- single capture-pane call, last N lines only.
 capture_tail() {
@@ -184,6 +250,17 @@ open_terminal_attached() {
   local cmd="tmux attach -t $SESSION"
   local pref="${CODEX_SUPERVISOR_TERMINAL:-}"
   local sys; sys=$(uname -s)
+
+  # Idempotency: if a client is already attached to the session, don't
+  # spawn another window. This prevents window pile-up when callers
+  # (recovery loops, wrappers, scripts) invoke `start` or `attach`
+  # repeatedly. To force a new window even when one is attached, set
+  # CODEX_SUPERVISOR_FORCE_OPEN=1.
+  if [[ "${CODEX_SUPERVISOR_FORCE_OPEN:-0}" != "1" ]] \
+     && tmux list-clients -t "$SESSION" 2>/dev/null | grep -q .; then
+    log "session '$SESSION' already has an attached client; skipping new window"
+    return 0
+  fi
 
   # Try a single explicit choice if the user pinned one.
   if [[ -n "$pref" ]]; then
@@ -449,14 +526,45 @@ check_pane() {
   local cap; cap=$(capture_tail "$target")
   now=$(date +%s)
 
+  # FAST PATH: codex's compact-task failure (context too long → remote
+  # compaction calls the API → API rejects with usage limit). The pane
+  # is dead until restarted, and waiting for the 3-strike streak wastes
+  # 3 polls (≈3 minutes). Respawn on first sight, subject to the same
+  # cooldown so a globally-limited account doesn't thrash.
+  if printf '%s' "$cap" | grep -qF "Error running remote compact task"; then
+    since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
+    local fast_cooldown=$RESPAWN_COOLDOWN_SECS
+    if printf '%s' "$cap" | grep -qiE "try again at"; then
+      fast_cooldown=$((60 * 60))
+    fi
+    if (( since_last < fast_cooldown )); then
+      log "[pane $i ${LANE_LABELS[$i]}] compact-task failure but cooldown active (${since_last}s/${fast_cooldown}s)"
+      return
+    fi
+    log "[pane $i ${LANE_LABELS[$i]}] compact-task failure -- fast respawn + resend prompt"
+    tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+    LAST_RESPAWN[$i]=$now
+    LIMIT_STREAK[$i]=0
+    LAST_GOAL_DONE[$i]=0
+    ( wait_ready_and_send "$i" "$prompt" ) &
+    return
+  fi
+
   # Usage limit handling
   if printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then
     LIMIT_STREAK[$i]=$(( ${LIMIT_STREAK[$i]:-0} + 1 ))
-    log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL}"
+    # Codex prints "try again at <date> <time>" on hard limits. When we see
+    # this we use a much longer cooldown (1h) since the limit is account-
+    # wide and respawning won't help — it'll just hit the same wall.
+    local cooldown=$RESPAWN_COOLDOWN_SECS
+    if printf '%s' "$cap" | grep -qiE "try again at"; then
+      cooldown=$((60 * 60))
+    fi
+    log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL} (cooldown ${cooldown}s)"
     if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then
       since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
-      if (( since_last < RESPAWN_COOLDOWN_SECS )); then
-        log "[pane $i ${LANE_LABELS[$i]}] cooldown active (${since_last}s/${RESPAWN_COOLDOWN_SECS}s) -- skipping respawn"
+      if (( since_last < cooldown )); then
+        log "[pane $i ${LANE_LABELS[$i]}] cooldown active (${since_last}s/${cooldown}s) -- skipping respawn"
         LIMIT_STREAK[$i]=0
         return
       fi
@@ -465,6 +573,7 @@ check_pane() {
       LAST_RESPAWN[$i]=$now
       LIMIT_STREAK[$i]=0
       LAST_GOAL_DONE[$i]=0
+      ITERATION_STARTED[$i]=$now
       ( wait_ready_and_send "$i" "$prompt" ) &
     fi
     return
@@ -495,11 +604,18 @@ check_pane() {
             return
           fi
           local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
-          case "$ON_COMPLETE" in
+          # Per-lane override: continuous lanes (bugs, optimize) always redo
+          # when queue is empty regardless of global ON_COMPLETE policy.
+          local lane_lc effective="$ON_COMPLETE"
+          lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
+          if [[ " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
+            effective="queue-redo"
+          fi
+          case "$effective" in
             queue|queue-redo)
               if next_task=$(pop_next_task "$lane") && [[ -n "$next_task" ]]; then
                 sent_label="next from queue"
-              elif [[ "$ON_COMPLETE" == "queue-redo" ]]; then
+              elif [[ "$effective" == "queue-redo" ]]; then
                 next_task="$prompt"; sent_label="redo (queue empty)"
               fi
               ;;
@@ -508,8 +624,17 @@ check_pane() {
               ;;
           esac
           if [[ -n "$next_task" ]]; then
-            log "[pane $i $lane] sending $sent_label: $(printf '%.60s' "$next_task")..."
-            send_prompt_to_pane "$target" "$next_task"
+            if (( RESPAWN_ON_GOAL_DONE )); then
+              log "[pane $i $lane] respawning codex before next task ($sent_label)"
+              tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+              # Send the next prompt once codex is ready again (background).
+              ( wait_ready_and_send "$i" "$next_task" ) &
+              ITERATION_STARTED[$i]=$now
+            else
+              log "[pane $i $lane] sending $sent_label: $(printf '%.60s' "$next_task")..."
+              send_prompt_to_pane "$target" "$next_task"
+              ITERATION_STARTED[$i]=$now
+            fi
           else
             log "[pane $i $lane] resting (no queued task)"
           fi
@@ -517,6 +642,23 @@ check_pane() {
       fi
     else
       LAST_GOAL_DONE[$i]=0
+    fi
+  fi
+
+  # Hard iteration cap. If a pane has been "Working" past MAX_ITERATION_SECS
+  # without showing "Goal achieved", forcibly respawn — assume it's stuck
+  # in a long compaction/exploration loop. Bounds context growth too,
+  # which helps avoid the remote-compact-task usage-limit failure.
+  if (( MAX_ITERATION_SECS > 0 )); then
+    local started=${ITERATION_STARTED[$i]:-0}
+    if (( started > 0 )) && (( now - started >= MAX_ITERATION_SECS )); then
+      log "[pane $i ${LANE_LABELS[$i]}] iteration exceeded ${MAX_ITERATION_SECS}s — forcing respawn"
+      tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+      LAST_RESPAWN[$i]=$now
+      LIMIT_STREAK[$i]=0
+      LAST_GOAL_DONE[$i]=0
+      ITERATION_STARTED[$i]=$now
+      ( wait_ready_and_send "$i" "$prompt" ) &
     fi
   fi
 }
@@ -530,9 +672,25 @@ populate_pane_idx_from_running() {
 
 resolve_tasks_dir() {
   [[ -n "$TASKS_DIR" ]] && return 0
-  if   [[ -d "./codex-tasks" ]]; then TASKS_DIR="./codex-tasks"
-  elif [[ -d "$HOME/codex-tasks" ]]; then TASKS_DIR="$HOME/codex-tasks"
+  if [[ -d "./codex-tasks" ]]; then TASKS_DIR="$(pwd)/codex-tasks"; return 0; fi
+  # Walk up from cwd looking for a sibling codex-tasks/ dir.
+  local d="$PWD"
+  while [[ "$d" != "/" && -n "$d" ]]; do
+    if [[ -d "$d/codex-tasks" ]]; then TASKS_DIR="$d/codex-tasks"; return 0; fi
+    d="${d%/*}"
+  done
+  # Fall back to the state file.
+  if [[ -f "$STATE_FILE" ]]; then
+    local saved
+    saved=$(grep -E '^TASKS_DIR=' "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [[ -n "$saved" && -d "$saved" ]]; then TASKS_DIR="$saved"; return 0; fi
   fi
+  # If we have a resolved prompts file, use its sibling codex-tasks/.
+  if [[ -n "$PROMPTS_FILE" ]]; then
+    local pdir; pdir=$(dirname "$PROMPTS_FILE")
+    if [[ -d "$pdir/codex-tasks" ]]; then TASKS_DIR="$pdir/codex-tasks"; return 0; fi
+  fi
+  if [[ -d "$HOME/codex-tasks" ]]; then TASKS_DIR="$HOME/codex-tasks"; fi
 }
 
 # Pop the first non-blank, non-comment line from the lane's queue file and
@@ -567,6 +725,8 @@ cleanup_session() {
   # `start` forks a daemon; without this they accumulate across restarts
   # and fight over the same panes.
   reap_stale_daemons
+  # Drop the per-session state file so a fresh `start` can rediscover.
+  rm -f "$STATE_FILE" 2>/dev/null
 }
 
 # Kill any other codex-supervisor daemon processes for this session,
@@ -574,15 +734,38 @@ cleanup_session() {
 reap_stale_daemons() {
   local self="$$" parent
   parent=$(ps -o ppid= -p "$self" 2>/dev/null | tr -d ' ')
-  local n=0
+  local n=0 killed_pids=()
   for pid in $(pgrep -f "codex-supervisor\.sh" 2>/dev/null); do
     [[ "$pid" == "$self" || "$pid" == "$parent" ]] && continue
-    # Inspect command line for our session name to be safe
-    if ps -p "$pid" -o command= 2>/dev/null | grep -qF "$SESSION"; then
-      kill -TERM "$pid" 2>/dev/null && n=$((n+1))
+    # Match `--session <SESSION>` exactly, not bare $SESSION substring.
+    # The script path itself is `codex-supervisor.sh`, so a bare grep for
+    # SESSION="codex-supervisor" matches every supervisor process —
+    # including ones for OTHER sessions (e.g. nnbar-rebuild). That bug
+    # let one project's `start` kill another project's running daemon.
+    local cmd; cmd=$(ps -p "$pid" -o command= 2>/dev/null)
+    if printf '%s' "$cmd" | grep -qE "[-]-session[[:space:]]+${SESSION}([[:space:]]|\$)"; then
+      :
+    elif [[ "$SESSION" == "codex-supervisor" ]] \
+         && ! printf '%s' "$cmd" | grep -qE "[-]-session"; then
+      # Backwards-compat: a daemon launched without --session uses the
+      # default "codex-supervisor". Match it only when our own SESSION
+      # is also the default (otherwise we'd kill the default-session
+      # daemon when running a named session).
+      :
+    else
+      continue
     fi
+    # SIGKILL (not TERM) so the dying daemon's trap can't fire
+    # cleanup_session and tear down the tmux session that the new
+    # daemon is bringing up. We've hit this race repeatedly.
+    kill -KILL "$pid" 2>/dev/null && { n=$((n+1)); killed_pids+=("$pid"); }
   done
-  (( n > 0 )) && log "reap_stale_daemons: killed $n stale supervisor process(es)"
+  if (( n > 0 )); then
+    log "reap_stale_daemons: killed $n stale supervisor process(es)"
+    # Wait briefly for the OS to reap so any in-flight tmux commands
+    # they queued can't ride past us.
+    sleep 1
+  fi
 }
 
 # Kill any orphaned MCP node processes (parent PID == 1 and the command
@@ -609,6 +792,130 @@ cmd_help() {
   sed -n '2,30p' "$0"
 }
 
+# Returns free GB on the working volume (rounded down). Cross-platform
+# (BSD/macOS df has -k; -PG isn't portable). 0 on parse failure.
+free_gb_on_cwd() {
+  df -k . 2>/dev/null | awk 'NR==2 { printf "%d\n", $4/1024/1024 }' || echo 0
+}
+
+# Refuse to start when free space is dangerously low. Each codex pane will
+# spawn a git worktree + node_modules + its own MCP server tree; we've seen
+# 8 panes blow through ~15 GB in an hour. Refusing under MIN_FREE_GB
+# prevents the disk-full crash mode that orphans MCP children.
+ensure_disk_space() {
+  local free; free=$(free_gb_on_cwd)
+  if (( free < MIN_FREE_GB )); then
+    err "disk too full to start: ${free}G free on $(pwd) (need >= ${MIN_FREE_GB}G)"
+    err "free space first; try: $0 cleanup"
+    return 1
+  fi
+  if (( free < WARN_FREE_GB )); then
+    log "WARNING: only ${free}G free on $(pwd); consider running: $0 cleanup"
+  fi
+  return 0
+}
+
+# Prune git worktrees not actively in use, plus npm caches, plus old
+# Claude Code session tmp dirs. Idempotent. Safe to run while supervisor
+# is running (only touches state outside the live tmux session).
+cmd_cleanup() {
+  local before after freed
+  before=$(free_gb_on_cwd)
+  log "cleanup: starting ($before G free on $(pwd))"
+
+  # 1) git worktree prune across the current repo. Removes registry
+  #    entries whose checkout dirs are gone. Then physically remove
+  #    worktrees older than PRUNE_WORKTREE_AGE_HOURS that aren't the
+  #    main checkout.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git worktree prune 2>/dev/null
+    if (( PRUNE_WORKTREE_AGE_HOURS >= 0 )); then
+      local main_dir; main_dir=$(git rev-parse --show-toplevel)
+      git worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree /{print substr($0,10)}' \
+        | while read -r wt; do
+            [[ -z "$wt" || "$wt" == "$main_dir" ]] && continue
+            # find -mmin: minutes since modified. PRUNE_WORKTREE_AGE_HOURS*60
+            local age_min=$((PRUNE_WORKTREE_AGE_HOURS * 60))
+            if find "$wt" -maxdepth 0 -mmin +"$age_min" 2>/dev/null | grep -q .; then
+              log "cleanup: removing stale worktree $wt"
+              git worktree remove --force "$wt" 2>/dev/null \
+                || rm -rf "$wt"
+            fi
+          done
+      git worktree prune 2>/dev/null
+    fi
+  fi
+
+  # 2) npm cache. Safe; re-downloads on demand.
+  rm -rf "$HOME/.npm/_cacache" 2>/dev/null
+
+  # 3) Old Claude Code session tmp dirs (>24h). The harness writes per-tool
+  #    output here; old session UUIDs sit forever otherwise.
+  if [[ -d /private/tmp/claude-501 ]]; then
+    find /private/tmp/claude-501 -mindepth 2 -maxdepth 2 -type d -mmin +1440 \
+      -exec rm -rf {} + 2>/dev/null
+  fi
+
+  # 4) Codex worktree leftovers in /private/tmp. Codex creates per-task
+  #    worktrees here that aren't always cleaned up. We've seen 60+
+  #    accumulate. Skip /private/tmp/<repo>-saved-before by convention
+  #    (those are user-saved snapshots).
+  find /private/tmp -maxdepth 1 -type d -name '*-*' -mmin +60 2>/dev/null | while read -r wt; do
+    case "$(basename "$wt")" in
+      *-saved-before|claude-501) continue ;;
+    esac
+    # Only nuke if it has a .git pointing somewhere (i.e., it's a worktree)
+    if [[ -e "$wt/.git" ]]; then
+      log "cleanup: removing tmp worktree $wt"
+      git -C "$wt" rev-parse --git-common-dir >/dev/null 2>&1 \
+        && (cd "$wt/.." 2>/dev/null && git -C "$(git -C "$wt" rev-parse --git-common-dir)/.." worktree remove --force "$wt" 2>/dev/null) \
+        || rm -rf "$wt"
+    fi
+  done
+
+  # 5) Sibling worktree clones at ~/.config/superpowers/worktrees/<repo>/*
+  #    that aren't tied to the current project. Each repo dir under there
+  #    gets a `git worktree prune` from its main checkout if findable.
+  if [[ -d "$HOME/.config/superpowers/worktrees" ]]; then
+    find "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +1440 2>/dev/null | while read -r wt; do
+      log "cleanup: removing stale superpowers worktree $wt"
+      rm -rf "$wt"
+    done
+  fi
+
+  # 6) Sibling per-pane clones in ~/Desktop/projects/<repo>-* that aren't
+  #    git worktrees (orphaned codex per-pane copies).
+  find "$HOME/Desktop/projects" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +1440 2>/dev/null | while read -r d; do
+    # Skip if it's the main repo or a registered worktree
+    [[ -e "$d/.git" ]] || continue
+    if [[ -d "$d/.git" ]]; then continue; fi   # main checkout has .git/ as dir
+    log "cleanup: removing orphan sibling clone $d"
+    rm -rf "$d"
+  done
+
+  # 7) Build caches inside any project we know about (best-effort, age-gated)
+  for cachedir in $(find "$HOME/Desktop/projects" -maxdepth 3 -type d \( -name '.next' -o -name '.turbo' -o -name 'dist' \) -mmin +720 2>/dev/null); do
+    rm -rf "$cachedir" 2>/dev/null
+  done
+
+  # 8) Homebrew cache + downloads.
+  if command -v brew >/dev/null 2>&1; then
+    brew cleanup --prune=all >/dev/null 2>&1 || true
+  fi
+
+  # 9) Time Machine local snapshots. Often the silent killer on macOS.
+  #    Try without sudo first; if it fails the user can rerun by hand.
+  if command -v tmutil >/dev/null 2>&1; then
+    tmutil deletelocalsnapshots / >/dev/null 2>&1 || true
+  fi
+
+  after=$(free_gb_on_cwd)
+  freed=$((after - before))
+  log "cleanup: done ($after G free on $(pwd); ${freed}G recovered)"
+  echo "cleanup: ${after}G free (${freed}G recovered)"
+}
+
 cmd_start() {
   local attach_after=1 daemon_mode=0
   while [[ $# -gt 0 ]]; do
@@ -630,6 +937,11 @@ cmd_start() {
   command -v tmux >/dev/null || { err "tmux not on PATH"; exit 1; }
   local first_word; first_word=$(awk '{print $1}' <<<"$CODEX_CMD")
   command -v "$first_word" >/dev/null || { err "$first_word not on PATH"; exit 1; }
+
+  # Disk-space guard. Each pane is a worktree + node_modules + node MCP tree;
+  # a fresh start on a near-full disk has historically crashed the daemon
+  # mid-spin and orphaned MCP children. Refuse early instead.
+  ensure_disk_space || exit 1
 
   # Reap any stale daemon processes from prior runs before forking a new one.
   # `stop` doesn't always get called between restarts, and the daemon
@@ -684,6 +996,7 @@ cmd_start() {
 # The actual supervisor body, run by the daemon child.
 _start_supervisor_main() {
   load_prompts
+  write_state_file
   trap 'cleanup_session; exit 0' INT TERM
 
   tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -708,12 +1021,13 @@ _start_supervisor_main() {
   apply_pane_titles
 
   for i in "${!PROMPTS[@]}"; do
-    LIMIT_STREAK[$i]=0; LAST_RESPAWN[$i]=0; LAST_GOAL_DONE[$i]=0
+    LIMIT_STREAK[$i]=0; LAST_RESPAWN[$i]=0; LAST_GOAL_DONE[$i]=0; ITERATION_STARTED[$i]=$(date +%s)
     ( wait_ready_and_send "$i" "${PROMPTS[$i]}" ) &
   done
   wait
   log "all panes prompted; entering poll loop (every ${POLL_INTERVAL}s)"
 
+  local last_periodic_cleanup=$(date +%s)
   while true; do
     sleep "$POLL_INTERVAL"
     # If the tmux session is gone (e.g. user ran `stop`), exit cleanly.
@@ -724,6 +1038,16 @@ _start_supervisor_main() {
     for i in "${!PROMPTS[@]}"; do
       check_pane "$i" "${PROMPTS[$i]}"
     done
+    # Periodic cleanup: prune worktrees + sweep tmp dirs every
+    # PERIODIC_CLEANUP_SECS seconds. Lightweight enough to run from
+    # the poll loop; only does no-op work when nothing is stale.
+    if (( PERIODIC_CLEANUP_SECS > 0 )); then
+      local now_ts; now_ts=$(date +%s)
+      if (( now_ts - last_periodic_cleanup >= PERIODIC_CLEANUP_SECS )); then
+        last_periodic_cleanup=$now_ts
+        run_periodic_cleanup
+      fi
+    fi
   done
 }
 
@@ -731,10 +1055,72 @@ cmd_stop() {
   local was_running=0
   tmux has-session -t "$SESSION" 2>/dev/null && was_running=1
   cleanup_session
+  # After tearing down the panes, prune the worktrees they created. Each
+  # codex pane spawns its own git worktree + node_modules; without this,
+  # they pile up across restarts (we hit 11 GB orphaned in one session).
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git worktree prune 2>/dev/null
+  fi
   if (( was_running )); then
-    echo "stopped session '$SESSION' and reaped orphan MCP children"
+    echo "stopped session '$SESSION', reaped orphan MCP children, pruned worktrees"
   else
-    echo "no session '$SESSION' running; reaped any leftover MCP orphans"
+    echo "no session '$SESSION' running; reaped any leftover MCP orphans + pruned worktrees"
+  fi
+}
+
+# Lightweight in-flight cleanup, called periodically from the poll loop.
+# Targets the highest-yield, fastest-to-scan culprits only. Skips brew
+# cleanup and Time Machine snapshots (expensive); save those for the
+# explicit `cleanup` subcommand.
+run_periodic_cleanup() {
+  local before after removed=0
+  before=$(free_gb_on_cwd)
+
+  # 1) Walk `git worktree list` for every registered worktree (these can
+  #    live in /private/tmp, ~/.config/superpowers/worktrees, or anywhere)
+  #    and remove any older than PERIODIC_WORKTREE_AGE_MIN minutes that
+  #    isn't the main checkout or a "saved-before" snapshot.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local main_dir; main_dir=$(git rev-parse --show-toplevel)
+    git worktree prune 2>/dev/null
+    git worktree list --porcelain 2>/dev/null \
+      | awk '/^worktree /{print substr($0,10)}' \
+      | while read -r wt; do
+          [[ -z "$wt" || "$wt" == "$main_dir" ]] && continue
+          case "$(basename "$wt")" in *-saved-before) continue ;; esac
+          if find "$wt" -maxdepth 0 -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | grep -q .; then
+            git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+            removed=$((removed+1))
+          fi
+        done
+    git worktree prune 2>/dev/null
+  fi
+
+  # 2) /private/tmp/<repo>-* dirs that are NOT registered worktrees
+  #    (codex sometimes creates plain temp dirs there).
+  find /private/tmp -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+    case "$(basename "$d")" in
+      *-saved-before|claude-501) continue ;;
+    esac
+    rm -rf "$d" 2>/dev/null
+  done
+
+  # 3) Stale superpowers worktree dirs not registered (mmin +PERIODIC).
+  if [[ -d "$HOME/.config/superpowers/worktrees" ]]; then
+    find "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
+      -exec rm -rf {} + 2>/dev/null
+  fi
+
+  # 4) Orphan sibling clones in ~/Desktop/projects/<repo>-*.
+  find "$HOME/Desktop/projects" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+    [[ -e "$d/.git" ]] || continue
+    [[ -d "$d/.git" ]] && continue   # main checkout
+    rm -rf "$d"
+  done
+
+  after=$(free_gb_on_cwd)
+  if (( after != before )); then
+    log "periodic cleanup: ${before}G -> ${after}G free"
   fi
 }
 
@@ -744,27 +1130,67 @@ cmd_status() {
   fi
   load_prompts
   populate_pane_idx_from_running
-  printf '%-5s %-12s %-12s %s\n' 'PANE' 'LANE' 'STATE' 'TAIL'
-  printf '%-5s %-12s %-12s %s\n' '----' '----' '-----' '----'
-  local i state tail label cap
+  resolve_tasks_dir
+  # ANSI color helpers; auto-disabled when stdout isn't a TTY or NO_COLOR is set.
+  local C_RESET C_RED C_YELLOW C_GREEN C_CYAN C_DIM C_BOLD
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'
+    C_GREEN=$'\033[32m'; C_CYAN=$'\033[36m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  fi
+  printf '%s%-5s %-12s %-9s %5s %s%s\n' "$C_BOLD" 'PANE' 'LANE' 'STATE' 'QUEUE' 'TAIL' "$C_RESET"
+  printf '%s%-5s %-12s %-9s %5s %s%s\n' "$C_DIM"  '----' '----' '-----' '-----' '----' "$C_RESET"
+  local i state tail label cap color queue_count queue_file lane_lc
   for i in "${!PANE_IDX[@]}"; do
     cap=$(capture_tail "$(pane_target "$i")")
     label="${LANE_LABELS[$i]:-pane$i}"
-    # Order: most-specific first; READY is the catch-all for "codex is up
-    # but idle". The status bar always contains the model name (gpt-x.y),
-    # so its presence is a reliable "codex alive" signal even after the
-    # welcome banner (`Tip:`) scrolls off.
-    state="?"
-    if   printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then state="LIMITED"
-    elif printf '%s' "$cap" | grep -qF "Starting MCP"; then state="STARTING"
-    elif printf '%s' "$cap" | grep -qiE "Goal (achieved|complete|reached)"; then state="DONE"
-    elif printf '%s' "$cap" | grep -qF "Pursuing goal"; then state="WORKING"
-    elif printf '%s' "$cap" | grep -qF "Working"; then state="WORKING"
-    elif printf '%s' "$cap" | grep -qF "$READY_PATTERN"; then state="READY"
-    elif printf '%s' "$cap" | grep -qE "gpt-[0-9]"; then state="READY"
+    state="?"; color="$C_DIM"
+    if   printf '%s' "$cap" | grep -qF "$LIMIT_PATTERN"; then state="LIMITED";  color="$C_RED"
+    elif printf '%s' "$cap" | grep -qF "Starting MCP"; then  state="STARTING"; color="$C_CYAN"
+    elif printf '%s' "$cap" | grep -qiE "Goal (achieved|complete|reached)"; then state="DONE"; color="$C_YELLOW"
+    elif printf '%s' "$cap" | grep -qF "Pursuing goal"; then state="WORKING";  color="$C_GREEN"
+    elif printf '%s' "$cap" | grep -qF "Working"; then       state="WORKING";  color="$C_GREEN"
+    elif printf '%s' "$cap" | grep -qF "$READY_PATTERN"; then state="READY";    color="$C_CYAN"
+    elif printf '%s' "$cap" | grep -qE "gpt-[0-9]"; then     state="READY";    color="$C_CYAN"
+    fi
+    # Queue depth: count uncommented /goal lines in the lane queue file (if any).
+    queue_count="-"
+    lane_lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    if [[ -n "$TASKS_DIR" ]]; then
+      queue_file="$TASKS_DIR/${lane_lc}.txt"
+      if [[ -f "$queue_file" ]]; then
+        queue_count=$(grep -cE '^/goal' "$queue_file" 2>/dev/null); queue_count=${queue_count:-0}
+      fi
     fi
     tail=$(printf '%s' "$cap" | grep -v '^$' | tail -1 | tr -s ' \t' ' ' | head -c 60)
-    printf '%-5s %-12s %-12s %s\n' "${PANE_IDX[$i]}" "$label" "$state" "$tail"
+    printf '%-5s %-12s %s%-9s%s %5s %s\n' \
+      "${PANE_IDX[$i]}" "$label" "$color" "$state" "$C_RESET" "$queue_count" "$tail"
+  done
+  # Footer: a one-line summary so you don't have to count states by eye.
+  local total=${#PANE_IDX[@]}
+  echo
+  printf '%s%d panes · session %s · prompts %s%s\n' "$C_DIM" "$total" "$SESSION" "${PROMPTS_FILE:-?}" "$C_RESET"
+}
+
+# Peek at queued tasks per lane without consuming them.
+cmd_queue() {
+  load_prompts
+  resolve_tasks_dir
+  if [[ -z "$TASKS_DIR" || ! -d "$TASKS_DIR" ]]; then
+    echo "no tasks dir found (looked for ./codex-tasks then ~/codex-tasks)"; return 1
+  fi
+  local C_DIM C_BOLD C_RESET
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
+  fi
+  printf '%s%-15s %5s  %s%s\n' "$C_BOLD" 'QUEUE FILE' 'COUNT' 'NEXT TASK PREVIEW' "$C_RESET"
+  printf '%s%-15s %5s  %s%s\n' "$C_DIM"  '----------' '-----' '-----------------' "$C_RESET"
+  local f base count next
+  for f in "$TASKS_DIR"/*.txt; do
+    [[ -e "$f" ]] || continue
+    base=$(basename "$f")
+    count=$(grep -cE '^/goal' "$f" 2>/dev/null); count=${count:-0}
+    next=$(grep -E '^/goal' "$f" 2>/dev/null | head -1 | head -c 80)
+    printf '%-15s %5d  %s\n' "$base" "$count" "${next:-(empty)}"
   done
 }
 
@@ -856,6 +1282,8 @@ case "$1" in
   restart)  shift; cmd_restart "$@" ;;
   relayout) shift; cmd_relayout ;;
   prompts)  shift; cmd_prompts ;;
+  cleanup)  shift; cmd_cleanup ;;
+  queue|q)  shift; cmd_queue ;;
   -h|--help|help) cmd_help ;;
   # Backwards-compat: legacy flags went straight to start
   --prompts|--session|--no-open|--no-attach) cmd_start "$@" ;;

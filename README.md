@@ -213,6 +213,7 @@ always know which pane is which.
 | Recover           | After 3 consecutive hits: `tmux respawn-pane -k` + resend prompt. Per-pane 5-min cooldown prevents MCP-reload thrashing. |
 | Auto-resend       | When a pane shows `Goal achieved` and stays idle past the grace window, the prompt is resent automatically so the lane keeps iterating. |
 | Fresh-codex per goal | Before resending the next prompt, `tmux respawn-pane -k` kills the codex CLI and starts a new one (`CODEX_SUPERVISOR_RESPAWN_ON_GOAL=1`, default). Each iteration begins with a clean codex — no carried context, no stale MCP children, no leaked worktree handles. Set to `0` only if you specifically want the next `/goal` delivered into the same codex session. |
+| Idempotent terminal open | `start` and `attach` check `tmux list-clients` and skip the new-window spawn if a client is already attached. This prevents window pile-up when scripts / recovery loops invoke them repeatedly. Set `CODEX_SUPERVISOR_FORCE_OPEN=1` to force a new window even when one is attached. |
 
 ---
 
@@ -240,6 +241,7 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_RESEND_GRACE`      | `30`                                               |
 | `CODEX_SUPERVISOR_ON_COMPLETE`       | `queue` (`queue` / `queue-redo` / `redo` / `rest`) |
 | `CODEX_SUPERVISOR_RESPAWN_ON_GOAL`   | `1`                                                |
+| `CODEX_SUPERVISOR_FORCE_OPEN`        | `0`                                                |
 
 `start` accepts: `--prompts <file>`, `--session <name>`, `--no-attach`.
 
