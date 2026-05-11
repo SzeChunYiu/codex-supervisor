@@ -1854,10 +1854,15 @@ _start_supervisor_main() {
   ensure_codex_cmd
   load_prompts
   # INT/TERM = clean stop (kills session, exits 0, self-restart loop breaks).
-  # ERR      = crash (set -u / unexpected error) — log it and exit 2 so the
-  #            self-restart loop can recover without tearing down the session.
+  # ERR      = set -u unbound-variable crash — log it and exit 2 so the
+  #            self-restart loop recovers without tearing down the session.
+  # NOTE: do NOT add set -E here. set -E would inherit the ERR trap into
+  # every called function, causing false-positive crashes on expected
+  # non-zero returns (e.g. pgrep returning 1 = no matches, pop_next_task
+  # returning 1 = empty queue). The ERR trap here only covers the direct
+  # poll-loop body; set -u errors in called functions still kill the daemon
+  # and are logged via the handler since set -u triggers ERR in bash.
   trap 'cleanup_session; exit 0' INT TERM
-  set -E  # ERR trap inherited by functions called from here
   trap '_daemon_crash_handler $LINENO "$BASH_COMMAND"' ERR
 
   if (( _is_restart )); then
