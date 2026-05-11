@@ -1325,7 +1325,67 @@ check_pane() {
         fi
       fi
     else
-      LAST_GOAL_DONE[$i]=0
+      # "Goal achieved" is no longer visible in the capture — either the text
+      # scrolled out of view after codex exited, or codex printed an IDLE
+      # message before exiting. Do NOT blindly reset the timer: if it was
+      # already set, keep it running until it fires. Only clear it when we
+      # see the pane is actively working on a new task (the respawn succeeded).
+      if (( ${LAST_GOAL_DONE[$i]:-0} > 0 )); then
+        # Timer is live — check if it has now expired even though the
+        # "Goal achieved" text is gone.
+        local idle=$(( now - LAST_GOAL_DONE[$i] ))
+        if (( idle >= RESEND_GRACE_SECS )); then
+          LAST_GOAL_DONE[$i]=0
+          if ! capture_has "$cap" "Working" && ! capture_has "$cap" "Pursuing goal"; then
+            local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
+            local lane_lc effective="$ON_COMPLETE"
+            lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
+            if [[ " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
+              effective="queue-redo"
+            fi
+            case "$effective" in
+              queue|queue-redo)
+                if next_task=$(pop_next_task "$lane") && [[ -n "$next_task" ]]; then
+                  sent_label="next from queue"
+                elif [[ "$effective" == "queue-redo" ]]; then
+                  next_task="${PROMPTS[$i]}"; sent_label="redo (queue empty)"
+                fi
+                ;;
+              redo)
+                next_task="${PROMPTS[$i]}"; sent_label="redo"
+                ;;
+            esac
+            if [[ -n "$next_task" ]]; then
+              local _ram; _ram=$(free_ram_mb)
+              local _disk; _disk=$(free_gb_on_cwd)
+              if (( _ram < MIN_FREE_RAM_MB )); then
+                log "[pane $i $lane] low RAM (${_ram}MB) — deferring respawn"
+                run_periodic_cleanup; ITERATION_STARTED[$i]=$now
+              elif (( _disk < MIN_FREE_GB )); then
+                log "[pane $i $lane] low disk (${_disk}G) — deferring respawn"
+                run_periodic_cleanup; ITERATION_STARTED[$i]=$now
+              elif (( RESPAWN_ON_GOAL_DONE )); then
+                log "[pane $i $lane] respawning codex before next task ($sent_label) [timer expired, text gone]"
+                tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+                ( wait_ready_and_send "$i" "$next_task" ) &
+                ITERATION_STARTED[$i]=$now
+              else
+                log "[pane $i $lane] sending $sent_label [timer expired, text gone]: $(printf '%.60s' "$next_task")..."
+                send_prompt_to_pane "$target" "$next_task"
+                ITERATION_STARTED[$i]=$now
+              fi
+            else
+              log "[pane $i $lane] resting (no queued task)"
+            fi
+          fi
+        fi
+        # else: timer still counting — leave LAST_GOAL_DONE[$i] alone
+      elif capture_has "$cap" "Working" || capture_has "$cap" "Pursuing goal" \
+           || capture_has "$cap" "Starting MCP"; then
+        # New task is running — clear any stale timer
+        LAST_GOAL_DONE[$i]=0
+      fi
+      # else: pane is idle/ready with no prior timer — nothing to do
     fi
   fi
 
