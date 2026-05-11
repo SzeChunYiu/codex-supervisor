@@ -1384,8 +1384,31 @@ check_pane() {
            || capture_has "$cap" "Starting MCP"; then
         # New task is running — clear any stale timer
         LAST_GOAL_DONE[$i]=0
+      else
+        # Pane has no active timer and no visible "Goal achieved" text.
+        # For CONTINUOUS_LANES panes in ? state (codex exited, bash prompt):
+        # codex may have completed quietly (fast IDLE) without the poll ever
+        # seeing "Goal achieved". Respawn after grace period.
+        local _clc; _clc=$(printf '%s' "${LANE_LABELS[$i]}" | tr '[:upper:]' '[:lower:]')
+        if [[ " $CONTINUOUS_LANES " == *" $_clc "* ]]; then
+          local _cstate; _cstate=$(classify_capture_state "$cap")
+          local _cstarted=${ITERATION_STARTED[$i]:-0}
+          if [[ "$_cstate" == "?" ]] && (( _cstarted > 0 )) \
+             && (( now - _cstarted >= RESEND_GRACE_SECS )); then
+            local _cnext; _cnext=$(pop_next_task "${LANE_LABELS[$i]}") || true
+            [[ -z "$_cnext" ]] && _cnext="${PROMPTS[$i]}"
+            local _cram; _cram=$(free_ram_mb)
+            local _cdisk; _cdisk=$(free_gb_on_cwd)
+            if (( _cram >= MIN_FREE_RAM_MB )) && (( _cdisk >= MIN_FREE_GB )); then
+              log "[pane $i ${LANE_LABELS[$i]}] continuous lane in ? state (quiet exit); respawning"
+              tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+              ( wait_ready_and_send "$i" "$_cnext" ) &
+              ITERATION_STARTED[$i]=$now
+            fi
+          fi
+        fi
       fi
-      # else: pane is idle/ready with no prior timer — nothing to do
+      # end: auto-resend block
     fi
   fi
 
