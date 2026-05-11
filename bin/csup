@@ -1,0 +1,611 @@
+#!/bin/bash
+# csup — codex-supervisor launcher (cross-host)
+#
+# Reads a project's .codex-supervisor.toml + ~/.config/csup/hosts.toml and
+# starts/stops/inspects supervisor sessions across known hosts.
+#
+# Subcommands:
+#   csup start <project> [--host=<name>] [--fallback]
+#   csup submit <project> <lane> <goal text...>
+#   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+#   csup stop  <project> [--host=<name>]
+#   csup status [<project>]
+#   csup ls
+#   csup hosts
+#
+# Project lookup order (matches a project name to a directory):
+#   1) cwd if .codex-supervisor.toml present in cwd
+#   2) ~/Desktop/projects/<name>/.codex-supervisor.toml
+#   3) ~/<name>/.codex-supervisor.toml
+#
+# Host detection (which host am I on right now):
+#   uname -n is matched against hosts[*].hostname_match.
+#
+# Fallback semantics:
+#   --fallback (or env CSUP_FALLBACK=1): if the requested host is unreachable,
+#   run the lanes locally instead. Prints a clear warning. Without --fallback,
+#   prints the warning and exits non-zero.
+#
+# This script is idempotent: re-running `start` on an active session re-attaches
+# rather than failing.
+
+set -u
+HOSTS_FILE="${CSUP_HOSTS_FILE:-$HOME/.config/csup/hosts.toml}"
+SUPERVISOR="${CSUP_SUPERVISOR:-$HOME/codex-supervisor.sh}"
+DEFAULT_RUNTIME_ROOT="$HOME/.codex-supervisor"
+[[ -d "/Volumes/MyDrive" ]] && DEFAULT_RUNTIME_ROOT="/Volumes/MyDrive/codex-supervisor"
+RUNTIME_ROOT="${CSUP_RUNTIME_ROOT:-${CODEX_SUPERVISOR_ROOT:-$DEFAULT_RUNTIME_ROOT}}"
+
+err() { printf 'csup: error: %s\n' "$*" >&2; }
+warn() { printf 'csup: warn: %s\n' "$*" >&2; }
+info() { printf 'csup: %s\n' "$*"; }
+
+join_csv() {
+  local IFS=,
+  printf '%s' "$*"
+}
+
+# ---------------------------------------------------------------------------
+# Tiny TOML reader (Python-backed for portability across macOS / Linux awks).
+# Handles the subset we use:
+#   key = "value"
+#   key = value          (no quotes — int / bool / bare word)
+#   [section.subsection]
+# Comments (#) and blank lines are skipped. Multiline arrays not supported.
+# Usage: toml_get <file> <section> <key>  -> prints value (no quotes)
+# ---------------------------------------------------------------------------
+toml_get() {
+  local file="$1" section="$2" key="$3"
+  python3 - "$file" "$section" "$key" <<'PY'
+import re, sys
+path, want_sec, want_key = sys.argv[1], sys.argv[2], sys.argv[3]
+cur = ""
+try:
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("["):
+                cur = s.strip("[]").replace('"', '')
+                continue
+            if cur != want_sec:
+                continue
+            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\s*#.*)?$', s)
+            if m and m.group(1) == want_key:
+                v = m.group(2).strip()
+                if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+                    v = v[1:-1]
+                print(v)
+                sys.exit(0)
+except FileNotFoundError:
+    pass
+PY
+}
+
+toml_sections() {
+  local file="$1" prefix="$2"
+  python3 - "$file" "$prefix" <<'PY'
+import sys
+path, prefix = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                name = s.strip("[]").replace('"', '')
+                if name.startswith(prefix):
+                    print(name[len(prefix):])
+except FileNotFoundError:
+    pass
+PY
+}
+
+# ---------------------------------------------------------------------------
+# Project discovery
+# ---------------------------------------------------------------------------
+project_candidates() {
+  local d
+  for d in \
+    "$HOME/Desktop/projects"/* \
+    "/home/billy/Desktop/projects"/* \
+    "/Volumes/MyDrive/nnbar/nnbar/simulation"; do
+    [[ -d "$d" && -f "$d/.codex-supervisor.toml" ]] || continue
+    ( cd "$d" && pwd )
+  done
+}
+
+find_project_config() {
+  local name="$1"
+  if [[ -z "$name" && -f "./.codex-supervisor.toml" ]]; then
+    pwd; return 0
+  fi
+  for d in \
+    "./$name" \
+    "$HOME/Desktop/projects/$name" \
+    "$HOME/$name" \
+    "/home/billy/Desktop/projects/$name"; do
+    if [[ -f "$d/.codex-supervisor.toml" ]]; then
+      ( cd "$d" && pwd ); return 0
+    fi
+  done
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    local cfg_name; cfg_name=$(toml_get "$d/.codex-supervisor.toml" "project" "name")
+    if [[ "$cfg_name" == "$name" ]]; then
+      echo "$d"; return 0
+    fi
+  done < <(project_candidates)
+  return 1
+}
+
+list_projects() {
+  while read -r d; do
+    [[ -n "$d" ]] || continue
+    local name; name=$(toml_get "$d/.codex-supervisor.toml" "project" "name")
+    [[ -z "$name" ]] && name=$(basename "$d")
+    printf '  %-20s  %s\n' "$name" "$d"
+  done < <(project_candidates)
+}
+
+# ---------------------------------------------------------------------------
+# Host discovery & reachability
+# ---------------------------------------------------------------------------
+this_host() {
+  local h me; me=$(uname -n)
+  while read -r h; do
+    [[ -z "$h" ]] && continue
+    local match; match=$(toml_get "$HOSTS_FILE" "hosts.$h" "hostname_match")
+    if [[ -n "$match" && "$me" == *"$match"* ]]; then
+      echo "$h"; return 0
+    fi
+  done < <(toml_sections "$HOSTS_FILE" "hosts.")
+  echo "unknown"
+}
+
+host_reachable() {
+  local host="$1"
+  # If we ARE this host, we're trivially reachable.
+  [[ "$(this_host)" == "$host" ]] && return 0
+  local probe; probe=$(toml_get "$HOSTS_FILE" "hosts.$host" "reachable")
+  local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$host" "ssh")
+  if [[ "$ssh_target" == "local" ]]; then
+    # ssh="local" but we're not on this host -> can't reach it
+    return 1
+  fi
+  if [[ -z "$probe" ]]; then
+    probe="ssh -o ConnectTimeout=3 -o BatchMode=yes $ssh_target true"
+  fi
+  eval "$probe" 2>/dev/null
+}
+
+list_hosts() {
+  local me; me=$(this_host)
+  printf '  %-12s  %-30s  %-9s  %s\n' HOST SSH STATUS NOTES
+  while read -r h; do
+    [[ -z "$h" ]] && continue
+    local s; s=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
+    local d; d=$(toml_get "$HOSTS_FILE" "hosts.$h" "description")
+    local status
+    if host_reachable "$h"; then status=up; else status=down; fi
+    [[ "$h" == "$me" ]] && status="$status (this)"
+    printf '  %-12s  %-30s  %-9s  %s\n' "$h" "$s" "$status" "$d"
+  done < <(toml_sections "$HOSTS_FILE" "hosts.")
+}
+
+free_ram_mb() {
+  if [[ -n "${CSUP_GOVERNOR_FREE_RAM_MB:-}" ]]; then echo "$CSUP_GOVERNOR_FREE_RAM_MB"; return; fi
+  if command -v free >/dev/null 2>&1; then
+    free -m 2>/dev/null | awk '/^Mem:/ { if ($7 ~ /^[0-9]+$/) print $7; else print $4; found=1 } END { if (!found) print 0 }'
+    return
+  fi
+  local pgsz; pgsz=$(vm_stat 2>/dev/null | awk '/page size of/{print $8}')
+  [[ -z "$pgsz" ]] && pgsz=16384
+  vm_stat 2>/dev/null | awk -v pg="$pgsz" '
+    /Pages free/     { f=$3+0 }
+    /Pages inactive/ { i=$3+0 }
+    END { printf "%d\n", (f+i)*pg/1024/1024 }
+  '
+}
+
+free_disk_gb() {
+  if [[ -n "${CSUP_GOVERNOR_FREE_DISK_GB:-}" ]]; then echo "$CSUP_GOVERNOR_FREE_DISK_GB"; return; fi
+  mkdir -p "$RUNTIME_ROOT" 2>/dev/null || true
+  df -k "$RUNTIME_ROOT" 2>/dev/null | awk 'NR==2 { printf "%d\n", $4/1024/1024; found=1 } END { if (!found) print 0 }'
+}
+
+load1() {
+  if [[ -n "${CSUP_GOVERNOR_LOAD1:-}" ]]; then echo "$CSUP_GOVERNOR_LOAD1"; return; fi
+  uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/'
+}
+
+cpu_count() {
+  if [[ -n "${CSUP_GOVERNOR_CPU_COUNT:-}" ]]; then echo "$CSUP_GOVERNOR_CPU_COUNT"; return; fi
+  sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1
+}
+
+running_local_panes() {
+  if [[ -n "${CSUP_GOVERNOR_RUNNING_PANES:-}" ]]; then echo "$CSUP_GOVERNOR_RUNNING_PANES"; return; fi
+  tmux list-panes -a 2>/dev/null | wc -l | tr -d ' '
+}
+
+capacity_panes() {
+  local free_ram free_disk cpus load running max_total ram_per disk_per reserve_ram reserve_disk load_room ram_room disk_room
+  free_ram=$(free_ram_mb)
+  free_disk=$(free_disk_gb)
+  cpus=$(cpu_count)
+  load=$(load1)
+  running=$(running_local_panes)
+  max_total="${CSUP_GOVERNOR_MAX_TOTAL_PANES:-8}"
+  ram_per="${CSUP_GOVERNOR_RAM_MB_PER_PANE:-700}"
+  disk_per="${CSUP_GOVERNOR_DISK_MB_PER_PANE:-1024}"
+  reserve_ram="${CSUP_GOVERNOR_MIN_FREE_RAM_MB:-2048}"
+  reserve_disk="${CSUP_GOVERNOR_MIN_FREE_DISK_GB:-10}"
+
+  ram_room=$(( (free_ram - reserve_ram) / ram_per ))
+  (( ram_room < 0 )) && ram_room=0
+  disk_room=$(( (free_disk - reserve_disk) * 1024 / disk_per ))
+  (( disk_room < 0 )) && disk_room=0
+  load_room=$(python3 - "$cpus" "$load" <<'PY'
+import math, sys
+cpus = max(1, int(float(sys.argv[1])))
+load = float(sys.argv[2])
+limit = float(__import__("os").environ.get("CSUP_GOVERNOR_MAX_LOAD_PER_CPU", "1.25"))
+print(max(0, int(math.floor(cpus * limit - load))))
+PY
+)
+  local room=$(( max_total - running ))
+  (( room < 0 )) && room=0
+  for v in "$ram_room" "$disk_room" "$load_room"; do
+    (( v < room )) && room="$v"
+  done
+  echo "$room"
+}
+
+session_running_local() {
+  tmux has-session -t "$1" 2>/dev/null
+}
+
+queue_lanes_for_tasks_dir() {
+  local tasks_dir="$1"
+  [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || return 0
+  local f lane count
+  for f in "$tasks_dir"/*.txt; do
+    [[ -e "$f" ]] || continue
+    lane="${f##*/}"; lane="${lane%.txt}"
+    count=$(grep -cE '^/goal' "$f" 2>/dev/null || true)
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    (( count > 0 )) && printf '%06d %s\n' "$count" "$lane"
+  done | sort -rn
+}
+
+run_local_start() {
+  local project_dir="$1" session="$2" prompts="$3" tasks_dir="$4" lanes="${5:-}" max_panes="${6:-}"
+  if [[ -n "$tasks_dir" ]]; then
+    ( cd "$project_dir" && \
+      CODEX_SUPERVISOR_ROOT="$RUNTIME_ROOT" \
+      CODEX_SUPERVISOR_SESSION="$session" \
+      CODEX_SUPERVISOR_PROMPTS="$project_dir/$prompts" \
+      CODEX_SUPERVISOR_TASKS_DIR="$project_dir/$tasks_dir" \
+      CODEX_SUPERVISOR_LANES="$lanes" \
+      CODEX_SUPERVISOR_MAX_PANES="$max_panes" \
+      "$SUPERVISOR" start --no-attach ) | tail -5
+  else
+    ( cd "$project_dir" && \
+      CODEX_SUPERVISOR_ROOT="$RUNTIME_ROOT" \
+      CODEX_SUPERVISOR_SESSION="$session" \
+      CODEX_SUPERVISOR_PROMPTS="$project_dir/$prompts" \
+      CODEX_SUPERVISOR_LANES="$lanes" \
+      CODEX_SUPERVISOR_MAX_PANES="$max_panes" \
+      "$SUPERVISOR" start --no-attach ) | tail -5
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: start
+# ---------------------------------------------------------------------------
+cmd_start() {
+  local project="" target_host="" fallback=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --host=*) target_host="${1#--host=}" ;;
+      --fallback) fallback=1 ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *) project="$1" ;;
+    esac
+    shift
+  done
+
+  [[ -z "$project" ]] && { err "usage: csup start <project> [--host=<name>] [--fallback]"; return 2; }
+
+  local project_dir; project_dir=$(find_project_config "$project")
+  [[ -z "$project_dir" ]] && { err "no .codex-supervisor.toml found for project '$project'"; return 1; }
+  local cfg="$project_dir/.codex-supervisor.toml"
+
+  # If no --host specified, start every host's lanes (each on its own machine)
+  local hosts_to_start=()
+  if [[ -n "$target_host" ]]; then
+    hosts_to_start=("$target_host")
+  else
+    while read -r h; do
+      [[ -n "$h" ]] && hosts_to_start+=("$h")
+    done < <(toml_sections "$cfg" "hosts.")
+  fi
+
+  local me; me=$(this_host)
+  for h in "${hosts_to_start[@]}"; do
+    local prompts; prompts=$(toml_get "$cfg" "hosts.$h" "prompts")
+    local tasks_dir; tasks_dir=$(toml_get "$cfg" "hosts.$h" "tasks_dir")
+    local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+    [[ -z "$session" ]] && session="${project}-${h}"
+    if [[ -z "$prompts" ]]; then
+      warn "host '$h' missing prompts in $cfg — skipping"
+      continue
+    fi
+
+    if [[ "$h" == "$me" ]]; then
+      info "starting '$session' locally on $h"
+      run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "" ""
+    else
+      if host_reachable "$h"; then
+        local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
+        local task_env=""
+        [[ -n "$tasks_dir" ]] && task_env="CODEX_SUPERVISOR_TASKS_DIR='$project_dir/$tasks_dir'"
+        info "starting '$session' on $h via $ssh_target"
+        ssh "$ssh_target" "
+          export PATH=\$HOME/.local/bin:\$HOME/.nvm/versions/node/v24.12.0/bin:\$PATH
+          cd '$project_dir' || exit 1
+          CODEX_SUPERVISOR_SESSION='$session' \
+          CODEX_SUPERVISOR_PROMPTS='$project_dir/$prompts' \
+          $task_env \
+          ~/codex-supervisor.sh start --no-attach
+        " 2>&1 | tail -5
+      else
+        warn "host '$h' unreachable"
+        if (( fallback )); then
+          warn "  --fallback: starting '$session' locally on $me instead"
+          run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "" ""
+        else
+          warn "  skipping (re-run with --fallback to run on $me)"
+        fi
+      fi
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: submit
+# ---------------------------------------------------------------------------
+cmd_submit() {
+  local project="" lane="" target_host=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --host=*) target_host="${1#--host=}"; shift ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *)
+        project="$1"; shift
+        lane="${1:-}"; [[ $# -gt 0 ]] && shift
+        break
+        ;;
+    esac
+  done
+  [[ -n "$project" && -n "$lane" && $# -gt 0 ]] || { err "usage: csup submit <project> <lane> <goal text...>"; return 2; }
+  local project_dir; project_dir=$(find_project_config "$project")
+  [[ -z "$project_dir" ]] && { err "no .codex-supervisor.toml found for project '$project'"; return 1; }
+  local cfg="$project_dir/.codex-supervisor.toml"
+  local h tasks_dir=""
+  if [[ -n "$target_host" ]]; then
+    tasks_dir=$(toml_get "$cfg" "hosts.$target_host" "tasks_dir")
+  else
+    while read -r h; do
+      [[ -n "$h" ]] || continue
+      tasks_dir=$(toml_get "$cfg" "hosts.$h" "tasks_dir")
+      [[ -n "$tasks_dir" ]] && break
+    done < <(toml_sections "$cfg" "hosts.")
+  fi
+  [[ -n "$tasks_dir" ]] || { err "project '$project' has no tasks_dir configured"; return 1; }
+  mkdir -p "$project_dir/$tasks_dir"
+  local text="$*"
+  [[ "$text" == /goal* ]] || text="/goal $text"
+  printf '%s\n' "$text" >> "$project_dir/$tasks_dir/$lane.txt"
+  printf 'queued %s/%s: %s\n' "$project" "$lane" "$text"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: govern
+# ---------------------------------------------------------------------------
+cmd_govern() {
+  local mode="dry-run" target_project="" target_host=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --dry-run) mode="dry-run" ;;
+      --apply) mode="apply" ;;
+      --project=*) target_project="${1#--project=}" ;;
+      --host=*) target_host="${1#--host=}" ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *) target_project="$1" ;;
+    esac
+    shift
+  done
+
+  local me; me=$(this_host)
+  local capacity; capacity=$(capacity_panes)
+  local remaining="$capacity"
+  printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s)\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity"
+  if (( remaining <= 0 )); then
+    printf 'SKIP all: no local capacity (CPU/RAM/disk budget exhausted)\n'
+    return 0
+  fi
+
+  local projects=()
+  if [[ -n "$target_project" ]]; then
+    projects=("$target_project")
+  else
+    while read -r line; do
+      local name; name=$(echo "$line" | awk '{print $1}')
+      [[ -n "$name" ]] && projects+=("$name")
+    done < <(list_projects)
+  fi
+
+  local p project_dir cfg h prompts tasks_dir session queue_abs qline count lane selected_lanes=() queued_total lane_budget lanes_csv max_panes
+  for p in "${projects[@]}"; do
+    project_dir=$(find_project_config "$p") || continue
+    [[ -n "$project_dir" ]] || continue
+    cfg="$project_dir/.codex-supervisor.toml"
+    while read -r h; do
+      [[ -n "$h" ]] || continue
+      [[ -n "$target_host" && "$h" != "$target_host" ]] && continue
+      [[ "$h" == "$me" ]] || { printf 'SKIP %s/%s: non-local host for this governor pass\n' "$p" "$h"; continue; }
+
+      prompts=$(toml_get "$cfg" "hosts.$h" "prompts")
+      tasks_dir=$(toml_get "$cfg" "hosts.$h" "tasks_dir")
+      session=$(toml_get "$cfg" "hosts.$h" "session")
+      [[ -z "$session" ]] && session="${p}-${h}"
+      [[ -z "$prompts" ]] && { printf 'SKIP %s/%s: missing prompts config\n' "$p" "$h"; continue; }
+      if session_running_local "$session"; then
+        printf 'SKIP %s/%s session=%s: already running\n' "$p" "$h" "$session"
+        continue
+      fi
+      if [[ -z "$tasks_dir" ]]; then
+        printf 'SKIP %s/%s session=%s: no tasks_dir configured\n' "$p" "$h" "$session"
+        continue
+      fi
+      queue_abs="$project_dir/$tasks_dir"
+      selected_lanes=()
+      queued_total=0
+      lane_budget=$(( remaining - 1 )) # reserve one generated PLANNER pane.
+      (( lane_budget < 1 )) && { printf 'SKIP %s/%s session=%s: capacity reserved for planner only\n' "$p" "$h" "$session"; continue; }
+      while read -r qline; do
+        [[ -n "$qline" ]] || continue
+        count="${qline%% *}"
+        lane="${qline#* }"
+        selected_lanes+=("$lane")
+        queued_total=$((queued_total + 10#$count))
+        (( ${#selected_lanes[@]} >= lane_budget )) && break
+      done < <(queue_lanes_for_tasks_dir "$queue_abs")
+
+      if (( ${#selected_lanes[@]} == 0 )); then
+        printf 'SKIP %s/%s session=%s: no queued /goal tasks\n' "$p" "$h" "$session"
+        continue
+      fi
+
+      lanes_csv=$(join_csv "${selected_lanes[@]}")
+      max_panes=$(( ${#selected_lanes[@]} + 1 ))
+      printf 'START %s/%s session=%s lanes=%s panes=%s queued=%s\n' "$p" "$h" "$session" "$lanes_csv" "$max_panes" "$queued_total"
+      if [[ "$mode" == "apply" ]]; then
+        run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "$lanes_csv" "$max_panes"
+      fi
+      remaining=$(( remaining - max_panes ))
+      (( remaining <= 0 )) && return 0
+    done < <(toml_sections "$cfg" "hosts.")
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: stop
+# ---------------------------------------------------------------------------
+cmd_stop() {
+  local project="" target_host=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --host=*) target_host="${1#--host=}" ;;
+      *) project="$1" ;;
+    esac
+    shift
+  done
+  [[ -z "$project" ]] && { err "usage: csup stop <project> [--host=<name>]"; return 2; }
+  local project_dir; project_dir=$(find_project_config "$project")
+  [[ -z "$project_dir" ]] && { err "no project found"; return 1; }
+  local cfg="$project_dir/.codex-supervisor.toml"
+  local me; me=$(this_host)
+
+  local hosts_to_stop=()
+  if [[ -n "$target_host" ]]; then hosts_to_stop=("$target_host")
+  else while read -r h; do [[ -n "$h" ]] && hosts_to_stop+=("$h"); done < <(toml_sections "$cfg" "hosts."); fi
+
+  for h in "${hosts_to_stop[@]}"; do
+    local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+    [[ -z "$session" ]] && session="${project}-${h}"
+    if [[ "$h" == "$me" ]]; then
+      info "stopping '$session' on $h"
+      CODEX_SUPERVISOR_SESSION="$session" "$SUPERVISOR" stop 2>&1 | tail -3
+    else
+      if host_reachable "$h"; then
+        local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
+        info "stopping '$session' on $h"
+        ssh "$ssh_target" "CODEX_SUPERVISOR_SESSION='$session' ~/codex-supervisor.sh stop" 2>&1 | tail -3
+      else
+        warn "host '$h' unreachable; can't stop '$session'"
+      fi
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: status
+# ---------------------------------------------------------------------------
+cmd_status() {
+  local project="${1:-}"
+  local me; me=$(this_host)
+
+  local projects=()
+  if [[ -n "$project" ]]; then
+    projects=("$project")
+  else
+    while read -r line; do
+      local name=$(echo "$line" | awk '{print $1}')
+      [[ -n "$name" ]] && projects+=("$name")
+    done < <(list_projects)
+  fi
+
+  for p in "${projects[@]}"; do
+    local d; d=$(find_project_config "$p")
+    [[ -z "$d" ]] && continue
+    local cfg="$d/.codex-supervisor.toml"
+    printf '\n=== %s ===\n' "$p"
+    while read -r h; do
+      [[ -z "$h" ]] && continue
+      local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+      [[ -z "$session" ]] && session="${p}-${h}"
+      printf '\n[%s] session=%s\n' "$h" "$session"
+      if [[ "$h" == "$me" ]]; then
+        CODEX_SUPERVISOR_SESSION="$session" "$SUPERVISOR" status 2>&1 | head -12
+      else
+        if host_reachable "$h"; then
+          local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
+          ssh "$ssh_target" "CODEX_SUPERVISOR_SESSION='$session' ~/codex-supervisor.sh status 2>&1 | head -12"
+        else
+          echo "  (host unreachable)"
+        fi
+      fi
+    done < <(toml_sections "$cfg" "hosts.")
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+sub="${1:-}"; shift 2>/dev/null || true
+case "$sub" in
+  start)   cmd_start "$@" ;;
+  submit)  cmd_submit "$@" ;;
+  govern)  cmd_govern "$@" ;;
+  stop)    cmd_stop "$@" ;;
+  status)  cmd_status "$@" ;;
+  ls|list) list_projects ;;
+  hosts)   list_hosts ;;
+  ""|help|-h|--help)
+    cat <<'USAGE'
+csup — codex-supervisor cross-host launcher
+
+  csup start <project> [--host=<name>] [--fallback]
+  csup submit <project> <lane> <goal text...>
+  csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+  csup stop  <project> [--host=<name>]
+  csup status [<project>]
+  csup ls            list projects with .codex-supervisor.toml
+  csup hosts         list known hosts and reachability
+USAGE
+    ;;
+  *) err "unknown subcommand: $sub"; exit 2 ;;
+esac

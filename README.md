@@ -43,12 +43,15 @@ Requirements:
 ## Quick start
 
 ```sh
-# 1. Create a prompts file (one prompt per line). Each line is sent verbatim
-#    to its codex pane -- include `/goal ` etc. yourself.
+# 1. Create a prompts file. Every non-comment line must start with `/goal`,
+#    stay within 50 words, and point at markdown instructions.
 cp codex-prompts.example.txt codex-prompts.txt
 $EDITOR codex-prompts.txt
 
-# 2. Start the supervisor.
+# 2. Validate the prompt contract.
+codex-supervisor validate-prompts
+
+# 3. Start the supervisor.
 codex-supervisor start
 
 # (or just `codex-supervisor` -- with no subcommand it runs `start`)
@@ -56,7 +59,16 @@ codex-supervisor start
 
 A new terminal window opens attached to the tmux session, with one tiled
 codex pane per prompt. Each pane runs the `codex` CLI; once it's ready,
-the supervisor auto-types the prompt and submits it.
+the supervisor auto-types the prompt and submits it. By default the
+supervisor also appends one generated `PLANNER` pane (unless your prompt file
+already has a planner/leader lane). That pane is the team lead: it reviews
+recent pane updates, refreshes `docs/parallel-sessions/TEAM_PLAN.md`, and
+queues the next compact-safe work for the worker lanes.
+
+Default safety cap: at most 8 prompts/panes per supervisor session
+(`CODEX_SUPERVISOR_MAX_PANES=8`). Start fewer when the work or host resources
+do not justify 8. For 12-20 total Codex workers, split deliberately across
+projects/hosts with `csup`; keep each project/batch right-sized.
 
 ---
 
@@ -77,7 +89,9 @@ won't re-type them.
 /goal You are PANE 1, lane perf. Read docs/parallel-sessions.md and docs/parallel-sessions/perf.md, then iterate per the protocol until rate-limited.
 ```
 
-Each prompt is ~20 words, one line, no embedded newlines.
+Each prompt is one line, no embedded newlines, and at most 50 words. The
+supervisor validates this before launch. See [`docs/prompts.md`](docs/prompts.md)
+for the full prompt contract.
 
 Detail lives in `.md` files under your repo:
 
@@ -138,8 +152,8 @@ This kind of multi-clause prompt fails reliably:
 - Even when delivered, the agent sees the rules only once and forgets
   the merge step on iteration 2.
 
-If you find yourself writing > 30 words in a `/goal`, move detail to a
-`.md`.
+If you find yourself writing extra clauses into a `/goal`, move that detail to
+a `.md`. The hard budget is 50 words; shorter is better.
 
 ### Cwd matters
 
@@ -168,6 +182,8 @@ codex-supervisor [SUBCOMMAND] [args...]
   restart <pane|lane>       respawn one pane with a fresh codex
   relayout                  re-apply the equal MxN grid (use after window resize)
   prompts                   print the resolved prompts file
+  validate-prompts          validate /goal + 50-word + markdown-backed prompts
+  queue                     show queued tasks per lane
   help                      this help text
 ```
 
@@ -183,6 +199,25 @@ codex-supervisor restart parity
 codex-supervisor logs -f
 codex-supervisor stop
 ```
+
+### Cross-project system mode (`csup`)
+
+`bin/csup` is the project/host-level control plane. Projects expose
+`.codex-supervisor.toml` and optional `codex-tasks/<lane>.txt` queues; the
+governor scans those queues, checks local CPU/RAM/disk headroom, and starts
+only the queued lanes that fit.
+
+```sh
+csup submit <project> <lane> "short task for that lane"
+csup govern --dry-run     # explain what would start
+csup govern --apply       # start right-sized lane subsets
+csup status               # all configured projects/hosts
+```
+
+`govern` passes `CODEX_SUPERVISOR_LANES=<lane,csv>` and
+`CODEX_SUPERVISOR_MAX_PANES=<selected lanes + planner>` into
+`codex-supervisor`, so one large prompts file can be reused while the system
+opens only the lanes with queued work and available resources.
 
 ---
 
@@ -207,10 +242,13 @@ always know which pane is which.
 | Step              | Mechanism                                                                 |
 | ----------------- | ------------------------------------------------------------------------- |
 | Launch            | `tmux new-session` + N-1 `tmux split-window`, then equal-grid layout.     |
+| Planner lane      | Adds exactly one `PLANNER` pane by default (`CODEX_SUPERVISOR_PLANNER=1`) unless the prompt file already defines planner/leader. |
 | Wait for ready    | Polls `tmux capture-pane` for `Tip:` AND no `Starting MCP`, then settles 5s and re-verifies before sending. |
 | Send prompt       | `tmux send-keys` types the prompt + double Enter (codex's slash-command popup eats the first). |
 | Detect limit      | Polls each pane every 60s for `You've hit your usage limit`.              |
-| Recover           | After 3 consecutive hits: `tmux respawn-pane -k` + resend prompt. Per-pane 5-min cooldown prevents MCP-reload thrashing. |
+| Recover           | After 3 consecutive hits, dead pane detection, or compact-task failure: `tmux respawn-pane -k` + resend prompt. Per-pane cooldown prevents MCP-reload thrashing. |
+| Recreate session  | If the tmux session disappears while the daemon is still alive, it runs cleanup/resource checks and rebuilds the session (`CODEX_SUPERVISOR_AUTO_RECREATE_SESSION=1`). |
+| Avoid compaction  | Short markdown-backed prompts, fresh Codex per goal, a 45-minute iteration cap, and fast respawn on compacting/compact-task markers keep lanes out of long-context compaction. |
 | Auto-resend       | When a pane shows `Goal achieved` and stays idle past the grace window, the prompt is resent automatically so the lane keeps iterating. |
 | Fresh-codex per goal | Before resending the next prompt, `tmux respawn-pane -k` kills the codex CLI and starts a new one (`CODEX_SUPERVISOR_RESPAWN_ON_GOAL=1`, default). Each iteration begins with a clean codex — no carried context, no stale MCP children, no leaked worktree handles. Set to `0` only if you specifically want the next `/goal` delivered into the same codex session. |
 | Idempotent terminal open | `start` and `attach` check `tmux list-clients` and skip the new-window spawn if a client is already attached. This prevents window pile-up when scripts / recovery loops invoke them repeatedly. Set `CODEX_SUPERVISOR_FORCE_OPEN=1` to force a new window even when one is attached. |
@@ -226,6 +264,13 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_PROMPTS`           | `./codex-prompts.txt` then `~/codex-prompts.txt`   |
 | `CODEX_SUPERVISOR_SESSION`           | `codex-supervisor`                                 |
 | `CODEX_SUPERVISOR_CMD`               | `codex --dangerously-bypass-approvals-and-sandbox` |
+| `CODEX_SUPERVISOR_ROOT`              | `/Volumes/MyDrive/codex-supervisor` when mounted; else `~/.codex-supervisor` |
+| `CODEX_SUPERVISOR_MCP_MODE`          | `off` (`off` / `inherit`)                          |
+| `CODEX_SUPERVISOR_CODEX_HOME`        | `$CODEX_SUPERVISOR_ROOT/codex-home/<session>`      |
+| `CODEX_SUPERVISOR_CACHE_ROOT`        | `$CODEX_SUPERVISOR_ROOT/cache/<session>`           |
+| `CODEX_SUPERVISOR_TMP_ROOT`          | `$CODEX_SUPERVISOR_ROOT/tmp/<session>`             |
+| `CODEX_SUPERVISOR_CODEX_HOME_PROFILE`| `lean` (`lean` omits skills/memories/plugins; `full` links them) |
+| `CODEX_SUPERVISOR_NICE`              | `5` (`0` disables CPU priority lowering)           |
 | `CODEX_SUPERVISOR_POLL`              | `60`                                               |
 | `CODEX_SUPERVISOR_READY_TIMEOUT`     | `600`                                              |
 | `CODEX_SUPERVISOR_READY`             | `Tip: `                                            |
@@ -235,12 +280,23 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_HITS`              | `3`                                                |
 | `CODEX_SUPERVISOR_RESPAWN_COOLDOWN`  | `300`                                              |
 | `CODEX_SUPERVISOR_CAPTURE_LINES`     | `80`                                               |
-| `CODEX_SUPERVISOR_LOG`               | `~/codex-supervisor.log`                           |
+| `CODEX_SUPERVISOR_LOG`               | `$CODEX_SUPERVISOR_ROOT/logs/<session>.log`        |
 | `CODEX_SUPERVISOR_OPEN`              | `1`                                                |
 | `CODEX_SUPERVISOR_AUTO_RESEND`       | `1`                                                |
 | `CODEX_SUPERVISOR_RESEND_GRACE`      | `30`                                               |
 | `CODEX_SUPERVISOR_ON_COMPLETE`       | `queue` (`queue` / `queue-redo` / `redo` / `rest`) |
 | `CODEX_SUPERVISOR_RESPAWN_ON_GOAL`   | `1`                                                |
+| `CODEX_SUPERVISOR_PLANNER`           | `1` (append one generated planner lane if missing) |
+| `CODEX_SUPERVISOR_PLANNER_DOC`       | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/planner.md` |
+| `CODEX_SUPERVISOR_RESPAWN_DEAD_PANES`| `1`                                                |
+| `CODEX_SUPERVISOR_AUTO_RECREATE_SESSION` | `1`                                            |
+| `CODEX_SUPERVISOR_MAX_ITERATION_SECS`| `2700`                                             |
+| `CODEX_SUPERVISOR_MAX_PROMPT_WORDS`  | `50`                                               |
+| `CODEX_SUPERVISOR_LANES`             | unset; optional comma/space lane allowlist          |
+| `CODEX_SUPERVISOR_MAX_PANES`         | `8`                                                |
+| `CODEX_SUPERVISOR_RAM_MB_PER_PANE`   | `600`                                              |
+| `CODEX_SUPERVISOR_DISK_MB_PER_PANE`  | `1024`                                             |
+| `CODEX_SUPERVISOR_START_STAGGER_SECS`| unset = auto (`0` for <=2 panes, `1` for 3-5, `2` for 6+) |
 | `CODEX_SUPERVISOR_FORCE_OPEN`        | `0`                                                |
 
 `start` accepts: `--prompts <file>`, `--session <name>`, `--no-attach`.
@@ -252,12 +308,20 @@ Everything is overridable via env or CLI without editing the script:
 ```text
 # Comments start with #, blank lines ignored.
 # One prompt per line; sent verbatim to its codex pane.
-# Include `/goal ` (or any other slash command) yourself.
+# Every prompt starts with /goal, has <=50 words, and references .md docs.
 # Lines must NOT contain literal newlines (newlines submit prematurely).
 
 /goal You are PANE 0, lane BUGS. Read docs/parallel-sessions.md and ...
 /goal You are PANE 1, lane PERF. Read docs/parallel-sessions.md and ...
 ```
+
+Detailed rules and templates:
+
+- [`docs/prompts.md`](docs/prompts.md) — prompt contract and validation.
+- [`docs/parallel-sessions.md`](docs/parallel-sessions.md) — shared compact-safe
+  workflow.
+- [`docs/parallel-sessions/lane-template.md`](docs/parallel-sessions/lane-template.md)
+  — per-lane markdown template.
 
 The supervisor parses a lane label from each prompt (`lane FOO` /
 `lane: FOO` / `[FOO]`) and uses it for pane border titles and as a friendly
@@ -274,6 +338,36 @@ This script has been tuned to keep system load reasonable while running
   thrash when a pane is in a sustained limit/error state.
 - **Bounded `capture-pane`** — only the last 80 lines are scanned per check
   (status bar always at the bottom; full pane is wasted work).
+- **Compact-safe iterations** — prompt detail lives in markdown, each goal is
+  expected to finish one bounded iteration, `RESPAWN_ON_GOAL=1` starts the next
+  task fresh, and `MAX_ITERATION_SECS=2700` restarts sessions before long
+  conversations drift into remote compaction.
+- **MCP-free startup by default** — panes run with an isolated `CODEX_HOME`
+  whose `config.toml` preserves normal Codex settings but strips
+  `[mcp_servers.*]`. This avoids every pane starting `npx`/`uvx` MCP trees,
+  timing out at `Starting MCP`, and leaving orphaned child processes. Set
+  `CODEX_SUPERVISOR_MCP_MODE=inherit` only for lanes that truly need MCP tools.
+- **Lean worker Codex home by default** — the isolated `CODEX_HOME` preserves
+  auth, core config, `AGENTS.md`, `RTK.md`, and hooks, but omits
+  skills/memories/plugins unless `CODEX_SUPERVISOR_CODEX_HOME_PROFILE=full`.
+  This keeps 12-20 supervised workers from loading operator-only context.
+- **MyDrive runtime/cache root by default** — when `/Volumes/MyDrive` is
+  mounted, supervisor runtime goes under `/Volumes/MyDrive/codex-supervisor`.
+  Worker `CODEX_HOME`, `XDG_CACHE_HOME`, `npm_config_cache`, `UV_CACHE_DIR`,
+  `PIP_CACHE_DIR`, `PLAYWRIGHT_BROWSERS_PATH`, `CARGO_HOME`, logs, and temp
+  files are redirected there instead of the cramped root volume.
+- **Aggressive cleanup cadence** — periodic cleanup now runs every 120s and
+  prunes supervisor-owned cache/tmp entries older than 5 minutes, while
+  explicit `cleanup` also sweeps the runtime root and old Codex logs/sessions.
+- **Resource-budget preflight** — `start` refuses when projected RAM/disk for
+  the selected pane count would violate the configured reserve. Disk projection
+  uses the supervisor runtime root (MyDrive when mounted), while the existing
+  minimum-free check still protects the project checkout volume. Tune with
+  `CODEX_SUPERVISOR_RAM_MB_PER_PANE` and `CODEX_SUPERVISOR_DISK_MB_PER_PANE`
+  only after measuring real workloads.
+- **CPU priority + staged startup** — workers run through `nice -n 5` by
+  default, and sessions with 3+ panes stagger pane/prompt startup to avoid a
+  CPU/RAM spike from all Codex processes booting simultaneously.
 - **60s poll interval** — 30s was overhead for limited additional signal.
 - **Equal grid via custom layout string** — tmux's built-in `tiled` gives
   the last row extra height when N isn't a perfect square; we compute and
