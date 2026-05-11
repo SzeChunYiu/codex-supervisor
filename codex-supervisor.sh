@@ -1745,8 +1745,23 @@ cmd_start() {
   fi
 
   # If we're invoked with --daemon, skip the launcher fork and just run.
+  # Self-restart loop: if _start_supervisor_main exits with a non-zero code
+  # (crash), wait 5 s and try again without killing the live tmux session.
+  # A clean stop (INT/TERM) exits 0 and breaks the loop immediately.
   if (( daemon_mode )); then
-    _start_supervisor_main
+    local _restart_count=0 _rc=0
+    while true; do
+      _start_supervisor_main "$_restart_count"
+      _rc=$?
+      (( _rc == 0 )) && break   # clean stop — don't restart
+      _restart_count=$(( _restart_count + 1 ))
+      if (( _restart_count > 10 )); then
+        log "daemon crashed $_restart_count times consecutively; giving up"
+        break
+      fi
+      log "daemon crashed (exit $_rc); restart #$_restart_count in 5s..."
+      sleep 5
+    done
     return
   fi
 
@@ -1822,21 +1837,57 @@ cmd_start() {
   fi
 }
 
+# Crash handler — called by the ERR trap inside _start_supervisor_main.
+# Logs the failing line+command so crashes are visible in the log file
+# rather than dying silently (nohup discards stderr).
+_daemon_crash_handler() {
+  local lineno="${1:-?}" cmd="${2:-?}"
+  log "DAEMON CRASH at line $lineno: $cmd"
+  log "  session=$SESSION lanes=${LANE_LABELS[*]:-none}"
+  exit 2
+}
+
 # The actual supervisor body, run by the daemon child.
+# $1 = restart count (0 = fresh start, >0 = crash recovery restart)
 _start_supervisor_main() {
+  local _is_restart="${1:-0}"
   ensure_codex_cmd
   load_prompts
-  ensure_start_resource_budget || exit 1
-  write_state_file
+  # INT/TERM = clean stop (kills session, exits 0, self-restart loop breaks).
+  # ERR      = crash (set -u / unexpected error) — log it and exit 2 so the
+  #            self-restart loop can recover without tearing down the session.
   trap 'cleanup_session; exit 0' INT TERM
+  set -E  # ERR trap inherited by functions called from here
+  trap '_daemon_crash_handler $LINENO "$BASH_COMMAND"' ERR
 
-  create_tmux_session_panes 1 || exit 1
-  log "session '$SESSION': ${#PROMPTS[@]} panes (lanes: ${LANE_LABELS[*]})"
-  log "prompts: $PROMPTS_FILE"
+  if (( _is_restart )); then
+    log "daemon restart #$_is_restart: re-attaching to session '$SESSION'"
+    populate_pane_idx_from_running
+    if ! tmux has-session -t "$SESSION" 2>/dev/null || (( ${#PANE_IDX[@]} == 0 )); then
+      log "session gone or empty — rebuilding from scratch"
+      ensure_start_resource_budget || exit 1
+      write_state_file
+      create_tmux_session_panes 1 || exit 1
+      prompt_all_panes
+    else
+      # Session and panes still live — just reset tracking arrays and resume.
+      local _i; for _i in "${!PROMPTS[@]}"; do
+        LIMIT_STREAK[$_i]=0; LAST_RESPAWN[$_i]=0
+        LAST_GOAL_DONE[$_i]=0; ITERATION_STARTED[$_i]=$(date +%s)
+      done
+      write_state_file
+      log "re-attached to ${#PANE_IDX[@]} live pane(s); resuming poll loop"
+    fi
+  else
+    ensure_start_resource_budget || exit 1
+    write_state_file
+    create_tmux_session_panes 1 || exit 1
+    log "session '$SESSION': ${#PROMPTS[@]} panes (lanes: ${LANE_LABELS[*]})"
+    log "prompts: $PROMPTS_FILE"
+    prompt_all_panes
+  fi
 
-  prompt_all_panes
   log "all panes prompted; entering poll loop (every ${POLL_INTERVAL}s)"
-
   local last_periodic_cleanup=$(date +%s)
   while true; do
     sleep "$POLL_INTERVAL"
