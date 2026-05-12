@@ -1,14 +1,18 @@
 # codex-supervisor prompts -- one prompt per non-blank, non-comment line.
 # Each prompt spawns one tiled tmux pane and is sent VERBATIM to Codex.
-# By default, the supervisor also appends one generated PLANNER pane
-# unless this file already defines a PLANNER/LEAD/LEADER lane; set
-# CODEX_SUPERVISOR_PLANNER=0 only for exceptional no-planner runs.
+# By default, the supervisor also appends fixed DEBUG and VALIDATOR panes
+# unless this file already defines equivalent lanes; set CODEX_SUPERVISOR_DEBUGGER=0
+# and CODEX_SUPERVISOR_VALIDATOR=0 only for exceptional one-off runs.
 #
 # Contract enforced by `codex-supervisor validate-prompts` and `start`:
 # - every prompt starts with /goal exactly;
 # - every prompt is 50 words or fewer;
 # - every prompt references at least one .md file;
 # - all details, guardrails, file lists, and stop rules live in markdown.
+# For multi-host projects, docs/parallel-sessions.md should import
+# docs/distributed-protocol.md and define host/source-tree leases there.
+# For dynamic-worker projects, keep generic tasks in codex-tasks/open.txt and
+# start N workers with CODEX_SUPERVISOR_DYNAMIC_WORKERS=N.
 #
 # Recommended pattern:
 #   /goal You are PANE <N>, lane <X>. Read docs/parallel-sessions.md and docs/parallel-sessions/<X>.md, then complete one compact-safe iteration.
@@ -19,3 +23,20 @@
 
 /goal You are PANE 0, lane BUGS. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
 /goal You are PANE 1, lane PERF. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
+
+# --- Self-learning lanes (always include if resources allow) ---
+#
+# autonomous-research: reads arXiv/SSRN/practitioner sources, extracts
+# actionable hypotheses, submits them to the task registry. Never complete —
+# it always finds more to read. Spec: docs/parallel-sessions/autonomous-research.md
+#
+# self-improving-system: reads session logs and external agent-architecture
+# papers, writes structured improvement proposals, maintains a system memory
+# of what prompting and coordination patterns work. Spec:
+# docs/parallel-sessions/self-improving-system.md
+#
+# Recommended: include both in every project. If compute is limited, include
+# at least one; prefer self-improving-system for mature projects.
+#
+/goal You are PANE N, lane autonomous-research. Read docs/parallel-sessions.md and docs/parallel-sessions/autonomous-research.md, then run one full research cycle: pick topic → search arXiv/SSRN/web → extract hypotheses → submit to registry. Never stop — this lane is always running.
+/goal You are PANE N+1, lane self-improving-system. Read docs/parallel-sessions.md and docs/parallel-sessions/self-improving-system.md, then run one improvement cycle: read session logs → identify patterns → search agent-architecture papers → write proposals. Never stop.
