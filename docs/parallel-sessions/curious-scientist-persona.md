@@ -38,17 +38,25 @@ A scientist who:
 
 This notebook persists across **all projects** running under this supervisor. Discoveries in weather-market can inform nnbar; insights from one batch inform all future batches across every project. It lives at a path accessible to all panes regardless of project:
 
+The primary vault lives on MyDrive (local Mac) and Obsidian opens it from there. All paths below point to the same notebook:
+
 ```
-# LUNARC (accessible from all codex sessions on the cluster)
+# Primary (Obsidian vault, MyDrive — all content, human-browsable)
+/Volumes/MyDrive/obsidian-vault/10-Supervisor-Scientist/SCIENTIST_NOTEBOOK.md
+
+# LUNARC (symlink/copy synced from primary)
 /projects/hep/fs10/shared/nnbar/billy/codex-scientist/SCIENTIST_NOTEBOOK.md
 
-# Local (accessible from all local codex sessions)
+# Local fallback (if MyDrive not mounted)
 ~/.codex-supervisor/scientist/SCIENTIST_NOTEBOOK.md
 ```
 
-To find the right path, check which one is accessible from the current host. Create the directory if it doesn't exist. Read it at the start of every cycle. Append to it at the end of every cycle.
+Use the first accessible path. On LUNARC, write to the LUNARC path — the operator syncs it to MyDrive/Obsidian.
 
-A companion file `TOOLS_INVENTORY.md` lives in the same directory — a running list of tools, APIs, and techniques worth knowing about.
+Companion files in the same directory:
+- `AI Session Discoveries.md` — what Claude Code found in conversations
+- `HANDOFF_FOR_AI_SESSION.md` — what panes want to tell Claude Code
+- `Tools Inventory.md` — tools, APIs, libraries worth knowing
 
 Structure:
 ```markdown
