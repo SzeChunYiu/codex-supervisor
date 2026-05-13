@@ -24,7 +24,7 @@
 /goal You are PANE 0, lane BUGS. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
 /goal You are PANE 1, lane PERF. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
 
-# --- Self-learning lanes (always include if resources allow) ---
+# --- Optional self-learning lanes ---
 #
 # autonomous-research: reads arXiv/SSRN/practitioner sources, extracts
 # actionable hypotheses, submits them to the task registry. Never complete —
@@ -35,8 +35,9 @@
 # of what prompting and coordination patterns work. Spec:
 # docs/parallel-sessions/self-improving-system.md
 #
-# Recommended: include both in every project. If compute is limited, include
-# at least one; prefer self-improving-system for mature projects.
+# Enable these only when the operator has measured capacity and wants an
+# explicit self-learning batch. Keep them commented in the example so the
+# default quickstart stays right-sized.
 #
-/goal You are PANE N, lane autonomous-research. Read docs/parallel-sessions.md and docs/parallel-sessions/autonomous-research.md, then run one full research cycle: pick topic → search arXiv/SSRN/web → extract hypotheses → submit to registry. Never stop — this lane is always running.
-/goal You are PANE N+1, lane self-improving-system. Read docs/parallel-sessions.md and docs/parallel-sessions/self-improving-system.md, then run one improvement cycle: read session logs → identify patterns → search agent-architecture papers → write proposals. Never stop.
+# /goal You are PANE N, lane autonomous-research. Read docs/parallel-sessions.md and docs/parallel-sessions/autonomous-research.md, then run one full research cycle: pick topic → search arXiv/SSRN/web → extract hypotheses → submit to registry. Never stop — this lane is always running.
+# /goal You are PANE N+1, lane self-improving-system. Read docs/parallel-sessions.md and docs/parallel-sessions/self-improving-system.md, then run one improvement cycle: read session logs → identify patterns → search agent-architecture papers → write proposals. Never stop.

@@ -13,12 +13,17 @@ the point where the server crashes. Wrong-sizing isn't free — it directly
 causes the chronic "tmux server died, all sessions lost" failure mode.
 
 `codex-supervisor` enforces a per-session ceiling with
-`CODEX_SUPERVISOR_MAX_PANES=8` by default. It also adds one planner pane by
-default, projects per-pane RAM/disk before launch, lowers worker CPU priority
-with `nice`, uses a lean worker `CODEX_HOME`, staggers multi-pane startup,
-respawns dead panes, and recreates a missing tmux session after resource checks.
+`CODEX_SUPERVISOR_MAX_PANES=8` by default. It also adds two fixed panes by
+default (`DEBUG` and `VALIDATOR`), projects per-pane RAM/disk before launch,
+lowers worker CPU priority with `nice`, uses a lean worker `CODEX_HOME`,
+staggers multi-pane startup, caps common native/thread-pool fanout per pane,
+refuses new pane waves when load average has exhausted CPU headroom, respawns
+dead panes, and recreates a missing tmux session after resource checks.
 When using `csup` across hosts, the operator still must enforce a deliberate
-total budget across all hosts and projects.
+total budget across all hosts and projects. Also apply the distributed
+constitution in `docs/distributed-protocol.md`: adding a host is allowed only
+when the lane assignment still has one project identity, registered source
+trees, and non-overlapping writable leases.
 
 For queue-backed projects, prefer `csup govern --dry-run` before manual starts.
 The governor reads `codex-tasks/<lane>.txt`, checks CPU/RAM/runtime-disk
@@ -30,7 +35,9 @@ headroom, and starts only queued lane subsets that fit the current host.
    not the maximum lane count the prompts file *could* support. If three
    queues have content and seven are empty, you need three panes, not ten.
 2. **Pick the smallest host set that fits that work.** Two panes on one host
-   is always cheaper than one pane on each of two hosts.
+   is always cheaper than one pane on each of two hosts. Never add a host just
+   because it is reachable; add it only for measured capacity or native
+   execution need, then record its source-tree role.
 3. **Match the lane mix to the work type.** Bug-hunt PRs need `bugs` /
    `perf`. Backlog implementation needs `ux` / `data` / `test`. Don't open
    `parity` if there is no parity work in the backlog this week.
@@ -53,6 +60,7 @@ gh pr list --state open --base main --limit 100 | wc -l
 df -h /                    # disk on the candidate host
 free -h    # Linux         # RAM
 sysctl vm.swapusage        # macOS swap
+uptime                     # load average / CPU pressure
 tmux ls                    # current supervisor sessions
 ```
 
@@ -63,6 +71,14 @@ when each host still has RAM/disk headroom after the per-pane budget. Justify
 the choice in a one-line comment when starting (`csup start … # 3 lanes —
 bugs+perf+ux backlog still has work`).
 
+Worker panes also inherit conservative thread caps by default:
+`UV_THREADPOOL_SIZE=2`, `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`,
+`MKL_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`, `VECLIB_MAXIMUM_THREADS=1`, and
+`TOKENIZERS_PARALLELISM=false`. These are intentionally deeper than tmux lane
+count: they keep Node/Python/native libraries from multiplying 12-20 panes
+into hundreds of runnable helper threads. Raise them only for a measured lane
+that truly benefits from intra-process parallelism.
+
 Automated path:
 
 ```bash
@@ -70,8 +86,10 @@ csup govern --dry-run
 csup govern --apply
 ```
 
-This uses the same rule but filters prompts with `CODEX_SUPERVISOR_LANES` and
-keeps one planner pane per started session.
+This uses the same rule but filters prompts with `CODEX_SUPERVISOR_LANES`,
+generates only the needed dynamic workers with
+`CODEX_SUPERVISOR_DYNAMIC_WORKERS`, and keeps the fixed `DEBUG`/`VALIDATOR`
+panes per started session.
 
 ## When to ask the user
 
@@ -82,8 +100,9 @@ your machine" is much more expensive.
 
 ## What "rest mode" looks like
 
-If after running the decision rule you find **zero work** that justifies
-even one pane, the right answer is to **not start the supervisor at all**.
+If after running the decision rule you find **zero work** that justifies even
+the fixed `DEBUG`/`VALIDATOR` pair, the right answer is to **not start the
+supervisor at all**.
 Leave the kill-switch (`~/.codex-supervisor.disabled`) in place. The agents
 were not idle for free — they were idle because there is nothing for them
 to do.

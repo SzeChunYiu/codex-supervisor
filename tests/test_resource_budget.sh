@@ -16,8 +16,30 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   RAM_MB_PER_PANE=600
   MIN_FREE_GB=5
   DISK_MB_PER_PANE=1024
+  MAX_LOAD_PER_CPU=0
   ensure_start_resource_budget
 ' _ "$SCRIPT"
+
+
+if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  PROMPTS=(a b)
+  free_ram_mb() { echo 16000; }
+  free_gb_on_cwd() { echo 100; }
+  free_gb_on_runtime_root() { echo 100; }
+  cpu_count() { echo 2; }
+  load1() { echo 2.7; }
+  MAX_LOAD_PER_CPU=1.0
+  MIN_FREE_RAM_MB=512
+  RAM_MB_PER_PANE=600
+  MIN_FREE_GB=5
+  DISK_MB_PER_PANE=0
+  ensure_start_resource_budget
+' _ "$SCRIPT" >/tmp/codex-supervisor-cpu.out 2>/tmp/codex-supervisor-cpu.err; then
+  echo "resource budget should fail when projected CPU/load headroom is exhausted" >&2
+  exit 1
+fi
+grep -q "not enough CPU/load headroom" /tmp/codex-supervisor-cpu.err
 
 if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   source "$1"
@@ -29,6 +51,7 @@ if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   RAM_MB_PER_PANE=600
   MIN_FREE_GB=5
   DISK_MB_PER_PANE=0
+  MAX_LOAD_PER_CPU=0
   ensure_start_resource_budget
 ' _ "$SCRIPT" >/tmp/codex-supervisor-resource.out 2>/tmp/codex-supervisor-resource.err; then
   echo "resource budget should fail when projected RAM exceeds free RAM" >&2
@@ -46,6 +69,7 @@ if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   RAM_MB_PER_PANE=0
   MIN_FREE_GB=5
   DISK_MB_PER_PANE=1024
+  MAX_LOAD_PER_CPU=0
   ensure_start_resource_budget
 ' _ "$SCRIPT" >/tmp/codex-supervisor-disk.out 2>/tmp/codex-supervisor-disk.err; then
   echo "resource budget should fail when projected disk need exceeds free disk" >&2
@@ -63,6 +87,7 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   RAM_MB_PER_PANE=600
   MIN_FREE_GB=5
   DISK_MB_PER_PANE=1024
+  MAX_LOAD_PER_CPU=0
   ensure_start_resource_budget
 ' _ "$SCRIPT"
 

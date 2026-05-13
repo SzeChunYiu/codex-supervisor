@@ -2,8 +2,8 @@
 # codex-supervisor -- run multiple codex CLI sessions in parallel tmux panes.
 #
 # Single tmux session, single window, N tiled panes -- one pane per prompt
-# plus one generated PLANNER lane by default. Auto-sends each prompt once its
-# pane is ready, respawns panes whose codex exits or hits the usage limit,
+# plus generated DEBUG and VALIDATOR lanes by default. Auto-sends each prompt
+# once its pane is ready, respawns panes whose codex exits or hits the usage limit,
 # recreates a missing tmux session after resource checks, auto-resends prompts
 # when a /goal completes, and applies an even MxN grid layout so cells stay
 # equal.
@@ -12,8 +12,8 @@
 #   start [--no-attach]       launch the session (default if no subcommand)
 #                             refuses if free disk < CODEX_SUPERVISOR_MIN_FREE_GB (default 5)
 #   stop                      kill session, reap MCP orphans, prune git worktrees
-#   cleanup                   prune worktrees, npm cache, old /private/tmp/claude-501,
-#                             Time Machine local snapshots
+#   cleanup [--global]        project-scoped cleanup by default; --global also
+#                             prunes machine-wide caches/snapshots
 #   status                    print pane states (lane, state, last activity)
 #   attach                    attach (or open a terminal attached) to the session
 #   logs [-f]                 show or tail the supervisor log
@@ -48,7 +48,10 @@
 #   CODEX_SUPERVISOR_TMP_ROOT        per-session worker temp root
 #   CODEX_SUPERVISOR_CODEX_HOME_PROFILE lean = omit skills/memories/plugins, full = link them (default: lean)
 #   CODEX_SUPERVISOR_NICE            worker CPU priority niceness; 0 disables (default: 5)
-#   CODEX_SUPERVISOR_POLL            seconds between health checks (default: 60)
+#   CODEX_SUPERVISOR_UV_THREADPOOL_SIZE per-pane libuv worker threads (default: 2)
+#   CODEX_SUPERVISOR_NATIVE_NUM_THREADS per-pane BLAS/OpenMP/native threads (default: 1)
+#   CODEX_SUPERVISOR_MAX_LOAD_PER_CPU start/rebuild load guard; 0 disables (default: 1.25)
+#   CODEX_SUPERVISOR_POLL            seconds between health checks (default: 15)
 #   CODEX_SUPERVISOR_READY_TIMEOUT   seconds to wait for Ready (default: 600)
 #   CODEX_SUPERVISOR_READY           ready-marker substring (default: "Tip: ")
 #   CODEX_SUPERVISOR_NOT_READY       must-be-absent substring (default: "Starting MCP")
@@ -61,12 +64,19 @@
 #   CODEX_SUPERVISOR_OPEN            1 = auto-open terminal, 0 = print attach hint (default: 1)
 #   CODEX_SUPERVISOR_AUTO_RESEND     1 = auto-resend prompt when /goal completes, 0 = stay idle (default: 1)
 #   CODEX_SUPERVISOR_RESEND_GRACE    seconds idle after Goal achieved before resend (default: 30)
-#   CODEX_SUPERVISOR_PLANNER         1 = append a generated PLANNER lane if missing (default: 1)
-#   CODEX_SUPERVISOR_PLANNER_DOC     planner markdown path
+#   CODEX_SUPERVISOR_DEBUGGER        1 = append a generated DEBUG lane if missing (default: 1)
+#   CODEX_SUPERVISOR_DEBUGGER_DOC    debugger markdown path
+#   CODEX_SUPERVISOR_VALIDATOR       1 = append a generated VALIDATOR lane if missing (default: CODEX_SUPERVISOR_PLANNER or 1)
+#   CODEX_SUPERVISOR_PLANNER         backwards-compatible alias for CODEX_SUPERVISOR_VALIDATOR
+#   CODEX_SUPERVISOR_VALIDATOR_DOC   validator/planner markdown path
+#   CODEX_SUPERVISOR_DYNAMIC_WORKERS number of generated dynamic worker panes (default: 0)
+#   CODEX_SUPERVISOR_DYNAMIC_WORKER_DOC dynamic-worker markdown path
 #   CODEX_SUPERVISOR_LANES           comma/space-separated lane allowlist for right-sized starts
+#   CODEX_SUPERVISOR_GENERATED_ONLY  1 = ignore prompt-file lanes; run only generated fixed/dynamic lanes
 #   CODEX_SUPERVISOR_RESPAWN_DEAD_PANES 1 = respawn exited codex panes (default: 1)
 #   CODEX_SUPERVISOR_AUTO_RECREATE_SESSION 1 = rebuild a vanished tmux session (default: 1)
-#   CODEX_SUPERVISOR_MAX_PANES       hard cap on final prompts/panes per session incl. planner (default: 8)
+#   CODEX_SUPERVISOR_MAX_PANES       hard cap on final prompts/panes per session
+#                                    incl. fixed roles (default: 8)
 #   CODEX_SUPERVISOR_RAM_MB_PER_PANE projected RAM budget per pane for start preflight (default: 600)
 #   CODEX_SUPERVISOR_DISK_MB_PER_PANE projected disk budget per pane for start preflight (default: 1024)
 #   CODEX_SUPERVISOR_START_STAGGER_SECS startup delay between pane spawns/prompts; unset = auto
@@ -80,7 +90,11 @@ set -u
 SESSION="${CODEX_SUPERVISOR_SESSION:-codex-supervisor}"
 DEFAULT_SUPERVISOR_ROOT="$HOME/.codex-supervisor"
 [[ -d "/Volumes/MyDrive" ]] && DEFAULT_SUPERVISOR_ROOT="/Volumes/MyDrive/codex-supervisor"
-SUPERVISOR_ROOT="${CODEX_SUPERVISOR_ROOT:-$DEFAULT_SUPERVISOR_ROOT}"
+# CODEX_SUPERVISOR_RUN_DIR is the name used by the shared LUNARC toolchain.
+# Keep CODEX_SUPERVISOR_ROOT as the canonical/local name, but honor RUN_DIR so
+# one sourced env file can redirect all supervisor state off the small HOME
+# filesystem on cluster login/compute nodes.
+SUPERVISOR_ROOT="${CODEX_SUPERVISOR_ROOT:-${CODEX_SUPERVISOR_RUN_DIR:-$DEFAULT_SUPERVISOR_ROOT}}"
 # Supervisor panes are MCP-free by default. `codex -c mcp_servers={}` only
 # merges config and does not clear already configured servers, so the reliable
 # startup fix is an isolated CODEX_HOME with the user's config copied minus
@@ -101,9 +115,17 @@ SUPERVISOR_TMP_ROOT_EXPLICIT="${CODEX_SUPERVISOR_TMP_ROOT+x}"
 CODEX_HOME_PROFILE="${CODEX_SUPERVISOR_CODEX_HOME_PROFILE:-lean}"
 CODEX_HOME_EXTRA_ITEMS="${CODEX_SUPERVISOR_CODEX_HOME_EXTRA_ITEMS:-}"
 NICE_LEVEL="${CODEX_SUPERVISOR_NICE:-5}"
+# Per-pane native thread caps. Node, Python, BLAS, tokenizers, and libuv-backed
+# tools can otherwise multiply a large pane count into hundreds of runnable
+# helper threads. Keep defaults conservative; callers can override the libuv
+# pool when a lane truly needs more filesystem/crypto parallelism.
+UV_THREADPOOL_SIZE_CAP="${CODEX_SUPERVISOR_UV_THREADPOOL_SIZE:-2}"
+NATIVE_NUM_THREADS_CAP="${CODEX_SUPERVISOR_NATIVE_NUM_THREADS:-1}"
+TOKENIZERS_PARALLELISM_CAP="${CODEX_SUPERVISOR_TOKENIZERS_PARALLELISM:-false}"
 STATE_FILE_EXPLICIT="${CODEX_SUPERVISOR_STATE_FILE+x}"
+DAEMON_PID_FILE_EXPLICIT="${CODEX_SUPERVISOR_DAEMON_PID_FILE+x}"
 CODEX_CMD=""
-POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-60}"
+POLL_INTERVAL="${CODEX_SUPERVISOR_POLL:-15}"
 READY_TIMEOUT="${CODEX_SUPERVISOR_READY_TIMEOUT:-600}"
 READY_PATTERN="${CODEX_SUPERVISOR_READY:-Tip: }"
 NOT_READY_PATTERN="${CODEX_SUPERVISOR_NOT_READY:-Starting MCP}"
@@ -120,16 +142,18 @@ AUTO_OPEN_TERMINAL="${CODEX_SUPERVISOR_OPEN:-1}"
 AUTO_RESEND="${CODEX_SUPERVISOR_AUTO_RESEND:-1}"
 RESEND_GRACE_SECS="${CODEX_SUPERVISOR_RESEND_GRACE:-30}"
 # What to do when a pane shows "Goal achieved" and stays idle past grace.
-#   queue       - pop next line from codex-tasks/<lane>.txt; if empty, rest. (default)
+#   queue       - pop next line from codex-tasks/<lane>.txt; if empty, rest.
 #   queue-redo  - pop next line from queue; if empty, resend original prompt.
 #   redo        - always resend the original prompt.
 #   rest        - leave the pane idle.
-ON_COMPLETE="${CODEX_SUPERVISOR_ON_COMPLETE:-queue}"
+ON_COMPLETE="${CODEX_SUPERVISOR_ON_COMPLETE:-queue-redo}"
 # Lane names that are "continuous" — they have no queue file and should
 # always re-run their original prompt when goal achieved (instead of
 # resting). Space-separated, lowercased. Match is on the lane label
-# parsed from the /goal prompt.
-CONTINUOUS_LANES="${CODEX_SUPERVISOR_CONTINUOUS_LANES:-bugs optimize}"
+# parsed from the /goal prompt. Set to literal "*" to mark ALL lanes as
+# continuous (operator policy: never let a worker sit idle — the lane's
+# /goal should describe fallback work-finding when its queue is empty).
+CONTINUOUS_LANES="${CODEX_SUPERVISOR_CONTINUOUS_LANES:-*}"
 # When 1, on "Goal achieved" the supervisor respawns the codex process in
 # the pane (kills + restarts) before sending the next task. Gives each
 # iteration a fresh codex with no accumulated context/memory and severs
@@ -149,14 +173,36 @@ PERIODIC_WORKTREE_AGE_MIN="${CODEX_SUPERVISOR_PERIODIC_WORKTREE_AGE_MIN:-5}"
 # 0 disables. Default 45 minutes: long enough for small lane iterations,
 # short enough to keep the context below compacting territory.
 MAX_ITERATION_SECS="${CODEX_SUPERVISOR_MAX_ITERATION_SECS:-2700}"
-# Planner lane. By default every supervisor batch gets exactly one generated
-# PLANNER pane unless the prompt file already defines a planner lane. The
-# planner is the team's leader: it reviews pane updates, keeps a written plan
-# current, and queues/steers next work without editing production code.
-PLANNER_ENABLED="${CODEX_SUPERVISOR_PLANNER:-1}"
-PLANNER_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/planner.md"
-PLANNER_DOC="${CODEX_SUPERVISOR_PLANNER_DOC:-$PLANNER_DOC_DEFAULT}"
+# Fixed project roles. By default every started project gets:
+#   DEBUG     - continuous code-review/debug/optimization lane.
+#   VALIDATOR - continuous validation + planning lane that writes md and queues
+#               follow-up /goal prompts for workers.
+# Existing prompt-file lanes with matching labels satisfy the fixed slots.
+DEBUGGER_ENABLED="${CODEX_SUPERVISOR_DEBUGGER:-1}"
+DEBUGGER_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_DEBUGGER+x}"
+DEBUGGER_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/debugger.md"
+DEBUGGER_DOC="${CODEX_SUPERVISOR_DEBUGGER_DOC:-$DEBUGGER_DOC_DEFAULT}"
+VALIDATOR_ENABLED="${CODEX_SUPERVISOR_VALIDATOR:-${CODEX_SUPERVISOR_PLANNER:-1}}"
+VALIDATOR_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_VALIDATOR+x}${CODEX_SUPERVISOR_PLANNER+x}"
+# Backwards-compatible variable name for tests/scripts that still refer to the
+# old generated planner slot.
+PLANNER_ENABLED="$VALIDATOR_ENABLED"
+VALIDATOR_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/validator-planner.md"
+VALIDATOR_DOC="${CODEX_SUPERVISOR_VALIDATOR_DOC:-${CODEX_SUPERVISOR_PLANNER_DOC:-$VALIDATOR_DOC_DEFAULT}}"
+PLANNER_DOC="$VALIDATOR_DOC"
+DYNAMIC_WORKERS="${CODEX_SUPERVISOR_DYNAMIC_WORKERS:-0}"
+DYNAMIC_WORKERS_EXPLICIT="${CODEX_SUPERVISOR_DYNAMIC_WORKERS+x}"
+DYNAMIC_WORKER_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/dynamic-worker.md"
+DYNAMIC_WORKER_DOC="${CODEX_SUPERVISOR_DYNAMIC_WORKER_DOC:-$DYNAMIC_WORKER_DOC_DEFAULT}"
+# Shared blockers are factory-wide stop-the-line work. Dynamic workers should
+# take them before worker-specific or generic open tasks so lane-local progress
+# cannot keep moving while common acceptance blockers remain unresolved.
+BLOCKER_QUEUE_LANES="${CODEX_SUPERVISOR_BLOCKER_QUEUE_LANES:-blockers blocker}"
+DYNAMIC_QUEUE_LANES="${CODEX_SUPERVISOR_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}"
 LANE_FILTER="${CODEX_SUPERVISOR_LANES:-}"
+LANE_FILTER_EXPLICIT="${CODEX_SUPERVISOR_LANES+x}"
+GENERATED_ONLY="${CODEX_SUPERVISOR_GENERATED_ONLY:-0}"
+GENERATED_ONLY_EXPLICIT="${CODEX_SUPERVISOR_GENERATED_ONLY+x}"
 # Tmux resilience. Dead panes are common when codex exits, and full tmux
 # sessions can disappear under resource pressure. Keep them recoverable by
 # default; `stop` still kills the daemon, so explicit stops stay stopped.
@@ -172,6 +218,15 @@ MAX_PANES="${CODEX_SUPERVISOR_MAX_PANES:-8}"
 RAM_MB_PER_PANE="${CODEX_SUPERVISOR_RAM_MB_PER_PANE:-600}"
 DISK_MB_PER_PANE="${CODEX_SUPERVISOR_DISK_MB_PER_PANE:-1024}"
 START_STAGGER_SECS="${CODEX_SUPERVISOR_START_STAGGER_SECS:-}"
+# Detached tmux sessions need an explicit virtual window size. Without this,
+# remote/LUNARC sessions can fall back to an 80x24 terminal and Codex wraps at
+# ~20-40 columns even though the dashboard card has more horizontal space.
+TMUX_WINDOW_X="${CODEX_SUPERVISOR_TMUX_X:-240}"
+TMUX_WINDOW_Y="${CODEX_SUPERVISOR_TMUX_Y:-70}"
+# CPU/load guard for starts and rebuilds. A value of 1.25 allows short bursts
+# above core count while preventing a new pane wave during existing saturation.
+# Set to 0 to disable if an external scheduler already manages CPU pressure.
+MAX_LOAD_PER_CPU="${CODEX_SUPERVISOR_MAX_LOAD_PER_CPU:-1.25}"
 # Where per-lane task queues live. Auto-discovered: ./codex-tasks/ then ~/codex-tasks/.
 TASKS_DIR="${CODEX_SUPERVISOR_TASKS_DIR:-}"
 PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
@@ -199,13 +254,43 @@ CODEX_LOG_MAX_GB="${CODEX_SUPERVISOR_CODEX_LOG_MAX_GB:-1}"
 CODEX_SESSIONS_RETAIN_DAYS="${CODEX_SUPERVISOR_CODEX_SESSIONS_RETAIN_DAYS:-3}"
 # Supervisor log rotation cap (MB). LOG_FILE is truncated when above this.
 SUPERVISOR_LOG_MAX_MB="${CODEX_SUPERVISOR_LOG_MAX_MB:-50}"
+# Cleanup is project-scoped by default. Set CODEX_SUPERVISOR_GLOBAL_CLEANUP=1
+# (or pass cleanup --global) for old whole-machine sweeps.
+GLOBAL_CLEANUP="${CODEX_SUPERVISOR_GLOBAL_CLEANUP:-0}"
+PROJECTS_ROOT="${CODEX_SUPERVISOR_PROJECTS_ROOT:-$HOME/Desktop/projects}"
+TMP_SWEEP_ROOT="${CODEX_SUPERVISOR_TMP_SWEEP_ROOT:-/private/tmp}"
+SUPERPOWERS_WORKTREES_ROOT="${CODEX_SUPERVISOR_SUPERPOWERS_WORKTREES_ROOT:-$HOME/.config/superpowers/worktrees}"
+MYDRIVE_SUPERPOWERS_WORKTREES_ROOT="${CODEX_SUPERVISOR_MYDRIVE_SUPERPOWERS_WORKTREES_ROOT:-/Volumes/MyDrive/superpowers/worktrees}"
+ACTIONS_RUNNER_WORK_ROOT="${CODEX_SUPERVISOR_ACTIONS_RUNNER_WORK_ROOT:-/Volumes/MyDrive/actions-runner-work}"
+DIAGNOSTIC_MESSAGES_ROOT="${CODEX_SUPERVISOR_DIAGNOSTIC_MESSAGES_ROOT:-/private/var/log/DiagnosticMessages}"
 # Unified dashboard. `start` launches this once if it is not already healthy.
-# Default refresh is 1s so the browser sees live pane output with minimum delay.
+# Default refresh is 0.2s so the browser sees livestream-like pane output.
 DASHBOARD_ENABLED="${CODEX_SUPERVISOR_DASHBOARD:-1}"
-DASHBOARD_CMD="${CODEX_SUPERVISOR_DASHBOARD_CMD:-$HOME/bin/csup-dashboard}"
+SUPERVISOR_SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SUPERVISOR_SCRIPT_PATH" ]]; do
+  _supervisor_link_dir="$(cd -P -- "$(dirname -- "$SUPERVISOR_SCRIPT_PATH")" && pwd -P)"
+  _supervisor_link_target="$(readlink "$SUPERVISOR_SCRIPT_PATH")"
+  if [[ "$_supervisor_link_target" != /* ]]; then
+    _supervisor_link_target="$_supervisor_link_dir/$_supervisor_link_target"
+  fi
+  SUPERVISOR_SCRIPT_PATH="$_supervisor_link_target"
+done
+SUPERVISOR_SCRIPT_DIR="$(cd -P -- "$(dirname -- "$SUPERVISOR_SCRIPT_PATH")" && pwd -P)"
+unset _supervisor_link_dir _supervisor_link_target
+DEFAULT_DASHBOARD_CMD="$SUPERVISOR_SCRIPT_DIR/csup-dashboard"
+if [[ ! -x "$DEFAULT_DASHBOARD_CMD" ]]; then
+  if [[ -x "$HOME/bin/csup-dashboard" ]]; then
+    DEFAULT_DASHBOARD_CMD="$HOME/bin/csup-dashboard"
+  else
+    _csup_dashboard_on_path="$(command -v csup-dashboard 2>/dev/null || true)"
+    [[ -n "$_csup_dashboard_on_path" ]] && DEFAULT_DASHBOARD_CMD="$_csup_dashboard_on_path"
+    unset _csup_dashboard_on_path
+  fi
+fi
+DASHBOARD_CMD="${CODEX_SUPERVISOR_DASHBOARD_CMD:-$DEFAULT_DASHBOARD_CMD}"
 DASHBOARD_PORT="${CODEX_SUPERVISOR_DASHBOARD_PORT:-7777}"
-DASHBOARD_LINES="${CODEX_SUPERVISOR_DASHBOARD_LINES:-28}"
-DASHBOARD_REFRESH="${CODEX_SUPERVISOR_DASHBOARD_REFRESH:-1}"
+DASHBOARD_LINES="${CODEX_SUPERVISOR_DASHBOARD_LINES:-12}"
+DASHBOARD_REFRESH="${CODEX_SUPERVISOR_DASHBOARD_REFRESH:-0.2}"
 DASHBOARD_LOG="${CODEX_SUPERVISOR_DASHBOARD_LOG:-$SUPERVISOR_ROOT/logs/csup-dashboard.log}"
 DASHBOARD_LOG_EXPLICIT="${CODEX_SUPERVISOR_DASHBOARD_LOG+x}"
 DASHBOARD_PID_FILE="${CODEX_SUPERVISOR_DASHBOARD_PID_FILE:-$SUPERVISOR_ROOT/run/csup-dashboard.pid}"
@@ -213,6 +298,7 @@ DASHBOARD_PID_FILE_EXPLICIT="${CODEX_SUPERVISOR_DASHBOARD_PID_FILE+x}"
 DASHBOARD_LOCK_DIR="${CODEX_SUPERVISOR_DASHBOARD_LOCK_DIR:-$SUPERVISOR_ROOT/run/csup-dashboard.lock}"
 DASHBOARD_LOCK_DIR_EXPLICIT="${CODEX_SUPERVISOR_DASHBOARD_LOCK_DIR+x}"
 DASHBOARD_SESSION="${CODEX_SUPERVISOR_DASHBOARD_SESSION:-csup-dashboard}"
+SESSION_START_LOCK_HELD=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,9 +312,273 @@ log() {
 
 err() { echo "error: $*" >&2; }
 
+session_start_lock_dir() {
+  local safe
+  safe=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9_.-' '_')
+  printf '%s/run/%s.start.lock' "$SUPERVISOR_ROOT" "$safe"
+}
+
+acquire_session_start_lock() {
+  local dir i pid
+  dir=$(session_start_lock_dir)
+  mkdir -p "$(dirname "$dir")" 2>/dev/null || true
+  for ((i=0; i<120; i++)); do
+    if mkdir "$dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$dir/pid" 2>/dev/null || true
+      SESSION_START_LOCK_HELD=1
+      return 0
+    fi
+    pid=$(cat "$dir/pid" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$dir" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.25
+  done
+  log "start lock still held for session '$SESSION' after 30s: $dir"
+  return 1
+}
+
+release_session_start_lock() {
+  local dir pid
+  (( SESSION_START_LOCK_HELD )) || return 0
+  dir=$(session_start_lock_dir)
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  if [[ "$pid" == "$$" ]]; then
+    rm -rf "$dir" 2>/dev/null || true
+  fi
+  SESSION_START_LOCK_HELD=0
+}
+
 shell_quote() {
   # POSIX-safe single-quote escaping for tmux shell commands.
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+positive_int_or_default() {
+  local raw="${1:-}" default="${2:-0}"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && (( raw > 0 )); then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
+tmux_window_x() { positive_int_or_default "$TMUX_WINDOW_X" 240; }
+tmux_window_y() { positive_int_or_default "$TMUX_WINDOW_Y" 70; }
+
+cleanup_global_enabled() {
+  truthy "$GLOBAL_CLEANUP" || truthy "${CODEX_SUPERVISOR_GLOBAL_CLEANUP:-}"
+}
+
+current_project_root() {
+  git rev-parse --show-toplevel 2>/dev/null || pwd -P
+}
+
+project_config_name() {
+  local root cfg line value
+  root="$(current_project_root)"
+  cfg="$root/.codex-supervisor.toml"
+  [[ -f "$cfg" ]] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      name\ *=*|name=*)
+        value="${line#*=}"
+        value="${value%%#*}"
+        value="${value#\"}"; value="${value%\"}"
+        value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+        [[ -n "$value" ]] && printf '%s\n' "$value"
+        return 0
+        ;;
+    esac
+  done < "$cfg"
+}
+
+cleanup_scope_names() {
+  local root base name variant seen=" "
+  root="$(current_project_root)"
+  for name in "$(basename "$root")" "$(basename "$PWD")" "$SESSION" "$(project_config_name)"; do
+    [[ -n "$name" ]] || continue
+    for variant in "$name" "${name//-/_}" "${name//_/-}"; do
+      [[ ${#variant} -ge 3 ]] || continue
+      case "$seen" in *" $variant "*) continue ;; esac
+      seen="${seen}${variant} "
+      printf '%s\n' "$variant"
+    done
+  done
+}
+
+cleanup_path_in_project_scope() {
+  local path="$1" base scope
+  cleanup_global_enabled && return 0
+  base="$(basename "$path")"
+  while IFS= read -r scope; do
+    [[ -n "$scope" ]] || continue
+    case "$base" in
+      "$scope"|"$scope"-*|"$scope"_*|"$scope".*) return 0 ;;
+    esac
+  done < <(cleanup_scope_names)
+  return 1
+}
+
+cleanup_path_under_current_project() {
+  local path="$1" root
+  cleanup_global_enabled && return 0
+  root="$(current_project_root)"
+  case "$path" in "$root"|"$root"/*) return 0 ;; esac
+  return 1
+}
+
+cleanup_git_worktree_in_current_repo() {
+  local path="$1" current_common wt_common
+  cleanup_global_enabled && return 0
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  [[ -e "$path/.git" ]] || return 1
+  current_common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  wt_common="$(git -C "$path" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  current_common="$(cd "$current_common" 2>/dev/null && pwd -P)" || return 1
+  wt_common="$(cd "$wt_common" 2>/dev/null && pwd -P)" || return 1
+  [[ "$wt_common" == "$current_common" ]]
+}
+
+cleanup_process_in_project_scope() {
+  local pid="$1" cmd root scope
+  cleanup_global_enabled && return 0
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  [[ -n "$cmd" ]] || return 1
+  root="$(current_project_root)"
+  [[ "$cmd" == *"$root"* ]] && return 0
+  while IFS= read -r scope; do
+    [[ -n "$scope" ]] || continue
+    [[ "$cmd" == *"$scope"* ]] && return 0
+  done < <(cleanup_scope_names)
+  return 1
+}
+
+find_project_scoped_children() {
+  local root="$1" min_depth="${2:-1}" max_depth="${3:-1}" age_min="${4:-$PERIODIC_WORKTREE_AGE_MIN}" scope target
+  [[ -d "$root" ]] || return 0
+  if cleanup_global_enabled; then
+    find -L "$root" -mindepth "$min_depth" -maxdepth "$max_depth" -type d -mmin +"$age_min" 2>/dev/null
+    return 0
+  fi
+  while IFS= read -r scope; do
+    [[ -n "$scope" ]] || continue
+    target="$root/$scope"
+    [[ -d "$target" ]] || continue
+    if (( min_depth <= 1 )); then
+      find -L "$target" -maxdepth "$((max_depth - 1))" -type d -mmin +"$age_min" 2>/dev/null
+    else
+      find -L "$target" -mindepth "$((min_depth - 1))" -maxdepth "$((max_depth - 1))" -type d -mmin +"$age_min" 2>/dev/null
+    fi
+  done < <(cleanup_scope_names)
+}
+
+process_tree_descendants() {
+  python3 - "$@" <<'PY'
+import collections
+import subprocess
+import sys
+
+roots = []
+for raw in sys.argv[1:]:
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        continue
+    if pid > 1:
+        roots.append(pid)
+
+try:
+    out = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+except Exception:
+    raise SystemExit(0)
+
+children = collections.defaultdict(list)
+for line in out.splitlines():
+    parts = line.split()
+    if len(parts) < 2:
+        continue
+    try:
+        pid = int(parts[0])
+        ppid = int(parts[1])
+    except ValueError:
+        continue
+    children[ppid].append(pid)
+
+seen = set()
+ordered = []
+
+def walk(pid):
+    for child in children.get(pid, []):
+        if child in seen:
+            continue
+        seen.add(child)
+        walk(child)
+        ordered.append(child)
+
+for root in roots:
+    walk(root)
+
+for pid in ordered:
+    print(pid)
+PY
+}
+
+terminate_process_tree() {
+  local root_pid="${1:-}" label="${2:-process tree}" descendants pid killed=0
+  [[ "$root_pid" =~ ^[0-9]+$ ]] || return 0
+  (( root_pid > 1 )) || return 0
+  kill -0 "$root_pid" 2>/dev/null || return 0
+
+  descendants="$(process_tree_descendants "$root_pid" 2>/dev/null || true)"
+  # Kill descendants first. If we kill the pane/root process first, its
+  # children can be reparented to launchd/init and become much harder to tie
+  # back to the Codex session that spawned them.
+  for pid in $descendants "$root_pid"; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    (( pid > 1 && pid != $$ )) || continue
+    kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1)) || true
+  done
+
+  if (( killed > 0 )); then
+    sleep 0.25
+    for pid in $descendants "$root_pid"; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      (( pid > 1 && pid != $$ )) || continue
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    done
+    { wait "$root_pid"; } >/dev/null 2>&1 || true
+    log "terminated $label (root pid $root_pid, descendants $(printf '%s' "$descendants" | wc -w | tr -d ' '))"
+  fi
+}
+
+pane_root_pid() {
+  local target="$1"
+  tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null | tr -d ' '
+}
+
+terminate_pane_process_tree() {
+  local target="$1" reason="${2:-pane}" root_pid
+  root_pid="$(pane_root_pid "$target")"
+  [[ -n "$root_pid" ]] || return 0
+  terminate_process_tree "$root_pid" "$reason"
+}
+
+terminate_session_process_trees() {
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  local root_pid
+  while IFS= read -r root_pid; do
+    [[ -n "$root_pid" ]] || continue
+    terminate_process_tree "$root_pid" "session '$SESSION' pane"
+  done < <(tmux list-panes -t "$SESSION:0" -F '#{pane_pid}' 2>/dev/null)
 }
 
 prepare_runtime_dirs() {
@@ -282,6 +632,50 @@ strip_mcp_config() {
   ' "$src" > "$dst"
 }
 
+trust_project_in_codex_config() {
+  local cfg="$1" project_dir="$2"
+  [[ -n "$cfg" && -n "$project_dir" ]] || return 0
+  python3 - "$cfg" "$project_dir" <<'PY'
+import sys
+from pathlib import Path
+
+cfg = Path(sys.argv[1])
+project_dir = sys.argv[2]
+text = cfg.read_text(encoding="utf-8", errors="replace") if cfg.exists() else ""
+lines = text.splitlines()
+escaped = project_dir.replace("\\", "\\\\").replace('"', '\\"')
+header = f'[projects."{escaped}"]'
+
+start = None
+for i, line in enumerate(lines):
+    if line.strip() == header:
+        start = i
+        break
+
+if start is None:
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend([header, 'trust_level = "trusted"'])
+else:
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end = j
+            break
+    for k in range(start + 1, end):
+        if lines[k].lstrip().startswith("trust_level"):
+            indent = lines[k][: len(lines[k]) - len(lines[k].lstrip())]
+            lines[k] = indent + 'trust_level = "trusted"'
+            break
+    else:
+        lines.insert(start + 1, 'trust_level = "trusted"')
+
+cfg.parent.mkdir(parents=True, exist_ok=True)
+cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 link_codex_home_item() {
   local src="$1" dst="$2"
   [[ -e "$src" || -L "$src" ]] || return 0
@@ -289,13 +683,13 @@ link_codex_home_item() {
   ln -s "$src" "$dst" 2>/dev/null || cp -R "$src" "$dst"
 }
 
-prepare_codex_home() {
+prepare_codex_home_for() {
+  local dst_home="${1:-$SUPERVISOR_CODEX_HOME}"
   prepare_runtime_dirs || return 1
   [[ "$MCP_MODE" == "off" ]] || return 0
 
-  local src_home dst_home item
+  local src_home item
   src_home="$(source_codex_home)"
-  dst_home="$SUPERVISOR_CODEX_HOME"
   if [[ "$dst_home" == "$src_home" ]]; then
     err "CODEX_SUPERVISOR_CODEX_HOME must differ from source CODEX_HOME ($src_home)"
     return 1
@@ -303,6 +697,11 @@ prepare_codex_home() {
   mkdir -p "$dst_home" "$dst_home/log" "$dst_home/sessions" "$dst_home/tmp"
 
   strip_mcp_config "$src_home/config.toml" "$dst_home/config.toml"
+  # Worker Codex homes are isolated per supervisor session, so parent-machine
+  # trusted-project entries often do not include the mounted/remote project
+  # path (for example LUNARC /projects/...). Mark the exact cwd trusted in the
+  # copied MCP-free config to avoid every pane blocking on the folder-trust UI.
+  trust_project_in_codex_config "$dst_home/config.toml" "$(pwd -P)"
 
   # Preserve auth and useful local Codex assets while keeping the config MCP-free.
   # The default "lean" profile intentionally omits skills/memories/plugins:
@@ -338,6 +737,10 @@ prepare_codex_home() {
   done
 }
 
+prepare_codex_home() {
+  prepare_codex_home_for "$SUPERVISOR_CODEX_HOME"
+}
+
 priority_wrapped_codex_command() {
   if [[ "$NICE_LEVEL" =~ ^-?[0-9]+$ ]] && (( NICE_LEVEL != 0 )); then
     printf 'nice -n %s %s\n' "$NICE_LEVEL" "$CODEX_BASE_CMD"
@@ -346,15 +749,40 @@ priority_wrapped_codex_command() {
   fi
 }
 
-build_codex_command() {
-  local prioritized_cmd cache_env
+build_codex_command_for_home() {
+  local codex_home="${1:-$SUPERVISOR_CODEX_HOME}" tmp_root="${2:-$SUPERVISOR_TMP_ROOT}"
+  local prioritized_cmd cache_env thread_env
   prioritized_cmd="$(priority_wrapped_codex_command)"
-  cache_env="XDG_CACHE_HOME=$(shell_quote "$SUPERVISOR_CACHE_ROOT/xdg") npm_config_cache=$(shell_quote "$SUPERVISOR_CACHE_ROOT/npm") UV_CACHE_DIR=$(shell_quote "$SUPERVISOR_CACHE_ROOT/uv") PIP_CACHE_DIR=$(shell_quote "$SUPERVISOR_CACHE_ROOT/pip") PLAYWRIGHT_BROWSERS_PATH=$(shell_quote "$SUPERVISOR_CACHE_ROOT/playwright") CARGO_HOME=$(shell_quote "$SUPERVISOR_CACHE_ROOT/cargo") TMPDIR=$(shell_quote "$SUPERVISOR_TMP_ROOT")"
+  cache_env="XDG_CACHE_HOME=$(shell_quote "$SUPERVISOR_CACHE_ROOT/xdg") npm_config_cache=$(shell_quote "$SUPERVISOR_CACHE_ROOT/npm") UV_CACHE_DIR=$(shell_quote "$SUPERVISOR_CACHE_ROOT/uv") PIP_CACHE_DIR=$(shell_quote "$SUPERVISOR_CACHE_ROOT/pip") PLAYWRIGHT_BROWSERS_PATH=$(shell_quote "$SUPERVISOR_CACHE_ROOT/playwright") CARGO_HOME=$(shell_quote "$SUPERVISOR_CACHE_ROOT/cargo") TMPDIR=$(shell_quote "$tmp_root")"
+  thread_env="UV_THREADPOOL_SIZE=$(shell_quote "$UV_THREADPOOL_SIZE_CAP") OMP_NUM_THREADS=$(shell_quote "$NATIVE_NUM_THREADS_CAP") OPENBLAS_NUM_THREADS=$(shell_quote "$NATIVE_NUM_THREADS_CAP") MKL_NUM_THREADS=$(shell_quote "$NATIVE_NUM_THREADS_CAP") NUMEXPR_NUM_THREADS=$(shell_quote "$NATIVE_NUM_THREADS_CAP") VECLIB_MAXIMUM_THREADS=$(shell_quote "$NATIVE_NUM_THREADS_CAP") TOKENIZERS_PARALLELISM=$(shell_quote "$TOKENIZERS_PARALLELISM_CAP")"
   if [[ "$MCP_MODE" == "off" ]]; then
-    printf 'CODEX_HOME=%s %s %s\n' "$(shell_quote "$SUPERVISOR_CODEX_HOME")" "$cache_env" "$prioritized_cmd"
+    printf 'CODEX_HOME=%s %s %s %s\n' "$(shell_quote "$codex_home")" "$thread_env" "$cache_env" "$prioritized_cmd"
   else
-    printf '%s %s\n' "$cache_env" "$prioritized_cmd"
+    printf '%s %s %s\n' "$thread_env" "$cache_env" "$prioritized_cmd"
   fi
+}
+
+build_codex_command() {
+  build_codex_command_for_home "$SUPERVISOR_CODEX_HOME" "$SUPERVISOR_TMP_ROOT"
+}
+
+pane_codex_home() {
+  local pane="$1"
+  printf '%s/pane-%s\n' "$SUPERVISOR_CODEX_HOME" "$pane"
+}
+
+pane_tmp_root() {
+  local pane="$1"
+  printf '%s/pane-%s\n' "$SUPERVISOR_TMP_ROOT" "$pane"
+}
+
+codex_command_for_pane() {
+  local pane="$1" home tmp
+  home=$(pane_codex_home "$pane")
+  tmp=$(pane_tmp_root "$pane")
+  mkdir -p "$tmp" 2>/dev/null || return 1
+  prepare_codex_home_for "$home" || return 1
+  build_codex_command_for_home "$home" "$tmp"
 }
 
 ensure_codex_cmd() {
@@ -379,7 +807,44 @@ dashboard_url() {
 }
 
 dashboard_http_ok() {
-  python3 - "$DASHBOARD_PORT" <<'PY' >/dev/null 2>&1
+  python3 - "$DASHBOARD_PORT" "$DASHBOARD_REFRESH" "$DASHBOARD_CMD" <<'PY' >/dev/null 2>&1
+import json
+import hashlib
+import os
+import sys
+import urllib.request
+
+port = sys.argv[1]
+desired = float(sys.argv[2])
+expected_cmd = os.path.realpath(sys.argv[3])
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    if "status" not in payload or "panes" not in payload:
+        raise SystemExit(1)
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source_path = str(source.get("path") or "")
+    # A response from any csup-dashboard binary is not good enough: localhost
+    # must be traceably served by the dashboard command this checkout selected.
+    # Otherwise an old ~/bin copy can silently occupy the port and mask fixes.
+    if not source_path or os.path.realpath(source_path) != expected_cmd:
+        raise SystemExit(1)
+    expected_sha = hashlib.sha256(open(expected_cmd, "rb").read()).hexdigest()[:16]
+    if str(source.get("sha256") or "") != expected_sha:
+        raise SystemExit(1)
+    actual = float(payload.get("refresh_interval_secs"))
+    # A dashboard with a much slower server refresh loop looks "healthy" but
+    # serves stale panes. Treat old/slow instances as replaceable so `start`
+    # upgrades localhost:7777 to the requested real-time cadence.
+    allowed = max(desired * 1.5, desired + 0.05)
+    raise SystemExit(0 if actual > 0 and actual <= allowed else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+dashboard_health_source_path() {
+  python3 - "$DASHBOARD_PORT" <<'PY'
 import json
 import sys
 import urllib.request
@@ -388,9 +853,12 @@ port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
         payload = json.loads(r.read().decode("utf-8"))
-    raise SystemExit(0 if "status" in payload and "panes" in payload else 1)
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    path = str(source.get("path") or "")
+    if path:
+        print(path)
 except Exception:
-    raise SystemExit(1)
+    pass
 PY
 }
 
@@ -431,8 +899,9 @@ except Exception:
 PY
 }
 
-dashboard_matching_pids() {
-  python3 - "$DASHBOARD_CMD" "$DASHBOARD_PORT" <<'PY'
+dashboard_matching_pids_for_cmd() {
+  local match_cmd="${1:-$DASHBOARD_CMD}"
+  python3 - "$match_cmd" "$DASHBOARD_PORT" <<'PY'
 import shlex
 import subprocess
 import sys
@@ -463,11 +932,15 @@ for raw in out.splitlines():
     # Match the actual dashboard process only, not a wrapper shell whose
     # command string happens to mention "csup-dashboard --port 7777".
     dashboard_arg = None
+    launcher_name = argv[0].rsplit("/", 1)[-1]
     if argv[0] == cmd:
         dashboard_arg = 0
     elif (
         len(argv) >= 2
-        and (argv[0].endswith("/python3") or argv[0] in {"python3", "python"})
+        and (
+            launcher_name in {"python3", "python", "Python"}
+            or argv[0].endswith("/Python")
+        )
         and argv[1] == cmd
     ):
         dashboard_arg = 1
@@ -485,9 +958,22 @@ for raw in out.splitlines():
 PY
 }
 
+dashboard_matching_pids() {
+  dashboard_matching_pids_for_cmd "$DASHBOARD_CMD"
+}
+
 replace_unhealthy_dashboard_if_owned() {
-  local pids pid killed=0
+  local pids pid killed=0 source_path legacy_cmd
   pids="$(dashboard_matching_pids | tr '\n' ' ')"
+  source_path="$(dashboard_health_source_path || true)"
+  if [[ -n "$source_path" ]] && [[ "$(basename -- "$source_path")" == "csup-dashboard" ]] && [[ "$source_path" != "$DASHBOARD_CMD" ]]; then
+    pids="$pids $(dashboard_matching_pids_for_cmd "$source_path" | tr '\n' ' ')"
+  fi
+  legacy_cmd="$HOME/bin/csup-dashboard"
+  if [[ -x "$legacy_cmd" ]] && [[ "$legacy_cmd" != "$DASHBOARD_CMD" ]]; then
+    pids="$pids $(dashboard_matching_pids_for_cmd "$legacy_cmd" | tr '\n' ' ')"
+  fi
+  pids="$(printf '%s\n' $pids | awk '!seen[$0]++' | tr '\n' ' ')"
   tmux kill-session -t "$DASHBOARD_SESSION" 2>/dev/null || true
   [[ -n "$pids" ]] || return 0
   log "dashboard on $(dashboard_url) is unhealthy/stale; replacing pid(s): $pids"
@@ -586,7 +1072,11 @@ PY
 
 capture_has() {
   local haystack="$1" needle="$2"
-  [[ "$haystack" == *"$needle"* ]]
+  [[ "$haystack" == *"$needle"* ]] && return 0
+  local compact_haystack compact_needle
+  compact_haystack=$(capture_compact_ws "$haystack")
+  compact_needle=$(capture_compact_ws "$needle")
+  [[ "$compact_haystack" == *"$compact_needle"* ]]
 }
 
 capture_has_ci() {
@@ -595,8 +1085,78 @@ capture_has_ci() {
   shopt -s nocasematch
   [[ "$haystack" == *"$needle"* ]]
   rc=$?
+  if (( rc != 0 )); then
+    local compact_haystack compact_needle
+    compact_haystack=$(capture_compact_ws "$haystack")
+    compact_needle=$(capture_compact_ws "$needle")
+    [[ "$compact_haystack" == *"$compact_needle"* ]]
+    rc=$?
+  fi
   (( nocase_was_set )) || shopt -u nocasematch
   return "$rc"
+}
+
+capture_compact_ws() {
+  local s="$1"
+  s="${s//$'\r'/ }"
+  s="${s//$'\n'/ }"
+  s="${s//$'\t'/ }"
+  while [[ "$s" == *"  "* ]]; do
+    s="${s//  / }"
+  done
+  printf '%s' "$s"
+}
+
+pane_title_indicates_activity() {
+  local title="${1:-}"
+  # Codex updates the tmux pane title with a Braille spinner while it is
+  # starting or streaming. Some TUIs leave the visible capture blank during
+  # that window, so use the title as a liveness signal too.
+  case "$title" in
+    "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+pane_has_title_activity() {
+  local target="$1" title
+  title=$(tmux display-message -p -t "$target" '#{pane_title}' 2>/dev/null || true)
+  pane_title_indicates_activity "$title"
+}
+
+pane_capture_active() {
+  local target="$1" cap="$2"
+  capture_has "$cap" "Pursuing goal" \
+    || capture_has "$cap" "Working" \
+    || capture_has "$cap" "Goal active" \
+    || pane_has_title_activity "$target"
+}
+
+capture_activity_marker_count() {
+  local cap="$1"
+  printf '%s\n' "$cap" | grep -Eo 'Pursuing goal|Goal active|Working' 2>/dev/null | wc -l | tr -d ' '
+}
+
+prompt_submission_confirmed() {
+  local target="$1" before="$2" after="$3" before_count after_count
+  # A live spinner in the pane title is the freshest signal: it changes with
+  # the current Codex run, while scrollback can contain stale "Goal active"
+  # text from a previous iteration.
+  pane_has_title_activity "$target" && return 0
+
+  before_count=$(capture_activity_marker_count "$before")
+  after_count=$(capture_activity_marker_count "$after")
+  before_count=${before_count:-0}
+  after_count=${after_count:-0}
+  if (( after_count > before_count )); then
+    return 0
+  fi
+  if (( before_count == 0 )) && (( after_count > 0 )); then
+    return 0
+  fi
+  return 1
 }
 
 capture_goal_done() {
@@ -686,7 +1246,8 @@ validate_prompt_line() {
 # Per-session state file remembers the prompts file path the supervisor was
 # started with, so subsequent `status` / `send` / `restart` etc. don't have
 # to be invoked from the project dir or with the env var set.
-STATE_FILE="${CODEX_SUPERVISOR_STATE_FILE:-$HOME/.codex-supervisor-${SESSION}.state}"
+STATE_FILE="${CODEX_SUPERVISOR_STATE_FILE:-$SUPERVISOR_ROOT/run/${SESSION}.state}"
+DAEMON_PID_FILE="${CODEX_SUPERVISOR_DAEMON_PID_FILE:-$SUPERVISOR_ROOT/run/${SESSION}.daemon.pid}"
 
 refresh_session_paths() {
   if [[ -z "$SUPERVISOR_CODEX_HOME_EXPLICIT" ]]; then
@@ -711,7 +1272,10 @@ refresh_session_paths() {
     DASHBOARD_LOCK_DIR="$SUPERVISOR_ROOT/run/csup-dashboard.lock"
   fi
   if [[ -z "$STATE_FILE_EXPLICIT" ]]; then
-    STATE_FILE="$HOME/.codex-supervisor-${SESSION}.state"
+    STATE_FILE="$SUPERVISOR_ROOT/run/${SESSION}.state"
+  fi
+  if [[ -z "$DAEMON_PID_FILE_EXPLICIT" ]]; then
+    DAEMON_PID_FILE="$SUPERVISOR_ROOT/run/${SESSION}.daemon.pid"
   fi
 }
 
@@ -768,13 +1332,55 @@ write_state_file() {
   resolve_prompts_file
   resolve_tasks_dir
   PROMPTS_FILE="$(absolute_file_path "$PROMPTS_FILE")"
-  [[ -n "$TASKS_DIR" ]] && TASKS_DIR="$(absolute_dir_path "$TASKS_DIR")"
+  # Avoid `[[ -n ... ]] && ...` here: the daemon installs an ERR trap for
+  # crash logging, and on some cluster bash builds the false left-hand side was
+  # still reported through the trap, aborting startup when no task queue was
+  # configured.
+  if [[ -n "$TASKS_DIR" ]]; then
+    TASKS_DIR="$(absolute_dir_path "$TASKS_DIR")"
+  fi
   {
     echo "PROMPTS_FILE=${PROMPTS_FILE}"
     echo "TASKS_DIR=${TASKS_DIR}"
+    echo "LANE_FILTER=${LANE_FILTER}"
+    echo "GENERATED_ONLY=${GENERATED_ONLY}"
+    echo "DEBUGGER_ENABLED=${DEBUGGER_ENABLED}"
+    echo "VALIDATOR_ENABLED=${VALIDATOR_ENABLED}"
+    echo "DYNAMIC_WORKERS=${DYNAMIC_WORKERS}"
     echo "PROJECT_ROOT=$(pwd -P)"
     echo "STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S')"
   } > "$STATE_FILE" 2>/dev/null
+}
+
+state_value() {
+  local key="$1"
+  [[ -f "$STATE_FILE" ]] || return 0
+  grep -E "^${key}=" "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+apply_prompt_runtime_state() {
+  local v
+  if [[ -z "$LANE_FILTER_EXPLICIT" ]]; then
+    v=$(state_value "LANE_FILTER")
+    [[ -n "$v" ]] && LANE_FILTER="$v"
+  fi
+  if [[ -z "$GENERATED_ONLY_EXPLICIT" ]]; then
+    v=$(state_value "GENERATED_ONLY")
+    [[ -n "$v" ]] && GENERATED_ONLY="$v"
+  fi
+  if [[ -z "$DEBUGGER_ENABLED_EXPLICIT" ]]; then
+    v=$(state_value "DEBUGGER_ENABLED")
+    [[ -n "$v" ]] && DEBUGGER_ENABLED="$v"
+  fi
+  if [[ -z "$VALIDATOR_ENABLED_EXPLICIT" ]]; then
+    v=$(state_value "VALIDATOR_ENABLED")
+    [[ -n "$v" ]] && VALIDATOR_ENABLED="$v"
+    PLANNER_ENABLED="$VALIDATOR_ENABLED"
+  fi
+  if [[ -z "$DYNAMIC_WORKERS_EXPLICIT" ]]; then
+    v=$(state_value "DYNAMIC_WORKERS")
+    [[ -n "$v" ]] && DYNAMIC_WORKERS="$v"
+  fi
 }
 
 # Load prompts and lane labels from the prompts file.
@@ -787,7 +1393,16 @@ prompt_has_planner_lane() {
   local label lc
   for label in "${LANE_LABELS[@]}"; do
     lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
-    [[ "$lc" == "planner" || "$lc" == "lead" || "$lc" == "leader" ]] && return 0
+    [[ "$lc" == "validator" || "$lc" == "validate" || "$lc" == "planner" || "$lc" == "lead" || "$lc" == "leader" ]] && return 0
+  done
+  return 1
+}
+
+prompt_has_debugger_lane() {
+  local label lc
+  for label in "${LANE_LABELS[@]}"; do
+    lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    [[ "$lc" == "debug" || "$lc" == "debugger" || "$lc" == "optimize" || "$lc" == "optimizer" ]] && return 0
   done
   return 1
 }
@@ -805,22 +1420,71 @@ lane_filter_matches() {
   return 1
 }
 
+lane_is_dynamic_worker() {
+  local label lc token token_lc
+  label="$1"
+  lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+  [[ "$lc" == "worker" || "$lc" == worker-* || "$lc" == worker[0-9]* || "$lc" == "dynamic" || "$lc" == dynamic-* ]] && return 0
+  for token in ${CODEX_SUPERVISOR_DYNAMIC_LANES:-}; do
+    [[ -n "$token" ]] || continue
+    token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+    [[ "$token_lc" == "$lc" ]] && return 0
+  done
+  return 1
+}
+
+ensure_debugger_prompt() {
+  (( DEBUGGER_ENABLED )) || return 0
+  prompt_has_debugger_lane && return 0
+  local idx="${#PROMPTS[@]}"
+  local doc="$DEBUGGER_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/debugger.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/debugger.md")"
+  fi
+  local prompt="/goal You are PANE ${idx}, lane DEBUG. Read ${doc}, then debug and optimize one compact-safe slice."
+  validate_prompt_line "$prompt" "generated-debugger" 1 || exit 1
+  PROMPTS+=("$prompt")
+  LANE_LABELS+=("DEBUG")
+}
+
 ensure_planner_prompt() {
-  (( PLANNER_ENABLED )) || return 0
+  (( VALIDATOR_ENABLED )) || return 0
   prompt_has_planner_lane && return 0
-  local planner_idx="${#PROMPTS[@]}"
-  local doc="$PLANNER_DOC"
-  if [[ ! -f "$doc" && -f "docs/parallel-sessions/planner.md" ]]; then
+  local idx="${#PROMPTS[@]}"
+  local doc="$VALIDATOR_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/validator-planner.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/validator-planner.md")"
+  elif [[ ! -f "$doc" && -f "docs/parallel-sessions/planner.md" ]]; then
     doc="$(absolute_file_path "docs/parallel-sessions/planner.md")"
   fi
-  local prompt="/goal You are PANE ${planner_idx}, lane PLANNER. Read ${doc}, then review updates and refresh the team plan."
-  validate_prompt_line "$prompt" "generated-planner" 1 || exit 1
+  local prompt="/goal You are PANE ${idx}, lane VALIDATOR. Read ${doc}, then validate results, refresh the plan, and queue follow-up prompts."
+  validate_prompt_line "$prompt" "generated-validator" 1 || exit 1
   PROMPTS+=("$prompt")
-  LANE_LABELS+=("PLANNER")
+  LANE_LABELS+=("VALIDATOR")
+}
+
+ensure_dynamic_worker_prompts() {
+  local n count label idx doc prompt
+  count="${DYNAMIC_WORKERS:-0}"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  (( count > 0 )) || return 0
+  doc="$DYNAMIC_WORKER_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/dynamic-worker.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/dynamic-worker.md")"
+  fi
+  for ((n=1; n<=count; n++)); do
+    label="WORKER-${n}"
+    idx="${#PROMPTS[@]}"
+    prompt="/goal You are PANE ${idx}, lane ${label}. Read ${doc}, then take one open task and complete one compact-safe iteration."
+    validate_prompt_line "$prompt" "generated-worker" "$n" || exit 1
+    PROMPTS+=("$prompt")
+    LANE_LABELS+=("$label")
+  done
 }
 
 load_prompts() {
   resolve_prompts_file
+  apply_prompt_runtime_state
   if [[ -z "$PROMPTS_FILE" || ! -f "$PROMPTS_FILE" ]]; then
     err "prompts file not found"
     err "use --prompts <file>, set CODEX_SUPERVISOR_PROMPTS, or create ./codex-prompts.txt"
@@ -832,6 +1496,7 @@ load_prompts() {
     line_no=$((line_no + 1))
     [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
     validate_prompt_line "$line" "$PROMPTS_FILE" "$line_no" || exit 1
+    truthy "$GENERATED_ONLY" && continue
     # Best-effort lane label: prefer "lane FOO" / "lane: FOO" / "[FOO]".
     local label=""
     if   [[ "$line" =~ [Ll][Aa][Nn][Ee][[:space:]]*:[[:space:]]*([A-Za-z0-9_-]+) ]]; then label="${BASH_REMATCH[1]}"
@@ -846,11 +1511,13 @@ load_prompts() {
     LANE_LABELS+=("$label")
     matched_count=$((matched_count + 1))
   done < "$PROMPTS_FILE"
-  if [[ -n "$LANE_FILTER" && "$matched_count" -eq 0 ]]; then
+  if [[ -n "$LANE_FILTER" && "$matched_count" -eq 0 ]] && ! truthy "$GENERATED_ONLY"; then
     err "CODEX_SUPERVISOR_LANES='$LANE_FILTER' matched no prompts in $PROMPTS_FILE"
     exit 1
   fi
+  ensure_debugger_prompt
   ensure_planner_prompt
+  ensure_dynamic_worker_prompts
   if (( ${#PROMPTS[@]} == 0 )); then
     err "no prompts found in $PROMPTS_FILE"; exit 1
   fi
@@ -1122,13 +1789,27 @@ pane_dead() {
 # looks idle (no Working/Pursuing) within ~10s, retry up to 2 more times.
 # Returns 0 on confirmed-active, 1 on give-up.
 send_prompt_to_pane() {
-  local target="$1" prompt="$2" attempt cap
+  local target="$1" prompt="$2" attempt cap before_cap buffer_name prompt_probe
+  prompt_probe="$(printf '%s' "$prompt" | cut -c1-80)"
   for attempt in 1 2 3; do
     # Cancel any open popup / partial state. NEVER send C-c -- that exits
     # codex (which kills the pane). Esc closes its slash-command popup.
+    # Do not send C-a/C-k here: Codex TUIs on some terminals insert those
+    # controls literally as "^A^K", wedging the input box. C-u is the
+    # portable line-clear path we have verified across local and LUNARC panes.
     tmux send-keys -t "$target" Escape 2>/dev/null
+    tmux send-keys -t "$target" C-u 2>/dev/null
+    tmux send-keys -t "$target" C-u 2>/dev/null
     sleep 0.2
-    tmux send-keys -t "$target" "$prompt"
+    before_cap=$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -n 40)
+    # Long /goal prompts with spaces, slashes, and absolute paths are much
+    # more reliable through a tmux paste buffer than thousands of synthetic
+    # key events. This also avoids wedge loops where the TUI keeps a partial
+    # "Implement {feature}" input and repeated sends never submit.
+    buffer_name="csup-prompt-$$-$attempt"
+    tmux set-buffer -b "$buffer_name" "$prompt" 2>/dev/null \
+      && tmux paste-buffer -d -b "$buffer_name" -t "$target" 2>/dev/null \
+      || tmux send-keys -t "$target" "$prompt"
     sleep 0.5
     tmux send-keys -t "$target" Enter   # /-command popup eats this one
     sleep 0.4
@@ -1138,10 +1819,26 @@ send_prompt_to_pane() {
     for ((s=1; s<=10; s++)); do
       sleep 1
       cap=$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -n 30)
-      if printf '%s' "$cap" | grep -qE "Pursuing goal|Working \(|Goal active"; then
+      if prompt_submission_confirmed "$target" "$before_cap" "$cap"; then
         return 0
       fi
     done
+    # Sometimes Codex accepts the pasted /goal into the composer but the
+    # synthetic Enter lands before the slash-command UI is ready. In that
+    # state, blindly clearing and re-pasting every retry stacks duplicate
+    # prompts in the input box. If the intended prompt is already visible,
+    # nudge submit a few more times before attempting a fresh paste.
+    if [[ -n "$prompt_probe" ]] && printf '%s' "$cap" | grep -Fq "$prompt_probe"; then
+      local n
+      for ((n=1; n<=3; n++)); do
+        tmux send-keys -t "$target" Enter 2>/dev/null || true
+        sleep 2
+        cap=$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -n 40)
+        if prompt_submission_confirmed "$target" "$before_cap" "$cap"; then
+          return 0
+        fi
+      done
+    fi
     # No confirmation -- retry (up to 3 attempts total)
   done
   return 1
@@ -1177,11 +1874,13 @@ wait_ready_and_send() {
 }
 
 respawn_pane_and_prompt() {
-  local i="$1" prompt="$2" reason="${3:-respawn}" target now
+  local i="$1" prompt="$2" reason="${3:-respawn}" target now pane_cmd
   target=$(pane_target "$i")
   now=$(date +%s)
   log "[pane $i ${LANE_LABELS[$i]}] ${reason}; respawning + resending prompt"
-  tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+  terminate_pane_process_tree "$target" "pane $i ${LANE_LABELS[$i]} before respawn"
+  pane_cmd=$(codex_command_for_pane "$i") || return 1
+  tmux respawn-pane -k -t "$target" "$pane_cmd"
   LAST_RESPAWN[$i]=$now
   LIMIT_STREAK[$i]=0
   LAST_GOAL_DONE[$i]=0
@@ -1212,7 +1911,7 @@ check_pane() {
     since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
     local fast_cooldown=$RESPAWN_COOLDOWN_SECS
     if capture_has_ci "$cap" "try again at"; then
-      fast_cooldown=$((60 * 60))
+      fast_cooldown=60
     fi
     if (( since_last < fast_cooldown )); then
       log "[pane $i ${LANE_LABELS[$i]}] compacting/compact-task state but cooldown active (${since_last}s/${fast_cooldown}s)"
@@ -1230,7 +1929,7 @@ check_pane() {
     # wide and respawning won't help — it'll just hit the same wall.
     local cooldown=$RESPAWN_COOLDOWN_SECS
     if capture_has_ci "$cap" "try again at"; then
-      cooldown=$((60 * 60))
+      cooldown=60
     fi
     log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL} (cooldown ${cooldown}s)"
     if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then
@@ -1265,8 +1964,7 @@ check_pane() {
           # Reset BEFORE deciding to avoid re-firing if the action takes time
           LAST_GOAL_DONE[$i]=0
           # Skip if pane has gotten busy again in the meantime
-          if capture_has "$cap" "Working" \
-             || capture_has "$cap" "Pursuing goal"; then
+          if pane_capture_active "$target" "$cap"; then
             return
           fi
           local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
@@ -1274,7 +1972,7 @@ check_pane() {
           # when queue is empty regardless of global ON_COMPLETE policy.
           local lane_lc effective="$ON_COMPLETE"
           lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
-          if [[ " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
+          if [[ "$CONTINUOUS_LANES" == "*" || " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
             effective="queue-redo"
           fi
           case "$effective" in
@@ -1310,7 +2008,9 @@ check_pane() {
               ITERATION_STARTED[$i]=$now
             elif (( RESPAWN_ON_GOAL_DONE )); then
               log "[pane $i $lane] respawning codex before next task ($sent_label)"
-              tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+              terminate_pane_process_tree "$target" "pane $i $lane before next task"
+              local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
+              tmux respawn-pane -k -t "$target" "$_pane_cmd"
               # Send the next prompt once codex is ready again (background).
               ( wait_ready_and_send "$i" "$next_task" ) &
               ITERATION_STARTED[$i]=$now
@@ -1336,7 +2036,7 @@ check_pane() {
         local idle=$(( now - LAST_GOAL_DONE[$i] ))
         if (( idle >= RESEND_GRACE_SECS )); then
           LAST_GOAL_DONE[$i]=0
-          if ! capture_has "$cap" "Working" && ! capture_has "$cap" "Pursuing goal"; then
+          if ! pane_capture_active "$target" "$cap"; then
             local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
             local lane_lc effective="$ON_COMPLETE"
             lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
@@ -1366,7 +2066,9 @@ check_pane() {
                 run_periodic_cleanup; ITERATION_STARTED[$i]=$now
               elif (( RESPAWN_ON_GOAL_DONE )); then
                 log "[pane $i $lane] respawning codex before next task ($sent_label) [timer expired, text gone]"
-                tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+                terminate_pane_process_tree "$target" "pane $i $lane before next task"
+                local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
+                tmux respawn-pane -k -t "$target" "$_pane_cmd"
                 ( wait_ready_and_send "$i" "$next_task" ) &
                 ITERATION_STARTED[$i]=$now
               else
@@ -1380,18 +2082,58 @@ check_pane() {
           fi
         fi
         # else: timer still counting — leave LAST_GOAL_DONE[$i] alone
-      elif capture_has "$cap" "Working" || capture_has "$cap" "Pursuing goal" \
+      elif pane_capture_active "$target" "$cap" \
            || capture_has "$cap" "Starting MCP"; then
         # New task is running — clear any stale timer
         LAST_GOAL_DONE[$i]=0
       else
+        local _idle_state=""
+        _idle_state=$(classify_capture_state "$cap")
+        if { capture_has "$cap" "$READY_PATTERN" \
+             && ! capture_has "$cap" "$NOT_READY_PATTERN"; } \
+           || [[ "$_idle_state" == "READY" || "$_idle_state" == "?" ]]; then
+          local _ready_started=${ITERATION_STARTED[$i]:-0}
+          if (( _ready_started > 0 )) && (( now - _ready_started >= RESEND_GRACE_SECS )); then
+            local _rlane="${LANE_LABELS[$i]}" _rnext="" _rlabel=""
+            local _rlane_lc _reffective="$ON_COMPLETE"
+            _rlane_lc=$(printf '%s' "$_rlane" | tr '[:upper:]' '[:lower:]')
+            if [[ "$CONTINUOUS_LANES" == "*" || " $CONTINUOUS_LANES " == *" $_rlane_lc "* ]]; then
+              _reffective="queue-redo"
+            fi
+            case "$_reffective" in
+              queue|queue-redo)
+                if _rnext=$(pop_next_task "$_rlane") && [[ -n "$_rnext" ]]; then
+                  _rlabel="next from queue"
+                elif [[ "$_reffective" == "queue-redo" ]]; then
+                  _rnext="${PROMPTS[$i]}"; _rlabel="redo (ready idle)"
+                fi
+                ;;
+              redo)
+                _rnext="${PROMPTS[$i]}"; _rlabel="redo (ready idle)"
+                ;;
+            esac
+            if [[ -n "$_rnext" ]]; then
+              log "[pane $i $_rlane] ready/idle for $(( now - _ready_started ))s; sending $_rlabel"
+              if send_prompt_to_pane "$target" "$_rnext"; then
+                ITERATION_STARTED[$i]=$now
+              else
+                log "[pane $i $_rlane] ready/idle retry UNCONFIRMED"
+                if (( RESPAWN_ON_GOAL_DONE )); then
+                  respawn_pane_and_prompt "$i" "$_rnext" "ready/idle retry unconfirmed"
+                else
+                  ITERATION_STARTED[$i]=$now
+                fi
+              fi
+            fi
+          fi
+        fi
         # Pane has no active timer and no visible "Goal achieved" text.
         # For CONTINUOUS_LANES panes in ? state (codex exited, bash prompt):
         # codex may have completed quietly (fast IDLE) without the poll ever
         # seeing "Goal achieved". Respawn after grace period.
         local _clc; _clc=$(printf '%s' "${LANE_LABELS[$i]}" | tr '[:upper:]' '[:lower:]')
-        if [[ " $CONTINUOUS_LANES " == *" $_clc "* ]]; then
-          local _cstate; _cstate=$(classify_capture_state "$cap")
+        if [[ "$CONTINUOUS_LANES" == "*" || " $CONTINUOUS_LANES " == *" $_clc "* ]]; then
+          local _cstate; _cstate="${_idle_state:-$(classify_capture_state "$cap")}"
           local _cstarted=${ITERATION_STARTED[$i]:-0}
           if [[ "$_cstate" == "?" ]] && (( _cstarted > 0 )) \
              && (( now - _cstarted >= RESEND_GRACE_SECS )); then
@@ -1401,7 +2143,9 @@ check_pane() {
             local _cdisk; _cdisk=$(free_gb_on_cwd)
             if (( _cram >= MIN_FREE_RAM_MB )) && (( _cdisk >= MIN_FREE_GB )); then
               log "[pane $i ${LANE_LABELS[$i]}] continuous lane in ? state (quiet exit); respawning"
-              tmux respawn-pane -k -t "$target" "$CODEX_CMD"
+              terminate_pane_process_tree "$target" "pane $i ${LANE_LABELS[$i]} before continuous respawn"
+              local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
+              tmux respawn-pane -k -t "$target" "$_pane_cmd"
               ( wait_ready_and_send "$i" "$_cnext" ) &
               ITERATION_STARTED[$i]=$now
             fi
@@ -1431,6 +2175,29 @@ populate_pane_idx_from_running() {
     < <(tmux list-panes -t "$SESSION:0" -F '#{pane_index}' 2>/dev/null)
 }
 
+reconcile_live_panes_with_prompts() {
+  local want="${#PROMPTS[@]}" have="${#PANE_IDX[@]}" j target
+  if (( have == want )); then
+    return 0
+  fi
+
+  if (( have > want )); then
+    log "live pane count ${have} exceeds prompt count ${want}; removing $((have - want)) stale extra pane(s)"
+    for ((j=have - 1; j>=want; j--)); do
+      target="$SESSION:0.${PANE_IDX[$j]}"
+      terminate_pane_process_tree "$target" "stale extra pane ${PANE_IDX[$j]} beyond prompt count"
+      tmux kill-pane -t "$target" 2>/dev/null || true
+    done
+    populate_pane_idx_from_running
+    apply_even_grid
+    apply_pane_titles
+    (( ${#PANE_IDX[@]} == want )) && return 0
+  fi
+
+  log "live pane count ${#PANE_IDX[@]} does not match prompt count ${want}; rebuild required"
+  return 1
+}
+
 resolve_tasks_dir() {
   [[ -n "$TASKS_DIR" ]] && return 0
   if [[ -d "./codex-tasks" ]]; then TASKS_DIR="$(pwd)/codex-tasks"; return 0; fi
@@ -1454,14 +2221,9 @@ resolve_tasks_dir() {
   if [[ -d "$HOME/codex-tasks" ]]; then TASKS_DIR="$HOME/codex-tasks"; fi
 }
 
-# Pop the first non-blank, non-comment line from the lane's queue file and
-# echo it to stdout. Removes the line from the file (atomic via tmp+mv).
-# Returns 0 if a task was popped, 1 if queue was empty/missing.
-pop_next_task() {
-  local lane="$1"
-  resolve_tasks_dir
-  [[ -n "$TASKS_DIR" && -d "$TASKS_DIR" ]] || return 1
-  local file="$TASKS_DIR/${lane}.txt"
+# Pop the first non-blank, non-comment line from one queue file.
+pop_next_task_file() {
+  local file="$1"
   [[ -f "$file" ]] || return 1
   # Find first non-blank, non-comment line
   local task line_no=0 found=0
@@ -1478,8 +2240,44 @@ pop_next_task() {
   printf '%s' "$task"
 }
 
+# Pop the next task for a lane. Fixed/specified lanes read codex-tasks/<lane>.txt.
+# Dynamic worker lanes first honor a worker-specific queue, then shared open
+# queues such as codex-tasks/open.txt. This keeps lane-specific work scoped
+# while letting the N worker pool take any unassigned open task.
+pop_next_task() {
+  local lane="$1" lane_lc file token token_lc
+  resolve_tasks_dir
+  [[ -n "$TASKS_DIR" && -d "$TASKS_DIR" ]] || return 1
+  lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
+
+  if lane_is_dynamic_worker "$lane"; then
+    for token in $BLOCKER_QUEUE_LANES; do
+      [[ -n "$token" ]] || continue
+      token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+      if pop_next_task_file "$TASKS_DIR/${token_lc}.txt"; then return 0; fi
+    done
+    for file in "$TASKS_DIR/${lane_lc}.txt" "$TASKS_DIR/${lane}.txt"; do
+      if pop_next_task_file "$file"; then return 0; fi
+    done
+    for token in $DYNAMIC_QUEUE_LANES; do
+      [[ -n "$token" ]] || continue
+      token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+      for blocker_token in $BLOCKER_QUEUE_LANES; do
+        [[ "$token_lc" == "$(printf '%s' "$blocker_token" | tr '[:upper:]' '[:lower:]')" ]] && continue 2
+      done
+      if pop_next_task_file "$TASKS_DIR/${token_lc}.txt"; then return 0; fi
+    done
+    return 1
+  fi
+
+  file="$TASKS_DIR/${lane_lc}.txt"
+  [[ -f "$file" ]] || file="$TASKS_DIR/${lane}.txt"
+  pop_next_task_file "$file"
+}
+
 cleanup_session() {
   log "shutting down session '$SESSION'"
+  terminate_session_process_trees
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   reap_orphan_mcps
   # Also kill any stale supervisor daemons (other than ourselves). Each
@@ -1487,35 +2285,71 @@ cleanup_session() {
   # and fight over the same panes.
   reap_stale_daemons
   # Drop the per-session state file so a fresh `start` can rediscover.
-  rm -f "$STATE_FILE" 2>/dev/null
+  rm -f "$STATE_FILE" "$DAEMON_PID_FILE" 2>/dev/null
+}
+
+daemon_cmd_matches_session() {
+  local cmd="$1"
+  printf '%s' "$cmd" | grep -q -- "--daemon" || return 1
+  if printf '%s' "$cmd" | grep -qE "[-]-session[[:space:]]+${SESSION}([[:space:]]|\$)"; then
+    return 0
+  fi
+  if [[ "$SESSION" == "codex-supervisor" ]] \
+     && ! printf '%s' "$cmd" | grep -qE "[-]-session"; then
+    return 0
+  fi
+  return 1
+}
+
+supervisor_daemon_pids() {
+  local self="$$" parent pid saved cmd
+  parent=$(ps -o ppid= -p "$self" 2>/dev/null | tr -d ' ')
+  saved=$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)
+  if [[ -n "$saved" && "$saved" =~ ^[0-9]+$ \
+        && "$saved" != "$self" && "$saved" != "$parent" ]] \
+     && kill -0 "$saved" 2>/dev/null; then
+    cmd=$(ps -p "$saved" -o command= 2>/dev/null || true)
+    if daemon_cmd_matches_session "$cmd"; then
+      printf '%s\n' "$saved"
+      return 0
+    fi
+  fi
+
+  local found=1
+  local pids=() ppids=() line ppid root has_parent idx j
+  while read -r pid ppid cmd; do
+    [[ -n "${pid:-}" && -n "${ppid:-}" && -n "${cmd:-}" ]] || continue
+    [[ "$pid" == "$self" || "$pid" == "$parent" ]] && continue
+    [[ "$cmd" == *"codex-supervisor.sh"* ]] || continue
+    daemon_cmd_matches_session "$cmd" || continue
+    pids+=("$pid")
+    ppids+=("$ppid")
+  done < <(ps -axo pid=,ppid=,command= 2>/dev/null || true)
+
+  # Bash background subshells inherit the original script command line, so
+  # `ps` makes prompt-sender helper jobs look exactly like daemons. Keep only
+  # root daemon processes by dropping any candidate whose parent is another
+  # matching candidate.
+  for idx in "${!pids[@]}"; do
+    root=1
+    for j in "${!pids[@]}"; do
+      if [[ "${ppids[$idx]}" == "${pids[$j]}" ]]; then
+        root=0
+        break
+      fi
+    done
+    (( root )) || continue
+    printf '%s\n' "${pids[$idx]}"
+    found=0
+  done
+  return "$found"
 }
 
 # Kill any other codex-supervisor daemon processes for this session,
 # excluding the current process tree.
 reap_stale_daemons() {
-  local self="$$" parent
-  parent=$(ps -o ppid= -p "$self" 2>/dev/null | tr -d ' ')
   local n=0 killed_pids=()
-  for pid in $(pgrep -f "codex-supervisor\.sh" 2>/dev/null); do
-    [[ "$pid" == "$self" || "$pid" == "$parent" ]] && continue
-    # Match `--session <SESSION>` exactly, not bare $SESSION substring.
-    # The script path itself is `codex-supervisor.sh`, so a bare grep for
-    # SESSION="codex-supervisor" matches every supervisor process —
-    # including ones for OTHER sessions (e.g. nnbar-rebuild). That bug
-    # let one project's `start` kill another project's running daemon.
-    local cmd; cmd=$(ps -p "$pid" -o command= 2>/dev/null)
-    if printf '%s' "$cmd" | grep -qE "[-]-session[[:space:]]+${SESSION}([[:space:]]|\$)"; then
-      :
-    elif [[ "$SESSION" == "codex-supervisor" ]] \
-         && ! printf '%s' "$cmd" | grep -qE "[-]-session"; then
-      # Backwards-compat: a daemon launched without --session uses the
-      # default "codex-supervisor". Match it only when our own SESSION
-      # is also the default (otherwise we'd kill the default-session
-      # daemon when running a named session).
-      :
-    else
-      continue
-    fi
+  for pid in $(supervisor_daemon_pids); do
     # SIGKILL (not TERM) so the dying daemon's trap can't fire
     # cleanup_session and tear down the tmux session that the new
     # daemon is bringing up. We've hit this race repeatedly.
@@ -1527,6 +2361,19 @@ reap_stale_daemons() {
     # they queued can't ride past us.
     sleep 1
   fi
+}
+
+fork_supervisor_daemon() {
+  local mode="${1:-fresh}"
+  local fork_args=("start" "--daemon" "--session" "$SESSION")
+  [[ "$mode" == "reattach" ]] && fork_args+=("--reattach")
+  [[ -n "$PROMPTS_FILE" ]] && fork_args+=("--prompts" "$PROMPTS_FILE")
+  log "forking supervisor daemon${mode:+ ($mode)}..."
+  nohup bash "$0" "${fork_args[@]}" >/dev/null 2>&1 &
+  local daemon_pid=$!
+  mkdir -p "$(dirname "$DAEMON_PID_FILE")" 2>/dev/null || true
+  printf '%s\n' "$daemon_pid" > "$DAEMON_PID_FILE" 2>/dev/null || true
+  disown "$daemon_pid" 2>/dev/null || true
 }
 
 # Kill any orphaned MCP node processes (parent PID == 1 and the command
@@ -1587,6 +2434,40 @@ free_ram_mb() {
   '
 }
 
+cpu_count() {
+  sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
+}
+
+load1() {
+  python3 - <<'PY' 2>/dev/null || uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/'
+import os
+try:
+    print(os.getloadavg()[0])
+except (AttributeError, OSError):
+    print(0)
+PY
+}
+
+cpu_load_headroom_panes() {
+  python3 - "$1" "$2" "$MAX_LOAD_PER_CPU" <<'PY'
+import math
+import sys
+
+try:
+    cpus = max(1, int(float(sys.argv[1])))
+    load = max(0.0, float(sys.argv[2]))
+    limit = float(sys.argv[3])
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if limit <= 0:
+    print(999999)
+else:
+    print(max(0, int(math.floor(cpus * limit - load))))
+PY
+}
+
 ceil_div() {
   local n="$1" d="$2"
   (( d > 0 )) || { echo 0; return; }
@@ -1608,13 +2489,22 @@ effective_start_stagger_secs() {
 
 ensure_start_resource_budget() {
   local pane_count="${1:-${#PROMPTS[@]}}"
-  local free_ram free_disk need_ram need_disk_gb extra_disk_gb
+  local free_ram free_disk need_ram need_disk_gb extra_disk_gb cpus load load_room
 
   free_ram=$(free_ram_mb)
   free_disk=$(free_gb_on_runtime_root)
+  cpus=$(cpu_count)
+  load=$(load1)
+  load_room=$(cpu_load_headroom_panes "$cpus" "$load")
   need_ram=$(( MIN_FREE_RAM_MB + pane_count * RAM_MB_PER_PANE ))
   extra_disk_gb=$(ceil_div "$(( pane_count * DISK_MB_PER_PANE ))" 1024)
   need_disk_gb=$(( MIN_FREE_GB + extra_disk_gb ))
+
+  if [[ "$MAX_LOAD_PER_CPU" != "0" && "$MAX_LOAD_PER_CPU" != "0.0" ]] && (( pane_count > load_room )); then
+    err "not enough CPU/load headroom to start ${pane_count} pane(s): load=${load} on ${cpus} CPU(s), capacity for ${load_room} new pane(s) at ${MAX_LOAD_PER_CPU} load/CPU"
+    err "start fewer panes, let current jobs settle, move lanes to a remote host, or set CODEX_SUPERVISOR_MAX_LOAD_PER_CPU=0 if another scheduler owns CPU"
+    return 1
+  fi
 
   if (( RAM_MB_PER_PANE > 0 && free_ram < need_ram )); then
     err "not enough free RAM to start ${pane_count} pane(s): ${free_ram}MB free, need >= ${need_ram}MB (${RAM_MB_PER_PANE}MB/pane + ${MIN_FREE_RAM_MB}MB reserve)"
@@ -1629,7 +2519,7 @@ ensure_start_resource_budget() {
   fi
 
   if (( pane_count >= 6 )); then
-    log "resource budget ok for ${pane_count} panes: ${free_ram}MB RAM free (need ${need_ram}MB), ${free_disk}G disk free (need ${need_disk_gb}G), startup stagger $(effective_start_stagger_secs "$pane_count")s"
+    log "resource budget ok for ${pane_count} panes: load=${load}/${cpus} CPU(s) (room ${load_room}), ${free_ram}MB RAM free (need ${need_ram}MB), ${free_disk}G disk free (need ${need_disk_gb}G), startup stagger $(effective_start_stagger_secs "$pane_count")s"
   fi
   return 0
 }
@@ -1655,9 +2545,15 @@ ensure_disk_space() {
 # Claude Code session tmp dirs. Idempotent. Safe to run while supervisor
 # is running (only touches state outside the live tmux session).
 cmd_cleanup() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global) GLOBAL_CLEANUP=1; shift ;;
+      *) err "cleanup: unknown arg $1"; return 1 ;;
+    esac
+  done
   local before after freed
   before=$(free_gb_on_cwd)
-  log "cleanup: starting ($before G free on $(pwd))"
+  log "cleanup: starting ($before G free on $(pwd); scope=$(cleanup_global_enabled && echo global || echo project))"
 
   # 0) Supervisor-owned runtime/cache dirs (normally on MyDrive).
   prune_supervisor_runtime_dirs "$PERIODIC_WORKTREE_AGE_MIN"
@@ -1686,13 +2582,15 @@ cmd_cleanup() {
     fi
   fi
 
-  # 2) npm cache. Safe; re-downloads on demand.
-  rm -rf "$HOME/.npm/_cacache" 2>/dev/null
+  # 2) npm cache. Safe; re-downloads on demand, but global to all projects.
+  if cleanup_global_enabled; then
+    rm -rf "$HOME/.npm/_cacache" 2>/dev/null
+  fi
 
   # 3) Old Claude Code session tmp dirs (>24h). The harness writes per-tool
   #    output here; old session UUIDs sit forever otherwise.
-  if [[ -d /private/tmp/claude-501 ]]; then
-    find /private/tmp/claude-501 -mindepth 2 -maxdepth 2 -type d -mmin +1440 \
+  if cleanup_global_enabled && [[ -d "$TMP_SWEEP_ROOT/claude-501" ]]; then
+    find "$TMP_SWEEP_ROOT/claude-501" -mindepth 2 -maxdepth 2 -type d -mmin +1440 \
       -exec rm -rf {} + 2>/dev/null
   fi
 
@@ -1700,10 +2598,11 @@ cmd_cleanup() {
   #    worktrees here that aren't always cleaned up. We've seen 60+
   #    accumulate. Skip /private/tmp/<repo>-saved-before by convention
   #    (those are user-saved snapshots).
-  find /private/tmp -maxdepth 1 -type d -name '*-*' -mmin +60 2>/dev/null | while read -r wt; do
+  find "$TMP_SWEEP_ROOT" -maxdepth 1 -type d -name '*-*' -mmin +60 2>/dev/null | while read -r wt; do
     case "$(basename "$wt")" in
       *-saved-before|claude-501) continue ;;
     esac
+    cleanup_path_in_project_scope "$wt" || cleanup_git_worktree_in_current_repo "$wt" || continue
     # Only nuke if it has a .git pointing somewhere (i.e., it's a worktree)
     if [[ -e "$wt/.git" ]]; then
       log "cleanup: removing tmp worktree $wt"
@@ -1716,8 +2615,8 @@ cmd_cleanup() {
   # 5) Sibling worktree clones at ~/.config/superpowers/worktrees/<repo>/*
   #    that aren't tied to the current project. Each repo dir under there
   #    gets a `git worktree prune` from its main checkout if findable.
-  if [[ -d "$HOME/.config/superpowers/worktrees" ]]; then
-    find "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +1440 2>/dev/null | while read -r wt; do
+  if [[ -d "$SUPERPOWERS_WORKTREES_ROOT" ]]; then
+    find_project_scoped_children "$SUPERPOWERS_WORKTREES_ROOT" 2 2 1440 | while read -r wt; do
       log "cleanup: removing stale superpowers worktree $wt"
       rm -rf "$wt"
     done
@@ -1725,7 +2624,8 @@ cmd_cleanup() {
 
   # 6) Sibling per-pane clones in ~/Desktop/projects/<repo>-* that aren't
   #    git worktrees (orphaned codex per-pane copies).
-  find "$HOME/Desktop/projects" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +1440 2>/dev/null | while read -r d; do
+  find "$PROJECTS_ROOT" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +1440 2>/dev/null | while read -r d; do
+    cleanup_path_in_project_scope "$d" || continue
     # Skip if it's the main repo or a registered worktree
     [[ -e "$d/.git" ]] || continue
     if [[ -d "$d/.git" ]]; then continue; fi   # main checkout has .git/ as dir
@@ -1733,19 +2633,24 @@ cmd_cleanup() {
     rm -rf "$d"
   done
 
-  # 7) Build caches inside any project we know about (best-effort, age-gated)
-  for cachedir in $(find "$HOME/Desktop/projects" -maxdepth 3 -type d \( -name '.next' -o -name '.turbo' -o -name 'dist' \) -mmin +720 2>/dev/null); do
-    rm -rf "$cachedir" 2>/dev/null
-  done
+  # 7) Build caches. Project-scoped by default; --global scans all projects.
+  local cache_root
+  if cleanup_global_enabled; then cache_root="$PROJECTS_ROOT"; else cache_root="$(current_project_root)"; fi
+  if [[ -d "$cache_root" ]]; then
+    for cachedir in $(find "$cache_root" -maxdepth 3 -type d \( -name '.next' -o -name '.turbo' -o -name 'dist' \) -mmin +720 2>/dev/null); do
+      cleanup_global_enabled || cleanup_path_under_current_project "$cachedir" || continue
+      rm -rf "$cachedir" 2>/dev/null
+    done
+  fi
 
   # 8) Homebrew cache + downloads.
-  if command -v brew >/dev/null 2>&1; then
+  if cleanup_global_enabled && command -v brew >/dev/null 2>&1; then
     brew cleanup --prune=all >/dev/null 2>&1 || true
   fi
 
   # 9) Time Machine local snapshots. Often the silent killer on macOS.
   #    Try without sudo first; if it fails the user can rerun by hand.
-  if command -v tmutil >/dev/null 2>&1; then
+  if cleanup_global_enabled && command -v tmutil >/dev/null 2>&1; then
     tmutil deletelocalsnapshots / >/dev/null 2>&1 || true
   fi
 
@@ -1754,7 +2659,7 @@ cmd_cleanup() {
   #     verbose per-turn JSONL here; safe to wipe — codex regenerates as it
   #     runs. We empty the directory but keep the dir itself so codex's
   #     in-flight handle stays valid.
-  if [[ -d "$HOME/.codex/log" ]]; then
+  if cleanup_global_enabled && [[ -d "$HOME/.codex/log" ]]; then
     local log_kb log_gb
     log_kb=$(du -sk "$HOME/.codex/log" 2>/dev/null | awk '{print $1}')
     log_gb=$(( log_kb / 1024 / 1024 ))
@@ -1766,7 +2671,7 @@ cmd_cleanup() {
 
   # 11) Codex CLI sessions older than CODEX_SESSIONS_RETAIN_DAYS. Per-task
   #     JSONL transcripts. Default 7 days. Skipped if retention is 0.
-  if (( CODEX_SESSIONS_RETAIN_DAYS > 0 )) && [[ -d "$HOME/.codex/sessions" ]]; then
+  if cleanup_global_enabled && (( CODEX_SESSIONS_RETAIN_DAYS > 0 )) && [[ -d "$HOME/.codex/sessions" ]]; then
     find "$HOME/.codex/sessions" -type f -mtime +"${CODEX_SESSIONS_RETAIN_DAYS}" \
       -delete 2>/dev/null
   fi
@@ -1782,14 +2687,14 @@ cmd_cleanup() {
   fi
 
   # 13) uv cache prune (Python tool venv wheels). Cheap; redownloads on demand.
-  command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 || true
+  cleanup_global_enabled && command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 || true
 
   # 14) npm _npx cache. Codex spawns `npx` heavily; npx caches whole node
   #     project trees here. Safe to wipe.
-  rm -rf "$HOME/.npm/_npx" 2>/dev/null
+  cleanup_global_enabled && rm -rf "$HOME/.npm/_npx" 2>/dev/null
 
   # 15) macOS-specific app caches that codex/playwright/claude write.
-  if [[ -d "$HOME/Library/Caches/com.openai.codex" ]]; then
+  if cleanup_global_enabled && [[ -d "$HOME/Library/Caches/com.openai.codex" ]]; then
     find "$HOME/Library/Caches/com.openai.codex" -mindepth 1 -delete 2>/dev/null
   fi
 
@@ -1800,13 +2705,14 @@ cmd_cleanup() {
 }
 
 cmd_start() {
-  local attach_after=1 daemon_mode=0
+  local attach_after=1 daemon_mode=0 reattach_mode=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-attach) attach_after=0; shift ;;
       --prompts)   PROMPTS_FILE="$2"; shift 2 ;;
       --session)   SESSION="$2"; shift 2 ;;
       --daemon)    daemon_mode=1; shift ;;   # internal: do the actual work
+      --reattach)  reattach_mode=1; shift ;; # internal: daemon adopts existing tmux panes
       *) err "start: unknown arg $1"; return 1 ;;
     esac
   done
@@ -1833,6 +2739,7 @@ cmd_start() {
   # A clean stop (INT/TERM) exits 0 and breaks the loop immediately.
   if (( daemon_mode )); then
     local _restart_count=0 _rc=0
+    (( reattach_mode )) && _restart_count=1
     while true; do
       _start_supervisor_main "$_restart_count"
       _rc=$?
@@ -1853,34 +2760,49 @@ cmd_start() {
   local first_word; first_word=$(command_name_from_shell_command)
   command -v "$first_word" >/dev/null || { err "$first_word not on PATH"; exit 1; }
 
+  if ! acquire_session_start_lock; then
+    err "could not acquire start lock for session '$SESSION'"
+    exit 1
+  fi
+
   local session_running=0
   tmux has-session -t "$SESSION" 2>/dev/null && session_running=1
   if (( ! session_running )); then
     load_prompts
-    ensure_start_resource_budget || exit 1
+    if ! ensure_start_resource_budget; then
+      release_session_start_lock
+      exit 1
+    fi
     # Disk-space guard. Each pane is a worktree + node_modules + node MCP tree;
     # a fresh start on a near-full disk has historically crashed the daemon
     # mid-spin and orphaned MCP children. Refuse early instead.
-    ensure_disk_space || exit 1
+    if ! ensure_disk_space; then
+      release_session_start_lock
+      exit 1
+    fi
   fi
 
-  # Reap any stale daemon processes from prior runs before forking a new one.
-  # `stop` doesn't always get called between restarts, and the daemon
-  # survives terminal close, so they accumulate.
-  reap_stale_daemons
-
-  # Don't double-launch: if a session of this name is already up, just attach.
+  # Don't double-launch: if a session of this name is already up, ensure it
+  # still has a monitor daemon. Older `start` calls reaped the daemon and then
+  # only attached, leaving panes frozen at Ready/Done forever. The start lock
+  # covers the re-check + fork so concurrent `csup start` calls cannot all see
+  # "missing daemon" and fork competing monitors for the same tmux panes.
   if (( session_running )); then
-    log "session '$SESSION' already running; attaching"
+    if supervisor_daemon_pids >/dev/null; then
+      log "session '$SESSION' already running with monitor daemon; attaching"
+    else
+      log "session '$SESSION' already running but monitor daemon is missing; re-attaching daemon"
+      fork_supervisor_daemon "reattach"
+    fi
   else
+    # Reap stale daemon processes from prior runs only when replacing a missing
+    # tmux session. Reaping during an idempotent `start` would kill the healthy
+    # monitor for an existing session.
+    reap_stale_daemons
     # Fork ourselves as a background daemon. nohup + &  + disown means the
     # daemon survives even when the launcher window closes. Pass --daemon so
     # the forked invocation skips this branch and runs _start_supervisor_main.
-    local fork_args=("start" "--daemon" "--session" "$SESSION")
-    [[ -n "$PROMPTS_FILE" ]] && fork_args+=("--prompts" "$PROMPTS_FILE")
-    log "forking supervisor daemon..."
-    nohup bash "$0" "${fork_args[@]}" >/dev/null 2>&1 &
-    disown $!
+    fork_supervisor_daemon "fresh"
 
     # Wait for the daemon to spin the tmux session up.
     local i
@@ -1889,10 +2811,12 @@ cmd_start() {
       sleep 1
     done
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      release_session_start_lock
       err "daemon did not bring up session within 60s; check $LOG_FILE"
       exit 1
     fi
   fi
+  release_session_start_lock
 
   # One dashboard for all supervisor sessions. This keeps csup-dashboard and
   # codex-supervisor combined operationally: starting any supervisor session
@@ -1947,10 +2871,15 @@ _start_supervisor_main() {
   # and are logged via the handler since set -u triggers ERR in bash.
   trap 'cleanup_session; exit 0' INT TERM
   trap '_daemon_crash_handler $LINENO "$BASH_COMMAND"' ERR
+  mkdir -p "$(dirname "$DAEMON_PID_FILE")" 2>/dev/null || true
+  printf '%s\n' "$$" > "$DAEMON_PID_FILE" 2>/dev/null || true
 
   if (( _is_restart )); then
     log "daemon restart #$_is_restart: re-attaching to session '$SESSION'"
     populate_pane_idx_from_running
+    if tmux has-session -t "$SESSION" 2>/dev/null && (( ${#PANE_IDX[@]} > 0 )); then
+      reconcile_live_panes_with_prompts || PANE_IDX=()
+    fi
     if ! tmux has-session -t "$SESSION" 2>/dev/null || (( ${#PANE_IDX[@]} == 0 )); then
       log "session gone or empty — rebuilding from scratch"
       ensure_start_resource_budget || exit 1
@@ -2008,14 +2937,28 @@ _start_supervisor_main() {
 
 create_tmux_session_panes() {
   local kill_existing="${1:-1}"
-  (( kill_existing )) && tmux kill-session -t "$SESSION" 2>/dev/null || true
-  tmux new-session -d -s "$SESSION" -x 240 -y 70 "$CODEX_CMD"
+  if (( kill_existing )); then
+    terminate_session_process_trees
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+  fi
+  local pane_cmd
+  pane_cmd=$(codex_command_for_pane 0) || return 1
+  tmux new-session -d -s "$SESSION" -x "$(tmux_window_x)" -y "$(tmux_window_y)" "$pane_cmd"
+  # Some cluster/login environments set tmux base-index=1. The supervisor and
+  # dashboard intentionally use window 0 as the stable session window, so move
+  # the newly created window to 0 before any split/capture operations.
+  local first_window
+  first_window=$(tmux display-message -p -t "$SESSION" '#{window_index}' 2>/dev/null || printf '0')
+  if [[ "$first_window" != "0" ]]; then
+    tmux move-window -s "$SESSION:$first_window" -t "$SESSION:0" 2>/dev/null || true
+  fi
   apply_tmux_config
 
   local i start_stagger
   start_stagger=$(effective_start_stagger_secs "${#PROMPTS[@]}")
   for ((i=1; i<${#PROMPTS[@]}; i++)); do
-    tmux split-window -t "$SESSION:0" "$CODEX_CMD"
+    pane_cmd=$(codex_command_for_pane "$i") || return 1
+    tmux split-window -t "$SESSION:0" "$pane_cmd"
     tmux select-layout -t "$SESSION:0" tiled >/dev/null
     if (( start_stagger > 0 && i < ${#PROMPTS[@]} - 1 )); then
       sleep "$start_stagger"
@@ -2128,31 +3071,34 @@ run_periodic_cleanup() {
 
   # 2) /private/tmp/<repo>-* dirs that are NOT registered worktrees
   #    (codex sometimes creates plain temp dirs there).
-  find /private/tmp -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+  find "$TMP_SWEEP_ROOT" -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
     case "$(basename "$d")" in
       *-saved-before|claude-501) continue ;;
     esac
+    cleanup_path_in_project_scope "$d" || cleanup_git_worktree_in_current_repo "$d" || continue
     rm -rf "$d" 2>/dev/null
   done
 
   # 3) Stale superpowers worktree dirs not registered (mmin +PERIODIC).
   # `~/.config/superpowers/worktrees` may be a symlink to MyDrive — find -L
   # follows symlinks so MyDrive contents get swept just like local would.
-  if [[ -e "$HOME/.config/superpowers/worktrees" ]]; then
-    find -L "$HOME/.config/superpowers/worktrees" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
-      -exec rm -rf {} + 2>/dev/null
+  if [[ -e "$SUPERPOWERS_WORKTREES_ROOT" ]]; then
+    find_project_scoped_children "$SUPERPOWERS_WORKTREES_ROOT" 2 2 "$PERIODIC_WORKTREE_AGE_MIN" | while read -r d; do
+      rm -rf "$d" 2>/dev/null
+    done
   fi
 
-  # 3b) Direct MyDrive paths (cleanup external drive too — runner _work
-  # caches and worktree dirs accumulate there as well).
-  for d in /Volumes/MyDrive/superpowers/worktrees /Volumes/MyDrive/actions-runner-work; do
+  # 3b) Direct MyDrive paths. Scoped by project unless global cleanup is opted in.
+  for d in "$MYDRIVE_SUPERPOWERS_WORKTREES_ROOT" "$ACTIONS_RUNNER_WORK_ROOT"; do
     [[ -d "$d" ]] || continue
-    find "$d" -mindepth 2 -maxdepth 2 -type d -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" \
-      -exec rm -rf {} + 2>/dev/null
+    find_project_scoped_children "$d" 2 2 "$PERIODIC_WORKTREE_AGE_MIN" | while read -r scoped; do
+      rm -rf "$scoped" 2>/dev/null
+    done
   done
 
   # 4) Orphan sibling clones in ~/Desktop/projects/<repo>-*.
-  find "$HOME/Desktop/projects" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+  find "$PROJECTS_ROOT" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+    cleanup_path_in_project_scope "$d" || continue
     [[ -e "$d/.git" ]] || continue
     [[ -d "$d/.git" ]] && continue   # main checkout
     rm -rf "$d"
@@ -2167,7 +3113,7 @@ run_periodic_cleanup() {
     while read -r p; do
       [[ -z "$p" ]] && continue
       ppid=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-      [[ "$ppid" == "1" ]] && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
+      [[ "$ppid" == "1" ]] && cleanup_process_in_project_scope "$p" && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
     done < <(pgrep -f "$pat" 2>/dev/null)
   done
   # npm-exec / npm-cli orphans (parent gone). pgrep -f matches the long
@@ -2175,26 +3121,29 @@ run_periodic_cleanup() {
   while read -r p; do
     [[ -z "$p" ]] && continue
     ppid=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-    [[ "$ppid" == "1" ]] && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
+    [[ "$ppid" == "1" ]] && cleanup_process_in_project_scope "$p" && kill -TERM "$p" 2>/dev/null && kc=$((kc+1))
   done < <(pgrep -f "npm-cli.js\|npm exec" 2>/dev/null)
   (( kc > 0 )) && log "periodic cleanup: killed $kc orphan dev/test procs"
 
   # 6) HIBEAM/babbloo/weather-market scratch dirs in /private/tmp older
   #    than 1 day. These came from physics + research scratchpads and
   #    never get reclaimed otherwise.
-  find /private/tmp -maxdepth 1 -type d \
+  find "$TMP_SWEEP_ROOT" -maxdepth 1 -type d \
     \( -name 'HIBEAM_*' -o -name 'babbloo-*' -o -name 'wm-*' \) \
-    -mtime +1 -exec rm -rf {} + 2>/dev/null
+    -mtime +1 2>/dev/null | while read -r d; do
+      cleanup_path_in_project_scope "$d" || continue
+      rm -rf "$d" 2>/dev/null
+    done
 
   # 7) uv cache prune (Python tool). 6 GB+ accumulates from agent venvs.
   #    --ci keeps recently used wheels but drops stale ones. Cheap enough
   #    to run every cleanup tick.
-  command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 &
+  cleanup_global_enabled && command -v uv >/dev/null 2>&1 && uv cache prune --ci >/dev/null 2>&1 &
 
   # 8) APFS local snapshots. macOS keeps Time Machine local snapshots
   #    indefinitely when the destination is offline; they hold space
   #    that df shows as "used" but is reclaimable.
-  command -v tmutil >/dev/null 2>&1 && \
+  cleanup_global_enabled && command -v tmutil >/dev/null 2>&1 && \
     tmutil listlocalsnapshots / 2>/dev/null \
       | awk -F. '/com.apple.TimeMachine/{print $NF}' \
       | while read -r s; do
@@ -2204,13 +3153,13 @@ run_periodic_cleanup() {
 
   # 9) Truncate macOS DiagnosticMessages older than 7 days. They grow
   #    silently to hundreds of MB.
-  find /private/var/log/DiagnosticMessages -name '*.asl' -mtime +7 \
+  cleanup_global_enabled && find "$DIAGNOSTIC_MESSAGES_ROOT" -name '*.asl' -mtime +7 \
     -exec rm -f {} + 2>/dev/null
 
   # 10) Codex CLI log directory — capped at CODEX_LOG_MAX_GB. This is the
   #     single biggest disk eater for long-running supervisor sessions.
   #     Triggered ONLY when oversized; cheap when within bounds (one du call).
-  if (( CODEX_LOG_MAX_GB > 0 )) && [[ -d "$HOME/.codex/log" ]]; then
+  if cleanup_global_enabled && (( CODEX_LOG_MAX_GB > 0 )) && [[ -d "$HOME/.codex/log" ]]; then
     local log_kb log_gb
     log_kb=$(du -sk "$HOME/.codex/log" 2>/dev/null | awk '{print $1}')
     log_gb=$(( log_kb / 1024 / 1024 ))
@@ -2354,7 +3303,10 @@ cmd_restart() {
   populate_pane_idx_from_running
   local idx; idx=$(resolve_pane "$ref") || { err "no pane matches '$ref'"; return 1; }
   log "[pane ${PANE_IDX[$idx]} ${LANE_LABELS[$idx]:-?}] manual restart"
-  tmux respawn-pane -k -t "$(pane_target "$idx")" "$CODEX_CMD"
+  local target pane_cmd; target="$(pane_target "$idx")"
+  terminate_pane_process_tree "$target" "manual restart pane ${PANE_IDX[$idx]}"
+  pane_cmd=$(codex_command_for_pane "$idx") || return 1
+  tmux respawn-pane -k -t "$target" "$pane_cmd"
   ( wait_ready_and_send "$idx" "${PROMPTS[$idx]}" ) &
   echo "restarted pane ${PANE_IDX[$idx]}; prompt will be re-sent when ready"
 }

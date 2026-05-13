@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DASHBOARD="${CSUP_DASHBOARD:-$HOME/bin/csup-dashboard}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -32,6 +33,20 @@ old.mkdir(parents=True)
 # that session file, otherwise totals inflate on every refresh.
 (current / "rollout-a.jsonl").write_text("\n".join([
     json.dumps({
+        "timestamp": "2026-05-11T00:00:30.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call_a",
+        },
+    }),
+    json.dumps({
+        "timestamp": "2026-05-11T00:00:31.000Z",
+        "type": "response.function_call_arguments.delta",
+        "delta": "{\"cmd\"",
+    }),
+    json.dumps({
         "timestamp": "2026-05-11T00:00:00.000Z",
         "type": "event_msg",
         "payload": {
@@ -57,21 +72,41 @@ old.mkdir(parents=True)
             "rate_limits": {"primary": {"used_percent": 55}, "secondary": {"used_percent": 22}, "plan_type": "plus"},
         },
     }),
+    json.dumps({
+        "timestamp": "2026-05-11T00:01:30.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "browser_click",
+            "call_id": "call_b",
+        },
+    }),
 ]) + "\n")
 
-(current / "rollout-b.jsonl").write_text(json.dumps({
-    "timestamp": "2026-05-11T00:02:00.000Z",
-    "type": "event_msg",
-    "payload": {
-        "type": "token_count",
-        "info": {
-            "total_token_usage": {"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 7, "reasoning_output_tokens": 1, "total_tokens": 12},
-            "last_token_usage": {"total_tokens": 12},
-            "model_context_window": 128000,
+(current / "rollout-b.jsonl").write_text("\n".join([
+    json.dumps({
+        "timestamp": "2026-05-11T00:02:00.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 7, "reasoning_output_tokens": 1, "total_tokens": 12},
+                "last_token_usage": {"total_tokens": 12},
+                "model_context_window": 128000,
+            },
+            "rate_limits": {"primary": {"used_percent": 12}, "secondary": {"used_percent": 33}, "plan_type": "pro"},
         },
-        "rate_limits": {"primary": {"used_percent": 12}, "secondary": {"used_percent": 33}, "plan_type": "pro"},
-    },
-}) + "\n")
+    }),
+    json.dumps({
+        "timestamp": "2026-05-11T00:02:30.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call_c",
+        },
+    }),
+]) + "\n")
 (old / "no-token.jsonl").write_text('{"type":"event_msg","payload":{"type":"other"}}\n')
 
 mod.CODEX_SESSIONS_DIR = sessions
@@ -94,11 +129,31 @@ assert usage["latest_secondary_used_percent"] == 33, usage
 assert [e["total_tokens"] for e in usage["recent_token_events"]] == [2, 11, 12], usage["recent_token_events"]
 assert usage["recent_token_events"][-1]["timestamp"] == "2026-05-11T00:02:00.000Z", usage["recent_token_events"]
 
+assert hasattr(mod, "collect_tool_call_usage"), "dashboard should collect tool-call usage"
+tool_usage = mod.collect_tool_call_usage(now=time.time(), force=True)
+assert tool_usage["sessions_with_tool_calls"] == 2, tool_usage
+assert tool_usage["total_tool_calls"] == 3, tool_usage
+assert tool_usage["tool_counts"]["exec_command"] == 2, tool_usage
+assert tool_usage["tool_counts"]["browser_click"] == 1, tool_usage
+assert tool_usage["streaming_arg_delta_events"] == 1, tool_usage
+assert [e["tool"] for e in tool_usage["recent_tool_call_events"]] == ["exec_command", "browser_click", "exec_command"], tool_usage["recent_tool_call_events"]
+assert tool_usage["latest_tool"] == "exec_command", tool_usage
+assert tool_usage["latest_event_at"] == "2026-05-11T00:02:30.000Z", tool_usage
+
 html = mod.INDEX_HTML
 assert "renderOverviewDashboard" in html, "root page should render a dashboard overview"
 assert "Total tokens" in html, "overview should include total token usage"
+assert "Tool calls" in html, "overview should expose total tool calls"
 assert "Refresh latency" in html, "overview should expose dashboard refresh timing"
 assert "renderTokenGraphs" in html, "root page should render token usage graphs"
+assert "renderToolCallGraphs" in html, "root page should render tool-call graphs"
+assert "Tool calls over time" in html, "tool graph should show calls over time"
+assert "Tool mix" in html, "tool graph should show which tools are used most"
+assert "renderSystemDiagnostics" in html, "root page should render system diagnostics plots"
+assert "CPU load history" in html, "diagnostics should graph CPU load over time"
+assert "RAM usage history" in html, "diagnostics should graph RAM use over time"
+assert "Top CPU processes" in html, "diagnostics should identify CPU-heavy processes"
+assert "Top RAM processes" in html, "diagnostics should identify memory-heavy processes"
 assert "Recent token usage" in html, "token graph should show recent usage over time"
 assert "Input / output mix" in html, "token graph should show token composition"
 assert "renderChartGrid" in html, "plots should render grid lines"
@@ -114,16 +169,58 @@ assert "Window total" in html, "cumulative chart should show window total readin
 assert "Share of scanned" in html, "cumulative chart should compare cumulative window to scanned total"
 assert hasattr(mod, "collect_system_health"), "dashboard should collect local computer health"
 health = mod.collect_system_health()
-for key in ["cpu", "memory", "disk"]:
+for key in ["cpu", "memory", "disk", "storage"]:
     assert key in health, health
+assert health["storage"]["devices"], health
+assert "top_cpu_processes" in health, health
+assert "top_memory_processes" in health, health
+
+def fake_remote_disk(host, hosts, me, connection=None):
+    return {
+        "host": host,
+        "aliases": [host],
+        "role": "slurm" if hosts.get(host, {}).get("scheduler") == "slurm" else "ssh",
+        "path": "/remote/free",
+        "total_bytes": 1000,
+        "used_bytes": 300,
+        "free_bytes": 700,
+        "used_percent": 30,
+        "reachable": True,
+        "error": "",
+        "node": (connection or {}).get("node", ""),
+        "job_id": (connection or {}).get("job_id", ""),
+    }
+
+mod.collect_remote_disk_health = fake_remote_disk
+storage = mod.collect_storage_health(
+    {"laptop": {"ssh": "laptop"}, "lunarc": {"ssh": "lunarc", "scheduler": "slurm"}},
+    "mac-mini",
+    {
+        "laptop": {"reachable": True, "latency_ms": 3},
+        "lunarc": {"reachable": False, "error": "no allocation"},
+    },
+)
+assert any(d.get("host") == "laptop" and d.get("free_bytes") == 700 for d in storage["devices"]), storage
+assert not any(d.get("host") == "lunarc" for d in storage["devices"]), storage
+grouped = mod.collect_system_health(
+    {"laptop": {"ssh": "laptop"}, "lunarc": {"ssh": "lunarc", "scheduler": "slurm"}},
+    "mac-mini",
+    {"laptop": {"reachable": True, "latency_ms": 3}},
+)
+assert grouped["storage"]["remote_count"] >= 1, grouped
+
 assert "Computer health" in html, "dashboard should show computer health"
+assert "systemHealthCard" in html, "dashboard should group CPU/RAM/disk into one card"
 assert "CPU load" in html, "dashboard should show CPU usage/load"
 assert "RAM used" in html, "dashboard should show RAM usage"
 assert "Disk free" in html, "dashboard should show disk headroom"
+assert "Storage headroom" in html, "dashboard should show local plus connected-device storage"
+assert "storageHeadroomCard" in html, "dashboard should render grouped storage headroom"
+assert "storage-device-row" in html, "storage card should list each connected device in one grouped panel"
 assert "Recent activities" in html, "home page should show recent pane/project activities"
 assert "renderRecentActivities" in html, "dashboard should render activity feed"
 assert "activity-row" in html, "activity feed should have rows"
 assert "activity-project" in html, "activity feed should label source project"
 assert "last meaningful pane output" in html, "activity feed should explain its source"
-print("ok: dashboard exposes first-page metrics, token usage, cumulative usage, computer health, activities, gridded plots, and readings")
+print("ok: dashboard exposes first-page metrics, tool-call graphs, token usage, CPU/RAM diagnostics, activities, gridded plots, and readings")
 PY

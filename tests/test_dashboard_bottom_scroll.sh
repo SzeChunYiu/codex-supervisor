@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DASHBOARD="${CSUP_DASHBOARD:-$HOME/bin/csup-dashboard}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery

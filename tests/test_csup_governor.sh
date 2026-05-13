@@ -40,6 +40,10 @@ cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/worker-a.txt" <<'TASKS'
 /goal worker task one
 /goal worker task two
 TASKS
+cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/open.txt" <<'TASKS'
+/goal open task one
+/goal open task two
+TASKS
 : > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"
 
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
@@ -60,6 +64,8 @@ cat > "$TMPDIR/supervisor" <<'SUPERVISOR'
   echo "prompts=$CODEX_SUPERVISOR_PROMPTS"
   echo "tasks=$CODEX_SUPERVISOR_TASKS_DIR"
   echo "lanes=$CODEX_SUPERVISOR_LANES"
+  echo "dynamic_workers=$CODEX_SUPERVISOR_DYNAMIC_WORKERS"
+  echo "generated_only=$CODEX_SUPERVISOR_GENERATED_ONLY"
   echo "max_panes=$CODEX_SUPERVISOR_MAX_PANES"
   echo "args=$*"
 } > "$CSUP_CAPTURE_FILE"
@@ -79,7 +85,7 @@ dry_run="$(
   "$CSUP" govern --dry-run
 )"
 
-if [[ "$dry_run" != *"START proj-a/mac-mini session=proj-a-main lanes=worker-a,bugs panes=3 queued=3"* ]]; then
+if [[ "$dry_run" != *"START proj-a/mac-mini session=proj-a-main lanes=worker-a,bugs dynamic_workers=2 panes=6 queued=5"* ]]; then
   printf 'govern dry-run should propose queued lanes in priority order, got:\n%s\n' "$dry_run" >&2
   exit 1
 fi
@@ -97,7 +103,9 @@ PATH="$TMPDIR/bin:$PATH" \
 
 grep -q '^session=proj-a-main$' "$TMPDIR/capture.txt"
 grep -q '^lanes=worker-a,bugs$' "$TMPDIR/capture.txt"
-grep -q '^max_panes=3$' "$TMPDIR/capture.txt"
+grep -q '^dynamic_workers=2$' "$TMPDIR/capture.txt"
+grep -q '^generated_only=0$' "$TMPDIR/capture.txt"
+grep -q '^max_panes=6$' "$TMPDIR/capture.txt"
 grep -q '^args=start --no-attach$' "$TMPDIR/capture.txt"
 
 HOME="$TMPDIR/home" \

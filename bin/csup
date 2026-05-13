@@ -8,6 +8,8 @@
 #   csup start <project> [--host=<name>] [--fallback]
 #   csup submit <project> <lane> <goal text...>
 #   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+#   csup factory-audit [--project=<name>|<project>]
+#   csup station <project> --sessions=N --workers=N [--host=<name>] [--dry-run|--apply]
 #   csup stop  <project> [--host=<name>]
 #   csup status [<project>]
 #   csup ls
@@ -40,9 +42,118 @@ err() { printf 'csup: error: %s\n' "$*" >&2; }
 warn() { printf 'csup: warn: %s\n' "$*" >&2; }
 info() { printf 'csup: %s\n' "$*"; }
 
+ssh_timeout_secs() {
+  printf '%s' "${CSUP_SSH_TIMEOUT_SECS:-8}"
+}
+
+shell_run_timeout() {
+  local timeout="$1" cmd="$2"
+  python3 - "$timeout" "$cmd" <<'PY'
+import os, signal, subprocess, sys
+timeout = float(sys.argv[1])
+cmd = sys.argv[2]
+try:
+    p = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            p.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+except Exception:
+    sys.exit(124)
+sys.exit(p.returncode)
+PY
+}
+
+shell_capture_timeout() {
+  local timeout="$1" cmd="$2"
+  python3 - "$timeout" "$cmd" <<'PY'
+import os, signal, subprocess, sys
+timeout = float(sys.argv[1])
+cmd = sys.argv[2]
+try:
+    p = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, _ = p.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, _ = p.communicate()
+        sys.exit(124)
+except Exception:
+    sys.exit(124)
+sys.stdout.write(stdout)
+sys.exit(p.returncode)
+PY
+}
+
 join_csv() {
   local IFS=,
   printf '%s' "$*"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+ssh_command_target() {
+  local target="$1"
+  case "$target" in
+    lunarc*) printf 'lunarc' ;;
+    *) printf '%s' "$target" ;;
+  esac
+}
+
+ssh_cmd_prefix() {
+  local target="$1" actual
+  actual=$(ssh_command_target "$target")
+  printf 'ssh -o ConnectTimeout=3 -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=1 -o ControlMaster=auto -o ControlPath=%s %s' \
+    "$(shell_quote "$HOME/.ssh/sockets/%r@%h-%p")" \
+    "$(shell_quote "$actual")"
+}
+
+ssh_exec() {
+  local target="$1" remote_cmd="$2"
+  eval "$(ssh_cmd_prefix "$target") $(shell_quote "$remote_cmd")"
+}
+
+ssh_capture_timeout() {
+  local target="$1" remote_cmd="$2"
+  shell_capture_timeout "$(ssh_timeout_secs)" "$(ssh_cmd_prefix "$target") $(shell_quote "$remote_cmd")"
 }
 
 # ---------------------------------------------------------------------------
@@ -105,11 +216,20 @@ PY
 # Project discovery
 # ---------------------------------------------------------------------------
 project_candidates() {
-  local d
+  local d extra_roots
   for d in \
     "$HOME/Desktop/projects"/* \
-    "/home/billy/Desktop/projects"/* \
-    "/Volumes/MyDrive/nnbar/nnbar/simulation"; do
+    "/home/billy/Desktop/projects"/*; do
+    [[ -d "$d" && -f "$d/.codex-supervisor.toml" ]] || continue
+    ( cd "$d" && pwd )
+  done
+
+  extra_roots="${CSUP_EXTRA_PROJECT_ROOTS:-}"
+  if [[ -z "$extra_roots" && "$HOME" == "/Users/billy" ]]; then
+    extra_roots="/Volumes/MyDrive/nnbar/nnbar/simulation"
+  fi
+  local IFS=:
+  for d in $extra_roots; do
     [[ -d "$d" && -f "$d/.codex-supervisor.toml" ]] || continue
     ( cd "$d" && pwd )
   done
@@ -151,6 +271,220 @@ list_projects() {
 # ---------------------------------------------------------------------------
 # Host discovery & reachability
 # ---------------------------------------------------------------------------
+host_field() {
+  toml_get "$HOSTS_FILE" "hosts.$1" "$2"
+}
+
+host_scheduler() {
+  host_field "$1" "scheduler"
+}
+
+host_ssh_target() {
+  host_field "$1" "ssh"
+}
+
+host_remote_env() {
+  local env_cmd; env_cmd=$(host_field "$1" "remote_env")
+  if [[ -z "$env_cmd" && "$(host_scheduler "$1")" == "slurm" ]]; then
+    env_cmd="source /projects/hep/fs10/shared/codex-tooling/env-shared.sh"
+  fi
+  printf '%s' "$env_cmd"
+}
+
+host_supervisor() {
+  local supervisor; supervisor=$(host_field "$1" "supervisor")
+  if [[ -z "$supervisor" && "$(host_scheduler "$1")" == "slurm" ]]; then
+    supervisor="/projects/hep/fs10/shared/codex-tooling/supervisor/codex-supervisor.sh"
+  fi
+  [[ -z "$supervisor" ]] && supervisor="~/codex-supervisor.sh"
+  printf '%s' "$supervisor"
+}
+
+ssh_login_reachable() {
+  local host="$1" ssh_target probe
+  ssh_target=$(host_ssh_target "$host")
+  [[ "$ssh_target" == "local" ]] && return 1
+  probe=$(host_field "$host" "reachable")
+  if [[ -z "$probe" ]]; then
+    probe="$(ssh_cmd_prefix "$ssh_target") true"
+  elif [[ "$ssh_target" == lunarc* ]]; then
+    # LUNARC aliases must use the pre-authenticated canonical master socket.
+    # Host configs may contain older reachability probes without ControlPath;
+    # ignoring them here prevents false "login_unreachable" failures.
+    probe="$(ssh_cmd_prefix "$ssh_target") true"
+  fi
+  shell_run_timeout "$(ssh_timeout_secs)" "$probe"
+}
+
+slurm_job_name() {
+  local name; name=$(host_field "$1" "slurm_job_name")
+  [[ -z "$name" ]] && name="csup-$1"
+  printf '%s' "$name"
+}
+
+slurm_job_name_for_slot() {
+  local host="$1" slot="${2:-1}" base
+  base=$(slurm_job_name "$host")
+  if [[ "$slot" == "1" ]]; then
+    printf '%s' "$base"
+  else
+    printf '%s-%s' "$base" "$slot"
+  fi
+}
+
+slurm_active_job_id() {
+  local info
+  info=$(slurm_active_job_info "$1" || true)
+  [[ -n "$info" ]] || return 1
+  printf '%s\n' "${info%%|*}"
+}
+
+slurm_active_job_node() {
+  local info node
+  info=$(slurm_active_job_info "$1" || true)
+  [[ -n "$info" && "$info" == *"|"* ]] || return 1
+  node="${info#*|}"
+  [[ -n "$node" && "$node" != "$info" ]] || return 1
+  printf '%s\n' "$node"
+}
+
+slurm_active_job_info() {
+  local host="$1" name
+  name=$(slurm_job_name "$host")
+  slurm_active_job_info_named "$host" "$name"
+}
+
+slurm_active_job_info_named() {
+  local host="$1" name="$2" ssh_target
+  ssh_target=$(host_ssh_target "$host")
+  [[ -n "$ssh_target" && "$ssh_target" != "local" ]] || return 1
+  shell_capture_timeout "$(ssh_timeout_secs)" "$(ssh_cmd_prefix "$ssh_target") \"squeue -h -u \\\$(whoami) -n $(shell_quote "$name") -t RUNNING -o '%i|%N' 2>/dev/null | head -1\"" 2>/dev/null
+}
+
+slurm_submit_holder() {
+  local host="$1" name
+  name=$(slurm_job_name "$host")
+  slurm_submit_holder_named "$host" "$name"
+}
+
+slurm_submit_holder_named() {
+  local host="$1" name="$2" ssh_target partition account time nodes cpus mem workdir output wrap
+  ssh_target=$(host_ssh_target "$host")
+  partition=$(host_field "$host" "slurm_partition"); [[ -z "$partition" ]] && partition="hep"
+  account=$(host_field "$host" "slurm_account"); [[ -z "$account" ]] && account="hep2023-1-3"
+  time=$(host_field "$host" "slurm_time"); [[ -z "$time" ]] && time="5-00:00:00"
+  nodes=$(host_field "$host" "slurm_nodes"); [[ -z "$nodes" ]] && nodes="1"
+  cpus=$(host_field "$host" "slurm_cpus"); [[ -z "$cpus" ]] && cpus="40"
+  mem=$(host_field "$host" "slurm_mem"); [[ -z "$mem" ]] && mem="200G"
+  workdir=$(host_field "$host" "slurm_workdir"); [[ -z "$workdir" ]] && workdir="/projects/hep/fs10/shared/nnbar/billy/csup-allocations/$name"
+  output=$(host_field "$host" "slurm_output"); [[ -z "$output" ]] && output="$workdir/holder.%j.log"
+  wrap='echo "===NODE: $(hostname)==="; echo "===START: $(date)==="; echo "===CPUS: $SLURM_CPUS_ON_NODE==="; echo "===MEM_MB: $SLURM_MEM_PER_NODE==="; echo "===JOBID: $SLURM_JOB_ID==="; sleep 432000'
+  ssh_exec "$ssh_target" "mkdir -p $(shell_quote "$workdir") && sbatch --parsable --job-name=$(shell_quote "$name") --partition=$(shell_quote "$partition") --time=$(shell_quote "$time") --nodes=$(shell_quote "$nodes") --ntasks=1 --cpus-per-task=$(shell_quote "$cpus") --mem=$(shell_quote "$mem") --account=$(shell_quote "$account") --output=$(shell_quote "$output") --wrap=$(shell_quote "$wrap")"
+}
+
+slurm_ensure_allocation() {
+  local host="$1" job wait_secs waited auto
+  job=$(slurm_active_job_id "$host" || true)
+  if [[ -n "$job" ]]; then
+    printf '%s\n' "$job"
+    return 0
+  fi
+  auto=$(host_field "$host" "slurm_auto_allocate")
+  case "$auto" in 0|false|FALSE|no|NO|off|OFF)
+    err "host '$host' has no running allocation for job $(slurm_job_name "$host")"
+    return 1
+  esac
+  { info "no active SLURM allocation for '$host'; submitting holder job $(slurm_job_name "$host")"; } >&2
+  slurm_submit_holder "$host" >/dev/null || return 1
+  wait_secs="${CSUP_SLURM_WAIT_SECS:-120}"
+  waited=0
+  while (( waited < wait_secs )); do
+    sleep 5
+    waited=$((waited + 5))
+    job=$(slurm_active_job_id "$host" || true)
+    if [[ -n "$job" ]]; then
+      printf '%s\n' "$job"
+      return 0
+    fi
+  done
+  err "submitted allocation for '$host' but it is not RUNNING after ${wait_secs}s"
+  return 1
+}
+
+remote_run_existing() {
+  local host="$1" payload="$2" ssh_target env_cmd scheduler job
+  ssh_target=$(host_ssh_target "$host")
+  env_cmd=$(host_remote_env "$host")
+  scheduler=$(host_scheduler "$host")
+  [[ -n "$ssh_target" && "$ssh_target" != "local" ]] || return 1
+  if [[ "$scheduler" == "slurm" ]]; then
+    job=$(slurm_active_job_id "$host" || true)
+    [[ -n "$job" ]] || { err "host '$host' has no running SLURM allocation for job $(slurm_job_name "$host")"; return 1; }
+    ssh_exec "$ssh_target" "srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$env_cmd; $payload")"
+  else
+    ssh_exec "$ssh_target" "$payload"
+  fi
+}
+
+remote_run_start() {
+  local host="$1" payload="$2" ssh_target env_cmd scheduler job
+  ssh_target=$(host_ssh_target "$host")
+  env_cmd=$(host_remote_env "$host")
+  scheduler=$(host_scheduler "$host")
+  [[ -n "$ssh_target" && "$ssh_target" != "local" ]] || return 1
+  if [[ "$scheduler" == "slurm" ]]; then
+    job=$(slurm_ensure_allocation "$host") || return 1
+    ssh_exec "$ssh_target" "srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$env_cmd; $payload")"
+  else
+    ssh_exec "$ssh_target" "$payload"
+  fi
+}
+
+remote_slurm_keepalive_start() {
+  local host="$1" session="$2" payload="$3" ssh_target env_cmd job workdir log inner launch
+  ssh_target=$(host_ssh_target "$host")
+  env_cmd=$(host_remote_env "$host")
+  job=$(slurm_ensure_allocation "$host") || return 1
+  workdir=$(host_field "$host" "slurm_workdir")
+  [[ -z "$workdir" ]] && workdir="/projects/hep/fs10/shared/nnbar/billy/csup-allocations/$(slurm_job_name "$host")"
+  log="$workdir/csup-${session}.log"
+  # SLURM kills child processes from a short-lived srun step when that step
+  # exits. Keep the step alive for as long as the tmux session exists so the
+  # supervisor's tmux server and worker panes survive after `csup start`
+  # returns to the local operator.
+  inner="$env_cmd; export CODEX_SUPERVISOR_MAX_LOAD_PER_CPU=\${CODEX_SUPERVISOR_MAX_LOAD_PER_CPU:-0}; $payload; while tmux has-session -t $(shell_quote "$session") 2>/dev/null; do sleep 30; done"
+  launch="nohup srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$inner") > $(shell_quote "$log") 2>&1 < /dev/null & disown; echo started slurm_job=$job session=$(shell_quote "$session") log=$(shell_quote "$log")"
+  ssh_exec "$ssh_target" "mkdir -p $(shell_quote "$workdir") && bash -lc $(shell_quote "$launch")"
+}
+
+remote_slurm_keepalive_start_job() {
+  local host="$1" job="$2" session="$3" payload="$4" ssh_target env_cmd workdir log inner launch
+  ssh_target=$(host_ssh_target "$host")
+  env_cmd=$(host_remote_env "$host")
+  workdir=$(host_field "$host" "slurm_workdir")
+  [[ -z "$workdir" ]] && workdir="/projects/hep/fs10/shared/nnbar/billy/csup-allocations/$(slurm_job_name "$host")"
+  log="$workdir/csup-${session}.log"
+  inner="$env_cmd; export CODEX_SUPERVISOR_MAX_LOAD_PER_CPU=\${CODEX_SUPERVISOR_MAX_LOAD_PER_CPU:-0}; $payload; while tmux has-session -t $(shell_quote "$session") 2>/dev/null; do sleep 30; done"
+  launch="nohup srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$inner") > $(shell_quote "$log") 2>&1 < /dev/null & disown; echo started slurm_job=$job session=$(shell_quote "$session") log=$(shell_quote "$log")"
+  ssh_exec "$ssh_target" "mkdir -p $(shell_quote "$workdir") && bash -lc $(shell_quote "$launch")"
+}
+
+project_dir_for_host() {
+  local cfg="$1" host="$2" local_dir="$3" remote_dir
+  remote_dir=$(toml_get "$cfg" "hosts.$host" "project_dir")
+  [[ -z "$remote_dir" ]] && remote_dir="$local_dir"
+  printf '%s' "$remote_dir"
+}
+
+path_under_project_if_relative() {
+  local project_dir="$1" path="$2"
+  [[ -n "$path" ]] || return 0
+  case "$path" in
+    /*|~|~/*) printf '%s' "$path" ;;
+    *) printf '%s/%s' "$project_dir" "$path" ;;
+  esac
+}
+
 this_host() {
   local h me; me=$(uname -n)
   while read -r h; do
@@ -167,29 +501,44 @@ host_reachable() {
   local host="$1"
   # If we ARE this host, we're trivially reachable.
   [[ "$(this_host)" == "$host" ]] && return 0
-  local probe; probe=$(toml_get "$HOSTS_FILE" "hosts.$host" "reachable")
-  local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$host" "ssh")
+  local ssh_target; ssh_target=$(host_ssh_target "$host")
   if [[ "$ssh_target" == "local" ]]; then
     # ssh="local" but we're not on this host -> can't reach it
     return 1
   fi
-  if [[ -z "$probe" ]]; then
-    probe="ssh -o ConnectTimeout=3 -o BatchMode=yes $ssh_target true"
+  if [[ "$(host_scheduler "$host")" == "slurm" ]]; then
+    ssh_login_reachable "$host" && [[ -n "$(slurm_active_job_id "$host" || true)" ]]
+    return
   fi
-  eval "$probe" 2>/dev/null
+  ssh_login_reachable "$host"
 }
 
 list_hosts() {
   local me; me=$(this_host)
-  printf '  %-12s  %-30s  %-9s  %s\n' HOST SSH STATUS NOTES
+  printf '  %-12s  %-30s  %-28s  %s\n' HOST SSH STATUS NOTES
   while read -r h; do
     [[ -z "$h" ]] && continue
-    local s; s=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
-    local d; d=$(toml_get "$HOSTS_FILE" "hosts.$h" "description")
+    local s; s=$(host_ssh_target "$h")
+    local d; d=$(host_field "$h" "description")
     local status
-    if host_reachable "$h"; then status=up; else status=down; fi
+    if [[ "$(host_scheduler "$h")" == "slurm" && "$h" != "$me" ]]; then
+      if ssh_login_reachable "$h"; then
+        local info job node; info=$(slurm_active_job_info "$h" || true)
+        job="${info%%|*}"
+        node=""
+        [[ "$info" == *"|"* ]] && node="${info#*|}"
+        if [[ -n "$job" ]]; then
+          status="up job=$job"
+          [[ -n "$node" && "$node" != "$info" ]] && status="$status node=$node"
+        else
+          status="login-up/noalloc"
+        fi
+      else
+        status=down
+      fi
+    elif host_reachable "$h"; then status=up; else status=down; fi
     [[ "$h" == "$me" ]] && status="$status (this)"
-    printf '  %-12s  %-30s  %-9s  %s\n' "$h" "$s" "$status" "$d"
+    printf '  %-12s  %-30s  %-28s  %s\n' "$h" "$s" "$status" "$d"
   done < <(toml_sections "$HOSTS_FILE" "hosts.")
 }
 
@@ -262,6 +611,47 @@ PY
   echo "$room"
 }
 
+positive_int_or_default() {
+  local value="$1" default="$2"
+  if [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$default"
+  fi
+}
+
+slurm_slot_capacity_panes() {
+  local host="$1" max cpus
+  max=$(host_field "$host" "slurm_max_panes")
+  if [[ "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]]; then
+    printf '%s' "$max"
+    return
+  fi
+  cpus=$(host_field "$host" "slurm_cpus")
+  cpus=$(positive_int_or_default "$cpus" 8)
+  # Keep one CPU's worth of headroom and cap by the historical stable
+  # supervisor density unless host config explicitly overrides it.
+  (( cpus > 1 )) && cpus=$((cpus - 1))
+  (( cpus > 24 )) && cpus=24
+  (( cpus < 1 )) && cpus=1
+  printf '%s' "$cpus"
+}
+
+slurm_slots_for_host() {
+  local host="$1" slots
+  slots=$(host_field "$host" "slurm_slots")
+  positive_int_or_default "$slots" 1
+}
+
+slurm_remote_pane_count() {
+  local host="$1" job="$2" ssh_target env_cmd count
+  ssh_target=$(host_ssh_target "$host")
+  env_cmd=$(host_remote_env "$host")
+  count=$(ssh_capture_timeout "$ssh_target" "srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$env_cmd; tmux list-panes -a 2>/dev/null | wc -l | tr -d ' '")" 2>/dev/null || true)
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  printf '%s' "$count"
+}
+
 session_running_local() {
   tmux has-session -t "$1" 2>/dev/null
 }
@@ -273,29 +663,174 @@ queue_lanes_for_tasks_dir() {
   for f in "$tasks_dir"/*.txt; do
     [[ -e "$f" ]] || continue
     lane="${f##*/}"; lane="${lane%.txt}"
+    is_dynamic_queue_lane "$lane" && continue
     count=$(grep -cE '^/goal' "$f" 2>/dev/null || true)
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     (( count > 0 )) && printf '%06d %s\n' "$count" "$lane"
   done | sort -rn
 }
 
+is_dynamic_queue_lane() {
+  local lane="$1" token
+  for token in ${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}; do
+    [[ "$lane" == "$token" ]] && return 0
+  done
+  return 1
+}
+
+dynamic_queue_goal_count() {
+  local tasks_dir="$1" token file count total=0
+  [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || { echo 0; return; }
+  for token in ${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}; do
+    file="$tasks_dir/$token.txt"
+    [[ -f "$file" ]] || continue
+    count=$(grep -cE '^/goal' "$file" 2>/dev/null || true)
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    total=$((total + count))
+  done
+  echo "$total"
+}
+
+goal_count_file() {
+  local file="$1" count
+  [[ -f "$file" ]] || { echo 0; return; }
+  count=$(grep -cE '^/goal' "$file" 2>/dev/null || true)
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  echo "$count"
+}
+
+factory_blocker_goal_count() {
+  local tasks_dir="$1" total=0 count
+  [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || { echo 0; return; }
+  for f in "$tasks_dir/blockers.txt" "$tasks_dir/blocker.txt"; do
+    count=$(goal_count_file "$f")
+    total=$((total + count))
+  done
+  echo "$total"
+}
+
+factory_open_goal_count() {
+  local tasks_dir="$1" total=0 token count
+  [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || { echo 0; return; }
+  for token in open worker workers dynamic; do
+    count=$(goal_count_file "$tasks_dir/$token.txt")
+    total=$((total + count))
+  done
+  echo "$total"
+}
+
+factory_lane_goal_count() {
+  local tasks_dir="$1" total=0 f lane count
+  [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || { echo 0; return; }
+  for f in "$tasks_dir"/*.txt; do
+    [[ -e "$f" ]] || continue
+    lane="${f##*/}"; lane="${lane%.txt}"
+    is_dynamic_queue_lane "$lane" && continue
+    count=$(goal_count_file "$f")
+    total=$((total + count))
+  done
+  echo "$total"
+}
+
+factory_prompt_goal_count() {
+  local file="$1" count
+  [[ -n "$file" && -f "$file" ]] || { echo 0; return; }
+  count=$(grep -cE '^/goal([[:space:]]|$)' "$file" 2>/dev/null || true)
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  echo "$count"
+}
+
+factory_docs_status() {
+  local project_dir="$1" missing="" shared ai team blocker_schema
+  shared="$project_dir/docs/parallel-sessions.md"
+  ai="$project_dir/docs/parallel-sessions/AI_FACTORY.md"
+  team="$project_dir/docs/parallel-sessions/TEAM_PLAN.md"
+  blocker_schema="$project_dir/docs/blocker-schema.md"
+  if [[ ! -f "$shared" ]]; then
+    missing="${missing:+$missing,}shared"
+  elif ! grep -qE 'AI factory override|AI_FACTORY\.md' "$shared" 2>/dev/null; then
+    missing="${missing:+$missing,}shared_override"
+  fi
+  [[ -f "$ai" ]] || missing="${missing:+$missing,}ai_factory"
+  if [[ ! -f "$team" ]]; then
+    missing="${missing:+$missing,}team_plan"
+  elif ! grep -qE 'AI Factory acceptance board|Batch outcome|Acceptance checklist' "$team" 2>/dev/null; then
+    missing="${missing:+$missing,}team_plan_board"
+  fi
+  if [[ ! -f "$blocker_schema" ]]; then
+    missing="${missing:+$missing,}blocker_schema"
+  elif ! grep -qE 'type=code\|data\|approval\|infra\|empirical\|external' "$blocker_schema" 2>/dev/null; then
+    missing="${missing:+$missing,}blocker_schema_types"
+  fi
+  if [[ -n "$missing" ]]; then
+    printf 'missing:%s' "$missing"
+  else
+    printf 'ok'
+  fi
+}
+
+factory_audit_project_host() {
+  local project="$1" project_dir="$2" cfg="$3" host="$4"
+  local h_project_dir prompts tasks_dir prompts_abs tasks_abs docs blockers open lane prompts_count status action docs_missing
+  h_project_dir=$(project_dir_for_host "$cfg" "$host" "$project_dir")
+  # If a remote project_dir is configured and not locally visible, audit the
+  # canonical local checkout. Running this command on the remote host audits the
+  # remote tree directly.
+  [[ -d "$h_project_dir" ]] || h_project_dir="$project_dir"
+  prompts=$(toml_get "$cfg" "hosts.$host" "prompts")
+  tasks_dir=$(toml_get "$cfg" "hosts.$host" "tasks_dir")
+  prompts_abs=$(path_under_project_if_relative "$h_project_dir" "$prompts")
+  tasks_abs=$(path_under_project_if_relative "$h_project_dir" "$tasks_dir")
+
+  docs=$(factory_docs_status "$h_project_dir")
+  blockers=$(factory_blocker_goal_count "$tasks_abs")
+  open=$(factory_open_goal_count "$tasks_abs")
+  lane=$(factory_lane_goal_count "$tasks_abs")
+  prompts_count=$(factory_prompt_goal_count "$prompts_abs")
+
+  status="GREEN"
+  [[ "$docs" != "ok" || "$blockers" -gt 0 ]] && status="RED"
+  [[ "$status" == "GREEN" && $((open + lane)) -gt 0 ]] && status="YELLOW"
+
+  printf 'FACTORY %s/%s status=%s blockers=%s open=%s lane=%s prompts=%s docs=%s tasks=%s\n' \
+    "$project" "$host" "$status" "$blockers" "$open" "$lane" "$prompts_count" "$docs" "${tasks_abs:-none}"
+
+  if (( blockers > 0 )); then
+    printf 'ACTION %s/%s: resolve shared blockers before lane-local work\n' "$project" "$host"
+  elif [[ "$docs" != "ok" ]]; then
+    docs_missing="${docs#missing:}"
+    printf 'ACTION %s/%s: install/fix factory docs (%s)\n' "$project" "$host" "$docs_missing"
+  elif (( open + lane > 0 )); then
+    printf 'ACTION %s/%s: work queued acceptance gaps; keep blocker queue empty or explicit\n' "$project" "$host"
+  else
+    printf 'ACTION %s/%s: no queued work; validator should confirm batch accepted or add next acceptance gap\n' "$project" "$host"
+  fi
+}
+
 run_local_start() {
-  local project_dir="$1" session="$2" prompts="$3" tasks_dir="$4" lanes="${5:-}" max_panes="${6:-}"
+  local project_dir="$1" session="$2" prompts="$3" tasks_dir="$4" lanes="${5:-}" max_panes="${6:-}" dynamic_workers="${7:-0}" generated_only="${8:-0}"
+  local prompts_abs tasks_abs
+  prompts_abs=$(path_under_project_if_relative "$project_dir" "$prompts")
+  tasks_abs=$(path_under_project_if_relative "$project_dir" "$tasks_dir")
   if [[ -n "$tasks_dir" ]]; then
     ( cd "$project_dir" && \
       CODEX_SUPERVISOR_ROOT="$RUNTIME_ROOT" \
       CODEX_SUPERVISOR_SESSION="$session" \
-      CODEX_SUPERVISOR_PROMPTS="$project_dir/$prompts" \
-      CODEX_SUPERVISOR_TASKS_DIR="$project_dir/$tasks_dir" \
+      CODEX_SUPERVISOR_PROMPTS="$prompts_abs" \
+      CODEX_SUPERVISOR_TASKS_DIR="$tasks_abs" \
       CODEX_SUPERVISOR_LANES="$lanes" \
+      CODEX_SUPERVISOR_DYNAMIC_WORKERS="$dynamic_workers" \
+      CODEX_SUPERVISOR_GENERATED_ONLY="$generated_only" \
       CODEX_SUPERVISOR_MAX_PANES="$max_panes" \
       "$SUPERVISOR" start --no-attach ) | tail -5
   else
     ( cd "$project_dir" && \
       CODEX_SUPERVISOR_ROOT="$RUNTIME_ROOT" \
       CODEX_SUPERVISOR_SESSION="$session" \
-      CODEX_SUPERVISOR_PROMPTS="$project_dir/$prompts" \
+      CODEX_SUPERVISOR_PROMPTS="$prompts_abs" \
       CODEX_SUPERVISOR_LANES="$lanes" \
+      CODEX_SUPERVISOR_DYNAMIC_WORKERS="$dynamic_workers" \
+      CODEX_SUPERVISOR_GENERATED_ONLY="$generated_only" \
       CODEX_SUPERVISOR_MAX_PANES="$max_panes" \
       "$SUPERVISOR" start --no-attach ) | tail -5
   fi
@@ -337,6 +872,8 @@ cmd_start() {
     local prompts; prompts=$(toml_get "$cfg" "hosts.$h" "prompts")
     local tasks_dir; tasks_dir=$(toml_get "$cfg" "hosts.$h" "tasks_dir")
     local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+    local remote_dir; remote_dir=$(project_dir_for_host "$cfg" "$h" "$project_dir")
+    local supervisor; supervisor=$(host_supervisor "$h")
     [[ -z "$session" ]] && session="${project}-${h}"
     if [[ -z "$prompts" ]]; then
       warn "host '$h' missing prompts in $cfg — skipping"
@@ -347,19 +884,18 @@ cmd_start() {
       info "starting '$session' locally on $h"
       run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "" ""
     else
-      if host_reachable "$h"; then
-        local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
-        local task_env=""
-        [[ -n "$tasks_dir" ]] && task_env="CODEX_SUPERVISOR_TASKS_DIR='$project_dir/$tasks_dir'"
+      if [[ "$(host_scheduler "$h")" == "slurm" ]] || host_reachable "$h"; then
+        local ssh_target; ssh_target=$(host_ssh_target "$h")
+        local task_env="" lane_env="" max_env="" prompts_abs tasks_abs
+        prompts_abs=$(path_under_project_if_relative "$remote_dir" "$prompts")
+        tasks_abs=$(path_under_project_if_relative "$remote_dir" "$tasks_dir")
+        [[ -n "$tasks_dir" ]] && task_env=" CODEX_SUPERVISOR_TASKS_DIR=$(shell_quote "$tasks_abs")"
         info "starting '$session' on $h via $ssh_target"
-        ssh "$ssh_target" "
-          export PATH=\$HOME/.local/bin:\$HOME/.nvm/versions/node/v24.12.0/bin:\$PATH
-          cd '$project_dir' || exit 1
-          CODEX_SUPERVISOR_SESSION='$session' \
-          CODEX_SUPERVISOR_PROMPTS='$project_dir/$prompts' \
-          $task_env \
-          ~/codex-supervisor.sh start --no-attach
-        " 2>&1 | tail -5
+        if [[ "$(host_scheduler "$h")" == "slurm" ]]; then
+          remote_slurm_keepalive_start "$h" "$session" "cd $(shell_quote "$remote_dir") || exit 1; CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") CODEX_SUPERVISOR_PROMPTS=$(shell_quote "$prompts_abs")$task_env$lane_env$max_env $(shell_quote "$supervisor") start --no-attach" 2>&1 | tail -5
+        else
+          remote_run_start "$h" "cd $(shell_quote "$remote_dir") || exit 1; CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") CODEX_SUPERVISOR_PROMPTS=$(shell_quote "$prompts_abs")$task_env$lane_env$max_env $(shell_quote "$supervisor") start --no-attach" 2>&1 | tail -5
+        fi
       else
         warn "host '$h' unreachable"
         if (( fallback )); then
@@ -447,7 +983,7 @@ cmd_govern() {
     done < <(list_projects)
   fi
 
-  local p project_dir cfg h prompts tasks_dir session queue_abs qline count lane selected_lanes=() queued_total lane_budget lanes_csv max_panes
+  local p project_dir cfg h prompts tasks_dir session queue_abs qline count lane selected_lanes=() queued_total lane_budget lanes_csv max_panes fixed_panes dynamic_total dynamic_workers generated_only
   for p in "${projects[@]}"; do
     project_dir=$(find_project_config "$p") || continue
     [[ -n "$project_dir" ]] || continue
@@ -471,10 +1007,14 @@ cmd_govern() {
         continue
       fi
       queue_abs="$project_dir/$tasks_dir"
+      queue_abs=$(path_under_project_if_relative "$project_dir" "$tasks_dir")
       selected_lanes=()
       queued_total=0
-      lane_budget=$(( remaining - 1 )) # reserve one generated PLANNER pane.
-      (( lane_budget < 1 )) && { printf 'SKIP %s/%s session=%s: capacity reserved for planner only\n' "$p" "$h" "$session"; continue; }
+      dynamic_total=$(dynamic_queue_goal_count "$queue_abs")
+      queued_total="$dynamic_total"
+      fixed_panes="${CSUP_GOVERNOR_FIXED_PANES:-2}" # generated DEBUG + VALIDATOR.
+      lane_budget=$(( remaining - fixed_panes ))
+      (( lane_budget < 1 )) && { printf 'SKIP %s/%s session=%s: capacity reserved for fixed roles only\n' "$p" "$h" "$session"; continue; }
       while read -r qline; do
         [[ -n "$qline" ]] || continue
         count="${qline%% *}"
@@ -484,21 +1024,217 @@ cmd_govern() {
         (( ${#selected_lanes[@]} >= lane_budget )) && break
       done < <(queue_lanes_for_tasks_dir "$queue_abs")
 
-      if (( ${#selected_lanes[@]} == 0 )); then
+      dynamic_workers=0
+      if (( dynamic_total > 0 && ${#selected_lanes[@]} < lane_budget )); then
+        dynamic_workers=$(( lane_budget - ${#selected_lanes[@]} ))
+        (( dynamic_workers > dynamic_total )) && dynamic_workers="$dynamic_total"
+      fi
+
+      if (( ${#selected_lanes[@]} == 0 && dynamic_workers == 0 )); then
         printf 'SKIP %s/%s session=%s: no queued /goal tasks\n' "$p" "$h" "$session"
         continue
       fi
 
-      lanes_csv=$(join_csv "${selected_lanes[@]}")
-      max_panes=$(( ${#selected_lanes[@]} + 1 ))
-      printf 'START %s/%s session=%s lanes=%s panes=%s queued=%s\n' "$p" "$h" "$session" "$lanes_csv" "$max_panes" "$queued_total"
+      lanes_csv=""
+      (( ${#selected_lanes[@]} > 0 )) && lanes_csv=$(join_csv "${selected_lanes[@]}")
+      generated_only=0
+      [[ -z "$lanes_csv" ]] && generated_only=1
+      max_panes=$(( ${#selected_lanes[@]} + dynamic_workers + fixed_panes ))
+      printf 'START %s/%s session=%s lanes=%s dynamic_workers=%s panes=%s queued=%s\n' "$p" "$h" "$session" "${lanes_csv:-generated-only}" "$dynamic_workers" "$max_panes" "$queued_total"
       if [[ "$mode" == "apply" ]]; then
-        run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "$lanes_csv" "$max_panes"
+        run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "$lanes_csv" "$max_panes" "$dynamic_workers" "$generated_only"
       fi
       remaining=$(( remaining - max_panes ))
       (( remaining <= 0 )) && return 0
     done < <(toml_sections "$cfg" "hosts.")
   done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: factory-audit
+# ---------------------------------------------------------------------------
+cmd_factory_audit() {
+  local target_project=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --project=*) target_project="${1#--project=}" ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *) target_project="$1" ;;
+    esac
+    shift
+  done
+
+  local projects=()
+  if [[ -n "$target_project" ]]; then
+    projects=("$target_project")
+  else
+    while read -r line; do
+      local name; name=$(echo "$line" | awk '{print $1}')
+      [[ -n "$name" ]] && projects+=("$name")
+    done < <(list_projects)
+  fi
+
+  local p project_dir cfg h project_name
+  for p in "${projects[@]}"; do
+    project_dir=$(find_project_config "$p") || {
+      printf 'FACTORY %s status=RED docs=missing:project_config\n' "$p"
+      printf 'ACTION %s: add .codex-supervisor.toml before factory launch\n' "$p"
+      continue
+    }
+    [[ -n "$project_dir" ]] || continue
+    cfg="$project_dir/.codex-supervisor.toml"
+    project_name=$(toml_get "$cfg" "project" "name")
+    [[ -n "$project_name" ]] || project_name="$p"
+    while read -r h; do
+      [[ -n "$h" ]] || continue
+      factory_audit_project_host "$project_name" "$project_dir" "$cfg" "$h"
+    done < <(toml_sections "$cfg" "hosts.")
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: station
+# ---------------------------------------------------------------------------
+station_start_remote_session() {
+  local project_dir="$1" cfg="$2" host="$3" job="$4" base_session="$5" session="$6" workers="$7" panes="$8"
+  local prompts tasks_dir remote_dir supervisor prompts_abs tasks_abs task_env
+  prompts=$(toml_get "$cfg" "hosts.$host" "prompts")
+  tasks_dir=$(toml_get "$cfg" "hosts.$host" "tasks_dir")
+  remote_dir=$(project_dir_for_host "$cfg" "$host" "$project_dir")
+  supervisor=$(host_supervisor "$host")
+  prompts_abs=$(path_under_project_if_relative "$remote_dir" "$prompts")
+  tasks_abs=$(path_under_project_if_relative "$remote_dir" "$tasks_dir")
+  task_env=""
+  [[ -n "$tasks_dir" ]] && task_env=" CODEX_SUPERVISOR_TASKS_DIR=$(shell_quote "$tasks_abs")"
+  remote_slurm_keepalive_start_job "$host" "$job" "$session" \
+    "cd $(shell_quote "$remote_dir") || exit 1; CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") CODEX_SUPERVISOR_PROMPTS=$(shell_quote "$prompts_abs")$task_env CODEX_SUPERVISOR_GENERATED_ONLY=1 CODEX_SUPERVISOR_DYNAMIC_WORKERS=$(shell_quote "$workers") CODEX_SUPERVISOR_MAX_PANES=$(shell_quote "$panes") $(shell_quote "$supervisor") start --no-attach" \
+    2>&1 | tail -5
+}
+
+cmd_station() {
+  local project="" target_host="" mode="dry-run" sessions=1 workers=0 fixed_panes="${CSUP_STATION_FIXED_PANES:-2}"
+  while (( $# > 0 )); do
+    case "$1" in
+      --host=*) target_host="${1#--host=}" ;;
+      --sessions=*) sessions="${1#--sessions=}" ;;
+      --workers=*) workers="${1#--workers=}" ;;
+      --dry-run) mode="dry-run" ;;
+      --apply) mode="apply" ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *) project="$1" ;;
+    esac
+    shift
+  done
+  [[ -n "$project" ]] || { err "usage: csup station <project> --sessions=N --workers=N [--host=<name>] [--dry-run|--apply]"; return 2; }
+  [[ "$sessions" =~ ^[0-9]+$ && "$sessions" -gt 0 ]] || { err "--sessions must be a positive integer"; return 2; }
+  [[ "$workers" =~ ^[0-9]+$ ]] || { err "--workers must be a non-negative integer"; return 2; }
+  [[ "$fixed_panes" =~ ^[0-9]+$ ]] || fixed_panes=2
+
+  local project_dir; project_dir=$(find_project_config "$project")
+  [[ -n "$project_dir" ]] || { err "no .codex-supervisor.toml found for project '$project'"; return 1; }
+  local cfg="$project_dir/.codex-supervisor.toml"
+  local requested_panes=$((workers + fixed_panes))
+  (( requested_panes > 0 )) || requested_panes=1
+  local remaining="$sessions" global_idx=1 any_host=0 h
+  printf 'csup: station mode=%s project=%s host=%s sessions=%s workers=%s panes_per_session=%s\n' "$mode" "$project" "${target_host:-any}" "$sessions" "$workers" "$requested_panes"
+
+  while read -r h; do
+    [[ -n "$h" ]] || continue
+    [[ -n "$target_host" && "$h" != "$target_host" ]] && continue
+    [[ "$(host_scheduler "$h")" == "slurm" ]] || continue
+    any_host=1
+    ssh_login_reachable "$h" || { printf 'HOLD %s/%s sessions_waiting=%s reason=login_unreachable\n' "$project" "$h" "$remaining"; continue; }
+
+    local slots capacity slot first_empty_slot=0
+    slots=$(slurm_slots_for_host "$h")
+    capacity=$(slurm_slot_capacity_panes "$h")
+    for ((slot=1; slot<=slots && remaining>0; slot++)); do
+      local job_name info job node used room fit started base_session
+      job_name=$(slurm_job_name_for_slot "$h" "$slot")
+      info=$(slurm_active_job_info_named "$h" "$job_name" || true)
+      job="${info%%|*}"
+      node=""
+      [[ "$info" == *"|"* ]] && node="${info#*|}"
+      if [[ -z "$job" ]]; then
+        (( first_empty_slot == 0 )) && first_empty_slot="$slot"
+        continue
+      fi
+
+      used=$(slurm_remote_pane_count "$h" "$job")
+      room=$((capacity - used))
+      (( room < 0 )) && room=0
+      if (( room < requested_panes )); then
+        printf 'FULL %s/%s slot=%s job=%s used=%s capacity=%s requested_panes=%s\n' "$project" "$h" "$slot" "$job" "$used" "$capacity" "$requested_panes"
+        continue
+      fi
+
+      fit=$((room / requested_panes))
+      (( fit > remaining )) && fit="$remaining"
+      (( fit < 1 )) && continue
+      base_session=$(toml_get "$cfg" "hosts.$h" "session")
+      [[ -z "$base_session" ]] && base_session="${project}-${h}"
+      for ((started=0; started<fit; started++)); do
+        local session_name
+        session_name="${base_session}-station-${global_idx}"
+        printf 'START %s/%s slot=%s job=%s node=%s session=%s workers=%s panes=%s\n' "$project" "$h" "$slot" "$job" "${node:-unknown}" "$session_name" "$workers" "$requested_panes"
+        if [[ "$mode" == "apply" ]]; then
+          station_start_remote_session "$project_dir" "$cfg" "$h" "$job" "$base_session" "$session_name" "$workers" "$requested_panes"
+        fi
+        remaining=$((remaining - 1))
+        global_idx=$((global_idx + 1))
+      done
+    done
+
+    if (( remaining > 0 && first_empty_slot > 0 )); then
+      local slot job_name info job node room fit started waited wait_secs base_session
+      slot="$first_empty_slot"
+      job_name=$(slurm_job_name_for_slot "$h" "$slot")
+      if [[ "$mode" == "apply" ]]; then
+        printf 'SUBMIT %s/%s slot=%s job_name=%s requested_panes=%s\n' "$project" "$h" "$slot" "$job_name" "$requested_panes"
+        slurm_submit_holder_named "$h" "$job_name" >/dev/null || { printf 'HOLD %s/%s slot=%s job_name=%s sessions_waiting=%s reason=submit_failed\n' "$project" "$h" "$slot" "$job_name" "$remaining"; return 0; }
+        wait_secs="${CSUP_SLURM_WAIT_SECS:-120}"
+        waited=0
+        info=""
+        while (( waited < wait_secs )); do
+          sleep 5
+          waited=$((waited + 5))
+          info=$(slurm_active_job_info_named "$h" "$job_name" || true)
+          [[ -n "$info" ]] && break
+        done
+        if [[ -z "$info" ]]; then
+          printf 'HOLD %s/%s slot=%s job_name=%s sessions_waiting=%s reason=slurm_queue\n' "$project" "$h" "$slot" "$job_name" "$remaining"
+          return 0
+        fi
+        job="${info%%|*}"
+        node=""
+        [[ "$info" == *"|"* ]] && node="${info#*|}"
+        room="$capacity"
+        fit=$((room / requested_panes))
+        (( fit > remaining )) && fit="$remaining"
+        base_session=$(toml_get "$cfg" "hosts.$h" "session")
+        [[ -z "$base_session" ]] && base_session="${project}-${h}"
+        for ((started=0; started<fit; started++)); do
+          local session_name
+          session_name="${base_session}-station-${global_idx}"
+          printf 'START %s/%s slot=%s job=%s node=%s session=%s workers=%s panes=%s\n' "$project" "$h" "$slot" "$job" "${node:-unknown}" "$session_name" "$workers" "$requested_panes"
+          station_start_remote_session "$project_dir" "$cfg" "$h" "$job" "$base_session" "$session_name" "$workers" "$requested_panes"
+          remaining=$((remaining - 1))
+          global_idx=$((global_idx + 1))
+        done
+      else
+        printf 'PLAN %s/%s slot=%s job_name=%s action=submit requested_panes=%s sessions_waiting=%s\n' "$project" "$h" "$slot" "$job_name" "$requested_panes" "$remaining"
+        return 0
+      fi
+    fi
+    (( remaining <= 0 )) && break
+  done < <(toml_sections "$cfg" "hosts.")
+
+  (( any_host )) || { err "project '$project' has no matching SLURM host stanza"; return 1; }
+  if (( remaining > 0 )); then
+    printf 'HOLD %s/%s sessions_waiting=%s reason=no_station_capacity\n' "$project" "${target_host:-slurm}" "$remaining"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -525,15 +1261,15 @@ cmd_stop() {
 
   for h in "${hosts_to_stop[@]}"; do
     local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+    local supervisor; supervisor=$(host_supervisor "$h")
     [[ -z "$session" ]] && session="${project}-${h}"
     if [[ "$h" == "$me" ]]; then
       info "stopping '$session' on $h"
       CODEX_SUPERVISOR_SESSION="$session" "$SUPERVISOR" stop 2>&1 | tail -3
     else
       if host_reachable "$h"; then
-        local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
         info "stopping '$session' on $h"
-        ssh "$ssh_target" "CODEX_SUPERVISOR_SESSION='$session' ~/codex-supervisor.sh stop" 2>&1 | tail -3
+        remote_run_existing "$h" "CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") $(shell_quote "$supervisor") stop" 2>&1 | tail -3
       else
         warn "host '$h' unreachable; can't stop '$session'"
       fi
@@ -566,14 +1302,27 @@ cmd_status() {
     while read -r h; do
       [[ -z "$h" ]] && continue
       local session; session=$(toml_get "$cfg" "hosts.$h" "session")
+      local supervisor; supervisor=$(host_supervisor "$h")
+      local prompts; prompts=$(toml_get "$cfg" "hosts.$h" "prompts")
+      local remote_dir; remote_dir=$(project_dir_for_host "$cfg" "$h" "$d")
       [[ -z "$session" ]] && session="${p}-${h}"
-      printf '\n[%s] session=%s\n' "$h" "$session"
+      local runtime=""
+      if [[ "$(host_scheduler "$h")" == "slurm" && "$h" != "$me" ]]; then
+        local info job node; info=$(slurm_active_job_info "$h" || true)
+        job="${info%%|*}"
+        node=""
+        [[ "$info" == *"|"* ]] && node="${info#*|}"
+        [[ -n "$job" ]] && runtime="$runtime job=$job"
+        [[ -n "$node" && "$node" != "$info" ]] && runtime="$runtime node=$node"
+      fi
+      printf '\n[%s] session=%s%s\n' "$h" "$session" "$runtime"
       if [[ "$h" == "$me" ]]; then
-        CODEX_SUPERVISOR_SESSION="$session" "$SUPERVISOR" status 2>&1 | head -12
+        local prompts_abs; prompts_abs=$(path_under_project_if_relative "$d" "$prompts")
+        ( cd "$d" && CODEX_SUPERVISOR_SESSION="$session" CODEX_SUPERVISOR_PROMPTS="$prompts_abs" "$SUPERVISOR" status 2>&1 | head -12 )
       else
         if host_reachable "$h"; then
-          local ssh_target; ssh_target=$(toml_get "$HOSTS_FILE" "hosts.$h" "ssh")
-          ssh "$ssh_target" "CODEX_SUPERVISOR_SESSION='$session' ~/codex-supervisor.sh status 2>&1 | head -12"
+          local prompts_abs; prompts_abs=$(path_under_project_if_relative "$remote_dir" "$prompts")
+          remote_run_existing "$h" "cd $(shell_quote "$remote_dir") || exit 1; CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") CODEX_SUPERVISOR_PROMPTS=$(shell_quote "$prompts_abs") $(shell_quote "$supervisor") status 2>&1 | head -12"
         else
           echo "  (host unreachable)"
         fi
@@ -590,6 +1339,8 @@ case "$sub" in
   start)   cmd_start "$@" ;;
   submit)  cmd_submit "$@" ;;
   govern)  cmd_govern "$@" ;;
+  factory-audit|audit-factory) cmd_factory_audit "$@" ;;
+  station|allocate|request) cmd_station "$@" ;;
   stop)    cmd_stop "$@" ;;
   status)  cmd_status "$@" ;;
   ls|list) list_projects ;;
@@ -601,6 +1352,8 @@ csup — codex-supervisor cross-host launcher
   csup start <project> [--host=<name>] [--fallback]
   csup submit <project> <lane> <goal text...>
   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+  csup factory-audit [--project=<name>|<project>]
+  csup station <project> --sessions=N --workers=N [--host=<name>] [--dry-run|--apply]
   csup stop  <project> [--host=<name>]
   csup status [<project>]
   csup ls            list projects with .codex-supervisor.toml

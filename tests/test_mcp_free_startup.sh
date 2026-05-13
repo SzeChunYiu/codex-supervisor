@@ -36,8 +36,8 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_HOME="$REAL_CODEX_HOME" \
 CODEX_SUPERVISOR_CODEX_HOME="$SUP_CODEX_HOME" \
 CODEX_SUPERVISOR_ROOT="$TMPDIR/supervisor-root" \
-  bash -c 'source "$1"; prepare_codex_home; build_codex_command' \
-  _ "$SCRIPT" > "$TMPDIR/cmd.out"
+  bash -c 'cd "$2"; source "$1"; prepare_codex_home; build_codex_command' \
+  _ "$SCRIPT" "$ROOT" > "$TMPDIR/cmd.out"
 
 cmd="$(cat "$TMPDIR/cmd.out")"
 if [[ "$cmd" != *"CODEX_HOME="*"$SUP_CODEX_HOME"* ]]; then
@@ -54,6 +54,13 @@ fi
 grep -q 'model = "gpt-5.5"' "$SUP_CODEX_HOME/config.toml"
 grep -q '\[features\]' "$SUP_CODEX_HOME/config.toml"
 grep -q '\[projects."/tmp/example"\]' "$SUP_CODEX_HOME/config.toml"
+grep -Fq "[projects.\"$ROOT\"]" "$SUP_CODEX_HOME/config.toml"
+awk -v header="[projects.\"$ROOT\"]" '
+  $0 == header { in_section=1; next }
+  in_section && /^\[/ { exit 1 }
+  in_section && $0 == "trust_level = \"trusted\"" { found=1; exit 0 }
+  END { exit found ? 0 : 1 }
+' "$SUP_CODEX_HOME/config.toml"
 test -e "$SUP_CODEX_HOME/auth.json"
 test -e "$SUP_CODEX_HOME/.credentials.json"
 if [[ -e "$SUP_CODEX_HOME/skills" || -e "$SUP_CODEX_HOME/memories" || -e "$SUP_CODEX_HOME/plugins" ]]; then
@@ -63,6 +70,10 @@ if [[ -e "$SUP_CODEX_HOME/skills" || -e "$SUP_CODEX_HOME/memories" || -e "$SUP_C
 fi
 if [[ "$cmd" != *"nice -n 5"* ]]; then
   printf 'default startup command should lower worker CPU priority with nice -n 5, got: %s\n' "$cmd" >&2
+  exit 1
+fi
+if [[ "$cmd" != *"--dangerously-bypass-approvals-and-sandbox"* ]]; then
+  printf 'default startup command should launch codex with dangerous bypass permissions, got: %s\n' "$cmd" >&2
   exit 1
 fi
 for expected in \
@@ -115,5 +126,5 @@ grep -q "must differ" /tmp/codex-supervisor-same-home.err
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 HOME="$TMPDIR/home" \
 CODEX_SUPERVISOR_ROOT="$TMPDIR/supervisor-root" \
-  bash -c 'source "$1"; SESSION="custom-session"; refresh_session_paths; [[ "$SUPERVISOR_CODEX_HOME" == "$CODEX_SUPERVISOR_ROOT/codex-home/custom-session" ]] && [[ "$SUPERVISOR_CACHE_ROOT" == "$CODEX_SUPERVISOR_ROOT/cache/custom-session" ]] && [[ "$SUPERVISOR_TMP_ROOT" == "$CODEX_SUPERVISOR_ROOT/tmp/custom-session" ]] && [[ "$LOG_FILE" == "$CODEX_SUPERVISOR_ROOT/logs/custom-session.log" ]] && [[ "$STATE_FILE" == "$HOME/.codex-supervisor-custom-session.state" ]]' \
+  bash -c 'source "$1"; SESSION="custom-session"; refresh_session_paths; [[ "$SUPERVISOR_CODEX_HOME" == "$CODEX_SUPERVISOR_ROOT/codex-home/custom-session" ]] && [[ "$SUPERVISOR_CACHE_ROOT" == "$CODEX_SUPERVISOR_ROOT/cache/custom-session" ]] && [[ "$SUPERVISOR_TMP_ROOT" == "$CODEX_SUPERVISOR_ROOT/tmp/custom-session" ]] && [[ "$LOG_FILE" == "$CODEX_SUPERVISOR_ROOT/logs/custom-session.log" ]] && [[ "$STATE_FILE" == "$CODEX_SUPERVISOR_ROOT/run/custom-session.state" ]]' \
   _ "$SCRIPT"

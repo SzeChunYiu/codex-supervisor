@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DASHBOARD="${CSUP_DASHBOARD:-$HOME/bin/csup-dashboard}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
@@ -57,6 +58,7 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
 
 html = mod.INDEX_HTML
 assert "refreshNow.addEventListener('click', () => tick(true))" in html
-assert "const url = '/api/state.json' + (force ? '?refresh=1' : '')" in html
+assert "if (force) params.set('refresh', '1')" in html
+assert "const url = '/api/state.json' + (query ? '?' + query : '')" in html
 print("ok: dashboard manual refresh forces server-side capture")
 PY

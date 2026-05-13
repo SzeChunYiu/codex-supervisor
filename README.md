@@ -60,10 +60,13 @@ codex-supervisor start
 A new terminal window opens attached to the tmux session, with one tiled
 codex pane per prompt. Each pane runs the `codex` CLI; once it's ready,
 the supervisor auto-types the prompt and submits it. By default the
-supervisor also appends one generated `PLANNER` pane (unless your prompt file
-already has a planner/leader lane). That pane is the team lead: it reviews
-recent pane updates, refreshes `docs/parallel-sessions/TEAM_PLAN.md`, and
-queues the next compact-safe work for the worker lanes.
+supervisor also appends two generated fixed panes unless your prompt file
+already defines them:
+
+- `DEBUG` — carefully debugs/optimizes one code slice per iteration.
+- `VALIDATOR` — validates worker results, refreshes
+  `docs/parallel-sessions/TEAM_PLAN.md`, and queues the next compact-safe
+  prompts.
 
 Default safety cap: at most 8 prompts/panes per supervisor session
 (`CODEX_SUPERVISOR_MAX_PANES=8`). Start fewer when the work or host resources
@@ -99,9 +102,22 @@ Detail lives in `.md` files under your repo:
   per-iteration cycle, branching/merging rules, stop conditions, "when
   to ask" exceptions). Lanes re-read this at the start of every
   iteration so edits flow without re-typing prompts.
+- `docs/distributed-protocol.md` — **multi-host constitution** for projects
+  that may run on laptop, local Mac/Mac mini, LUNARC, or another remote node:
+  one project identity, no anonymous source copies, one writable lease per
+  scope, Git-only source movement, and fail-closed conflict handling.
+- `docs/ai-factory.md` — **factory operating model**: one batch outcome,
+  validator-owned acceptance checklist, artifact ledger, lane leases, and
+  blocker-driven queues so panes converge on the same outcome.
+- `templates/TEAM_PLAN.md` — starter board to copy into each project as
+  `docs/parallel-sessions/TEAM_PLAN.md`.
 - `docs/parallel-sessions/<lane>.md` — **per-lane spec** (branch
   prefix, writable targets, required reading, working rhythm, scope
   guardrails, stop condition).
+- `docs/parallel-sessions/debugger.md`,
+  `docs/parallel-sessions/validator-planner.md`, and
+  `docs/parallel-sessions/dynamic-worker.md` — default fixed-role and worker
+  pool contracts.
 
 Why this works:
 
@@ -125,10 +141,16 @@ What goes in the **shared `.md`**:
 - Rules every session follows: re-read protocol; stay in lane; commit
   message format; one PR per iteration; rebase before push; status
   board entry; conflict policy; "when to stop and ask".
+- The current batch outcome and definition of accepted evidence, normally in
+  `docs/parallel-sessions/TEAM_PLAN.md`.
+- For distributed projects, host/source-tree leases: canonical checkout vs.
+  registered Git worktree vs. execution mirror, and which lane owns each
+  writable path.
 
 What goes in the **per-lane `.md`**:
 
 - Branch prefix and worktree path.
+- Host role and source tree class.
 - Writable targets (which files this lane is allowed to touch).
 - Goal (one paragraph).
 - Working rhythm (numbered iteration cycle).
@@ -138,6 +160,26 @@ What goes in the **per-lane `.md`**:
 
 Reference example: <https://github.com/SzeChunYiu/babbloo> demonstrates
 this pattern at scale (8 lanes, dedicated + worker pool).
+
+### Fixed roles plus dynamic workers
+
+For new queue-backed projects, prefer this shape:
+
+1. Keep the fixed `DEBUG` and `VALIDATOR` sessions enabled.
+2. Copy `templates/TEAM_PLAN.md` into the project and let VALIDATOR maintain
+   the batch outcome, acceptance checklist, and artifact ledger.
+3. Put generic follow-up tasks in `codex-tasks/open.txt`.
+4. Start N generated dynamic workers with `CODEX_SUPERVISOR_DYNAMIC_WORKERS=N`.
+5. Use `codex-tasks/<lane>.txt` only for specialized lanes with explicit leases.
+
+Dynamic workers consume shared blocker queues first, then their own
+worker-specific queue, then shared open queues (`open`, `worker`, `workers`,
+`dynamic`). `blockers` / `blocker` is stop-the-line work: common acceptance
+blockers outrank worker-specific and normal open progress. Dynamic workers do
+not consume specified lane queues unless a lane spec/lease grants that
+ownership. When their queue is empty, they inspect the factory board and either
+close an unchecked acceptance gap or leave a validator handoff; they should not
+invent a parallel product.
 
 ### Anti-pattern: long inline prompts
 
@@ -207,17 +249,41 @@ codex-supervisor stop
 governor scans those queues, checks local CPU/RAM/disk headroom, and starts
 only the queued lanes that fit.
 
+When a project can run on more than one host, treat
+[`docs/distributed-protocol.md`](docs/distributed-protocol.md) as mandatory
+operating law. `csup` may start the same project on laptop, Mac, and LUNARC,
+but the project must still have one canonical identity, registered source
+trees only, and one writable lease per branch/worktree/path.
+
 ```sh
 csup submit <project> <lane> "short task for that lane"
 csup govern --dry-run     # explain what would start
 csup govern --apply       # start right-sized lane subsets
+csup factory-audit <project>  # classify factory health before expanding work
+csup station <project> --host=lunarc --sessions=1 --workers=4 --apply
 csup status               # all configured projects/hosts
 ```
 
-`govern` passes `CODEX_SUPERVISOR_LANES=<lane,csv>` and
-`CODEX_SUPERVISOR_MAX_PANES=<selected lanes + planner>` into
-`codex-supervisor`, so one large prompts file can be reused while the system
-opens only the lanes with queued work and available resources.
+`govern` passes `CODEX_SUPERVISOR_LANES=<lane,csv>`,
+`CODEX_SUPERVISOR_DYNAMIC_WORKERS=<N>`, and
+`CODEX_SUPERVISOR_MAX_PANES=<fixed roles + selected lanes + dynamic workers>`
+into `codex-supervisor`, so one large prompts file can be reused while the
+system opens only the fixed roles, specified lanes, and open-task workers that
+fit available resources.
+
+`factory-audit` is the management gate for the AI factory model. It reports
+`RED` when factory docs are missing, `docs/blocker-schema.md` is absent/invalid,
+or shared blockers exist, `YELLOW` when queued acceptance-gap work remains, and
+`GREEN` when the validator should either confirm acceptance or queue the next
+gap. Use it before starting more panes.
+
+For LUNARC and other SLURM hosts, `csup station` is the standardized
+resource-allocation API for AI/operator sessions. Callers request a number of
+supervisor sessions and dynamic workers; the station checks existing SLURM
+holder allocations, places the session on an allocation with enough free pane
+capacity, submits the next configured slot when current nodes are full, and
+prints `HOLD ... reason=slurm_queue` instead of falling back to the login node
+when the scheduler has not started the new node yet.
 
 ---
 
@@ -242,7 +308,7 @@ always know which pane is which.
 | Step              | Mechanism                                                                 |
 | ----------------- | ------------------------------------------------------------------------- |
 | Launch            | `tmux new-session` + N-1 `tmux split-window`, then equal-grid layout.     |
-| Planner lane      | Adds exactly one `PLANNER` pane by default (`CODEX_SUPERVISOR_PLANNER=1`) unless the prompt file already defines planner/leader. |
+| Fixed roles       | Adds one `DEBUG` and one `VALIDATOR` pane by default unless the prompt file already defines equivalent lanes. |
 | Wait for ready    | Polls `tmux capture-pane` for `Tip:` AND no `Starting MCP`, then settles 5s and re-verifies before sending. |
 | Send prompt       | `tmux send-keys` types the prompt + double Enter (codex's slash-command popup eats the first). |
 | Detect limit      | Polls each pane every 60s for `You've hit your usage limit`.              |
@@ -284,10 +350,17 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_OPEN`              | `1`                                                |
 | `CODEX_SUPERVISOR_AUTO_RESEND`       | `1`                                                |
 | `CODEX_SUPERVISOR_RESEND_GRACE`      | `30`                                               |
-| `CODEX_SUPERVISOR_ON_COMPLETE`       | `queue` (`queue` / `queue-redo` / `redo` / `rest`) |
+| `CODEX_SUPERVISOR_ON_COMPLETE`       | `queue-redo` (`queue` / `queue-redo` / `redo` / `rest`) |
+| `CODEX_SUPERVISOR_CONTINUOUS_LANES`  | `*` (every lane re-sends `/goal` after GOAL_DONE — see `docs/never-waste-workers.md`. Set to a space-separated lane list to limit, or empty to disable) |
 | `CODEX_SUPERVISOR_RESPAWN_ON_GOAL`   | `1`                                                |
-| `CODEX_SUPERVISOR_PLANNER`           | `1` (append one generated planner lane if missing) |
-| `CODEX_SUPERVISOR_PLANNER_DOC`       | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/planner.md` |
+| `CODEX_SUPERVISOR_DEBUGGER`          | `1` (append one generated DEBUG lane if missing) |
+| `CODEX_SUPERVISOR_DEBUGGER_DOC`      | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/debugger.md` |
+| `CODEX_SUPERVISOR_VALIDATOR`         | `1` (append one generated VALIDATOR lane if missing) |
+| `CODEX_SUPERVISOR_PLANNER`           | Alias for `CODEX_SUPERVISOR_VALIDATOR` |
+| `CODEX_SUPERVISOR_VALIDATOR_DOC`     | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/validator-planner.md` |
+| `CODEX_SUPERVISOR_DYNAMIC_WORKERS`   | `0` generated dynamic worker panes |
+| `CODEX_SUPERVISOR_DYNAMIC_WORKER_DOC`| `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/dynamic-worker.md` |
+| `CODEX_SUPERVISOR_GENERATED_ONLY`    | `0`; set `1` to ignore prompt-file lanes and run generated fixed/dynamic lanes only |
 | `CODEX_SUPERVISOR_RESPAWN_DEAD_PANES`| `1`                                                |
 | `CODEX_SUPERVISOR_AUTO_RECREATE_SESSION` | `1`                                            |
 | `CODEX_SUPERVISOR_MAX_ITERATION_SECS`| `2700`                                             |

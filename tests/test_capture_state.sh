@@ -25,6 +25,7 @@ assert_state() {
 CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; type classify_capture_state >/dev/null' _ "$SCRIPT"
 
 assert_state "LIMITED"  "You've hit your usage limit. Try again later."
+assert_state "LIMITED"  $'You\'ve hit your usage\nlimit. Try again later.'
 assert_state "STARTING" "Starting MCP servers (12/15)"
 assert_state "DONE"     "goal Complete after verification"
 assert_state "WORKING"  "Pursuing goal: optimize the supervisor"
@@ -44,6 +45,13 @@ if ! CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c \
   'source "$1"; capture_needs_fresh_context "$2"' \
   _ "$SCRIPT" "Error running remote compact task"; then
   echo "remote compact failure should request a fresh context" >&2
+  exit 1
+fi
+
+if ! CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c \
+  'source "$1"; capture_needs_fresh_context "$2"' \
+  _ "$SCRIPT" $'Error running remote compact\ntask'; then
+  echo "wrapped remote compact failure should request a fresh context" >&2
   exit 1
 fi
 

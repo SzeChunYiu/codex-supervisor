@@ -23,8 +23,8 @@ MCAccel competitor benchmarks, etc.) that benefits from parallelism.
 ```
 /projects/hep/fs10/shared/codex-tooling/
 ├── nvm/                       755   shared — Node Version Manager
-├── npm-global/                755   shared — global npm packages, codex CLI
-│   └── bin/codex
+├── npm-global/                755   shared — global npm packages
+│   └── bin/{codex,claude}
 ├── npm-cache/                 755   shared — npm download cache (read-mostly)
 ├── supervisor/                755   shared — codex-supervisor.sh + csup-dashboard
 │   ├── codex-supervisor.sh
@@ -34,7 +34,8 @@ MCAccel competitor benchmarks, etc.) that benefits from parallelism.
     └── <username>/            700   user-private
         ├── codex-home/        700   credentials (auth.json, .credentials.json, config.toml)
         ├── .npmrc             600   per-user npm config
-        └── run/               700   supervisor session state, sockets, logs
+        ├── run/               700   supervisor session state, sockets, logs
+        └── csup/hosts.toml    600   host inventory used when running csup on LUNARC
 ```
 
 Binaries are shared. Credentials and per-session state are per-user.
@@ -56,6 +57,7 @@ A user who has never run codex on LUNARC before:
 4. **Verify**:
    ```bash
    codex --version
+   claude --version
    ```
 
 ## Running a supervisor session on a compute node
@@ -110,7 +112,7 @@ TOOLS=/projects/hep/fs10/shared/codex-tooling
 USER_DIR=$TOOLS/per-user/$USER
 
 # Create user-private dirs lazily
-mkdir -p $USER_DIR/codex-home $USER_DIR/run
+mkdir -p $USER_DIR/codex-home $USER_DIR/run $USER_DIR/csup
 
 # Node Version Manager (shared)
 export NVM_DIR=$TOOLS/nvm
@@ -133,7 +135,33 @@ export PATH=$TOOLS/supervisor:$PATH
 
 # Supervisor writes session state under per-user dir to avoid collisions
 export CODEX_SUPERVISOR_RUN_DIR=$USER_DIR/run
+
+# csup reads host inventory from the shared filesystem, not quota-limited HOME
+export CSUP_HOSTS_FILE=$USER_DIR/csup/hosts.toml
 ```
+
+## Updating shared Codex / Claude Code binaries
+
+Check the registry first from any machine with npm:
+
+```bash
+npm view @openai/codex version
+npm view @anthropic-ai/claude-code version
+```
+
+Then update the shared LUNARC binaries with:
+
+```bash
+source /projects/hep/fs10/shared/codex-tooling/env-shared.sh
+npm install -g --prefix=/projects/hep/fs10/shared/codex-tooling/npm-global \
+  @openai/codex@latest @anthropic-ai/claude-code@latest
+codex --version
+claude --version
+```
+
+Do not use the default npm global prefix on LUNARC; keep global tools under
+`/projects/hep/fs10/shared/codex-tooling/npm-global` so compute nodes and
+login shells use the same versions.
 
 ## Importing existing auth from another machine
 
@@ -167,22 +195,81 @@ The supervisor `~/.config/csup/hosts.toml` already has entries for `mac-mini`
 and `laptop`. Adding a `lunarc` host lets `csup status <project>` aggregate
 across hosts.
 
+Before assigning source-writing work to LUNARC, apply
+`docs/distributed-protocol.md`: the LUNARC `project_dir` must be a registered
+execution mirror or registered Git worktree, its role must be explicit in
+`.codex-supervisor.toml`, and source changes must move by Git branch/patch/PR.
+Do not keep a mystery second copy of the same source tree on LUNARC, and do not
+rsync edited source back and forth between local and remote hosts.
+
 A minimal LUNARC entry:
 
 ```toml
 [hosts."lunarc"]
 ssh = "lunarc"  # uses your ~/.ssh/config alias
 reachable = "ssh -o ConnectTimeout=3 -o BatchMode=yes lunarc true"
-hostname_match = "cosmos1.int.lunarc"
-description = "LUNARC compute cluster — submit via SLURM, codex toolchain at /projects/hep/fs10/shared/codex-tooling/"
+hostname_match = "cx"
+description = "LUNARC SLURM compute allocation for remote codex-supervisor panes"
+scheduler = "slurm"
+slurm_job_name = "mcaccel-sup"
+slurm_partition = "hep"
+slurm_account = "hep2023-1-3"
+slurm_time = "5-00:00:00"
+slurm_nodes = "1"
+slurm_cpus = "40"
+slurm_mem = "200G"
+slurm_slots = "2"       # station may book csup job names: mcaccel-sup, mcaccel-sup-2
+slurm_max_panes = "24"  # conservative pane capacity per allocation
+slurm_workdir = "/projects/hep/fs10/shared/nnbar/billy/mcaccel-supervisor"
+slurm_output = "/projects/hep/fs10/shared/nnbar/billy/mcaccel-supervisor/holder.%j.log"
+remote_env = "source /projects/hep/fs10/shared/codex-tooling/env-shared.sh"
+supervisor = "/projects/hep/fs10/shared/codex-tooling/supervisor/codex-supervisor.sh"
 ```
 
-Important: `csup` running on the Mac cannot directly `start` a supervisor on
-a LUNARC compute node (the compute node only exists inside a SLURM allocation
-identified by job ID). The supervisor on LUNARC is started manually inside an
-`srun --overlap` shell using the procedure in "Running a supervisor session
-on a compute node" above. Dashboard streaming via `ssh -L` then aggregates
-LUNARC sessions into the local URL.
+For a project that should run on LUNARC, add a host stanza to that project's
+`.codex-supervisor.toml` and point `project_dir` at the remote project path:
+
+```toml
+[hosts."lunarc"]
+project_dir = "/projects/hep/fs10/shared/nnbar/billy/<project>"
+prompts = "codex-prompts.txt"
+tasks_dir = "codex-tasks"
+session = "<project>-lunarc"
+role = "remote-executor"
+sync_policy = "git-only"
+```
+
+`csup start <project> --host=lunarc` now checks for a running SLURM holder
+allocation named `slurm_job_name`. If none is running, it submits one using
+the host's `slurm_*` fields, waits for it to become RUNNING, and starts the
+supervisor through a persistent `srun --overlap` step. The persistent step is
+important: a short `srun` that exits immediately can let SLURM reap the tmux
+server and worker panes.
+
+The local `http://127.0.0.1:7777` dashboard reads the same host/project config.
+For `scheduler="slurm"` hosts it probes the active job ID through `ssh lunarc`
+and captures panes via `srun --jobid=<jobid> --overlap tmux ...`, so LUNARC
+sessions appear on the same localhost dashboard as laptop/Mac sessions. A
+separate `ssh -L 7778:<node>:7780` tunnel is still useful for debugging a
+dashboard running wholly on the compute node, but is no longer required for
+the local aggregate view.
+
+## Station-managed requests
+
+AI sessions should not pick LUNARC nodes themselves. They should ask the
+station for capacity:
+
+```bash
+csup station <project> --host=lunarc --sessions=1 --workers=4 --dry-run
+csup station <project> --host=lunarc --sessions=1 --workers=4 --apply
+```
+
+`station` first uses running holder allocations when they have enough free pane
+room. If the current allocation is full, it submits the next configured slot
+(`slurm_job_name-2`, `slurm_job_name-3`, up to `slurm_slots`). If the new holder
+job remains queued after `CSUP_SLURM_WAIT_SECS`, it reports a `HOLD` with
+`reason=slurm_queue` and starts no workers. This is intentional: the login node
+is only a scheduler/control endpoint, never a Codex compute target.
 
 ## Isolation policy
 
@@ -204,7 +291,9 @@ See `docs/policies/g4gpu-isolation.md` in nnbar-simulation for the full rule.
   `npm install -g`, use the `--prefix=$TOOLS/npm-global` flag instead.
 - **Compute node refuses direct SSH (`Connection closed`)**: this is expected.
   Use `srun --jobid=<jobid> --overlap` to attach to an existing allocation.
-- **Dashboard at `http://localhost:7777` doesn't show LUNARC sessions**: the
-  csup dashboard reads from a local state dir; LUNARC sessions live on the
-  LUNARC filesystem. Either tunnel a second port (`localhost:7778`) or sync
-  the LUNARC state dir into the local dashboard's watch path via rsync.
+- **Dashboard at `http://localhost:7777` doesn't show LUNARC sessions**: run
+  `csup hosts` and confirm `lunarc` shows `up job=<jobid>`. Then confirm the
+  relevant project has a `[hosts."lunarc"]` section locally. If the job is up
+  but no panes appear, check that the supervisor was started through the
+  persistent `csup start ... --host=lunarc` path rather than a short-lived
+  manual `srun` step.
