@@ -1,8 +1,43 @@
 # codex-supervisor prompts -- one prompt per non-blank, non-comment line.
-# Each line spawns one tiled tmux pane and is sent VERBATIM to its codex.
-# Include `/goal ` (or any slash command) yourself if you want it.
+# Each prompt spawns one tiled tmux pane and is sent VERBATIM to Codex.
+# By default, the supervisor also appends fixed DEBUG and VALIDATOR panes
+# unless this file already defines equivalent lanes; set CODEX_SUPERVISOR_DEBUGGER=0
+# and CODEX_SUPERVISOR_VALIDATOR=0 only for exceptional one-off runs.
 #
-# Lines must NOT contain literal newlines (newlines submit prematurely).
+# Contract enforced by `codex-supervisor validate-prompts` and `start`:
+# - every prompt starts with /goal exactly;
+# - every prompt is 50 words or fewer;
+# - every prompt references at least one .md file;
+# - all details, guardrails, file lists, and stop rules live in markdown.
+# For multi-host projects, docs/parallel-sessions.md should import
+# docs/distributed-protocol.md and define host/source-tree leases there.
+# For dynamic-worker projects, keep generic tasks in codex-tasks/open.txt and
+# start N workers with CODEX_SUPERVISOR_DYNAMIC_WORKERS=N.
+#
+# Recommended pattern:
+#   /goal You are PANE <N>, lane <X>. Read docs/parallel-sessions.md and docs/parallel-sessions/<X>.md, then complete one compact-safe iteration.
+#
+# Anti-pattern: long inline prompts with branch names, file lists, detailed
+# cycles, and verification rules. Those grow context and make the TUI typing
+# fragile. Move that content to docs/parallel-sessions/<lane>.md instead.
 
-/goal Fix all the linting errors in this repo, one file at a time, opening a PR per file and merging after CI green.
-/goal Add unit tests for every untested module in src/lib, one module per PR, until coverage exceeds 80%.
+/goal You are PANE 0, lane BUGS. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
+/goal You are PANE 1, lane PERF. Read docs/parallel-sessions.md and docs/parallel-sessions/lane-template.md, then complete one compact-safe iteration.
+
+# --- Optional self-learning lanes ---
+#
+# autonomous-research: reads arXiv/SSRN/practitioner sources, extracts
+# actionable hypotheses, submits them to the task registry. Never complete —
+# it always finds more to read. Spec: docs/parallel-sessions/autonomous-research.md
+#
+# self-improving-system: reads session logs and external agent-architecture
+# papers, writes structured improvement proposals, maintains a system memory
+# of what prompting and coordination patterns work. Spec:
+# docs/parallel-sessions/self-improving-system.md
+#
+# Enable these only when the operator has measured capacity and wants an
+# explicit self-learning batch. Keep them commented in the example so the
+# default quickstart stays right-sized.
+#
+# /goal You are PANE N, lane autonomous-research. Read docs/parallel-sessions.md and docs/parallel-sessions/autonomous-research.md, then run one full research cycle: pick topic → search arXiv/SSRN/web → extract hypotheses → submit to registry. Never stop — this lane is always running.
+# /goal You are PANE N+1, lane self-improving-system. Read docs/parallel-sessions.md and docs/parallel-sessions/self-improving-system.md, then run one improvement cycle: read session logs → identify patterns → search agent-architecture papers → write proposals. Never stop.
