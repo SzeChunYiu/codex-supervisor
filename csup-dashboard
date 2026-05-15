@@ -36,6 +36,14 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
+PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
+    "CSUP_PROJECT_ROOTS_FILE",
+    str(pathlib.Path.home() / ".config/csup/project-roots.txt"),
+))
+PROJECT_CACHE_FILE = pathlib.Path(os.environ.get(
+    "CSUP_PROJECT_CACHE_FILE",
+    str(pathlib.Path.home() / ".config/csup/project-cache.json"),
+))
 # Detect when we are running on a LUNARC compute node so the dashboard can use
 # the right config + project locations without manual --project-root flags or
 # HOME overrides on every launch. cn*/cx*/cg* are the SLURM allocation
@@ -1150,6 +1158,19 @@ def list_projects() -> list[dict]:
             print(f"project scan skipped: {base}: {e}", file=sys.stderr)
             continue
     candidates.extend(EXTRA_PROJECT_ROOTS)
+    # macOS TCC can deny directory scans of ~/Desktop to dashboard processes
+    # launched by tmux/nohup even when direct file access to known project
+    # paths still works.  A small root registry outside Desktop lets the
+    # dashboard recover the real backstage project list instead of displaying
+    # zero projects after a restart.
+    try:
+        for raw in PROJECT_ROOTS_FILE.read_text().splitlines():
+            raw = raw.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            candidates.append(pathlib.Path(raw).expanduser())
+    except OSError:
+        pass
     for child in candidates:
         fallback = DIRECT_PROJECT_FALLBACKS.get(str(child), {})
         try:
@@ -1195,6 +1216,41 @@ def list_projects() -> list[dict]:
         })
         by_root[str(child)] = out[-1]
         by_root[child_key] = out[-1]
+    try:
+        cached_projects = json.loads(PROJECT_CACHE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        cached_projects = []
+    if isinstance(cached_projects, list):
+        for rec in cached_projects:
+            if not isinstance(rec, dict):
+                continue
+            path_raw = str(rec.get("path") or "")
+            cfg = rec.get("config") if isinstance(rec.get("config"), dict) else {}
+            if not path_raw or not cfg:
+                continue
+            root = pathlib.Path(path_raw)
+            try:
+                root_key = str(root.resolve())
+            except OSError:
+                root_key = str(root)
+            if root_key in by_root or str(root) in by_root:
+                continue
+            name = cfg.get("project", {}).get("name") or root.name
+            local_hosts = dict(cfg.get("hosts", {}) or {})
+            try:
+                merged_remote = merge_remote_project_hosts(local_hosts)
+            except Exception as e:
+                print(f"remote toml merge skipped for cached {root}: {e}", file=sys.stderr)
+                merged_remote = local_hosts
+            project = {
+                "name": name,
+                "path": str(root),
+                "hosts": merged_remote,
+                "instances": [],
+            }
+            by_root[root_key] = project
+            by_root[str(root)] = project
+            out.append(project)
     for inst in state_instances():
         root = pathlib.Path(inst["project_root"])
         try:

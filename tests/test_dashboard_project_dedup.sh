@@ -18,7 +18,7 @@ TOML
 ln -s "$TMPDIR/real/neural_grow" "$TMPDIR/search-a/neural_grow"
 ln -s "$TMPDIR/real/neural_grow" "$TMPDIR/search-b/neural_grow"
 
-python3 - "$DASHBOARD" "$TMPDIR/search-a" "$TMPDIR/search-b" "$TMPDIR/real/neural_grow" <<'PY'
+python3 - "$DASHBOARD" "$TMPDIR/search-a" "$TMPDIR/search-b" "$TMPDIR/real/neural_grow" "$TMPDIR/empty-project-roots.txt" "$TMPDIR/empty-project-cache.json" <<'PY'
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -33,6 +33,8 @@ spec.loader.exec_module(mod)
 
 mod.PROJECT_SEARCH_DIRS = [pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])]
 mod.EXTRA_PROJECT_ROOTS = [pathlib.Path(sys.argv[4])]
+mod.PROJECT_ROOTS_FILE = pathlib.Path(sys.argv[5])
+mod.PROJECT_CACHE_FILE = pathlib.Path(sys.argv[6])
 mod.DIRECT_PROJECT_FALLBACKS = {}
 mod.state_instances = lambda: []
 
