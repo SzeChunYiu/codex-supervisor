@@ -90,6 +90,10 @@ if [[ "$dry_run" != *"START proj-a/mac-mini session=proj-a-main lanes=worker-a,b
   printf 'govern dry-run should propose queued lanes in priority order, got:\n%s\n' "$dry_run" >&2
   exit 1
 fi
+if [[ "$dry_run" != *"capacity=8 pane(s) bottleneck=session_cap"* ]]; then
+  printf 'govern dry-run should explain the current capacity bottleneck, got:\n%s\n' "$dry_run" >&2
+  exit 1
+fi
 
 CSUP_CAPTURE_FILE="$TMPDIR/capture.txt" \
 HOME="$TMPDIR/home" \
