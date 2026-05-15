@@ -3127,8 +3127,13 @@ cmd_start() {
     err "remove that file to re-enable the supervisor"
     exit 1
   fi
-  if [[ -f "$HOME/.codex-supervisor-${SESSION}.disabled" ]]; then
-    err "refusing to start session '$SESSION': $HOME/.codex-supervisor-${SESSION}.disabled exists"
+  # Pre-2026-05-15 this flag lived in $HOME which is quota-tight on LUNARC.
+  # Now lives in SUPERVISOR_ROOT/run/ (under fs10 on lunarc, ~/.codex-supervisor
+  # on Mac). The old path is checked for back-compat.
+  local _disabled_new="$SUPERVISOR_ROOT/run/${SESSION}.disabled"
+  local _disabled_old="$HOME/.codex-supervisor-${SESSION}.disabled"
+  if [[ -f "$_disabled_new" ]] || [[ -f "$_disabled_old" ]]; then
+    err "refusing to start session '$SESSION': $_disabled_new exists (or legacy $_disabled_old)"
     err "remove that file to re-enable this session"
     exit 1
   fi
@@ -3475,8 +3480,11 @@ cmd_stop() {
   # any silent restart attempt (stale daemon, launchd job, watchdog,
   # external script). Pass --no-disable to skip if you intend to restart
   # immediately.
+  # 2026-05-15: moved this flag from $HOME (quota-tight on LUNARC) into
+  # SUPERVISOR_ROOT/run/ which is operator-configurable to fs10 share.
   if (( mark_disabled )); then
-    : > "$HOME/.codex-supervisor-${SESSION}.disabled"
+    mkdir -p "$SUPERVISOR_ROOT/run" 2>/dev/null || true
+    : > "$SUPERVISOR_ROOT/run/${SESSION}.disabled"
   fi
   if (( was_running )); then
     echo "stopped session '$SESSION', reaped orphan MCP children, pruned worktrees"
@@ -3484,7 +3492,7 @@ cmd_stop() {
     echo "no session '$SESSION' running; reaped any leftover MCP orphans + pruned worktrees"
   fi
   if (( mark_disabled )); then
-    echo "marked DISABLED (~/.codex-supervisor-${SESSION}.disabled). Remove that file or pass --no-disable next stop to re-enable."
+    echo "marked DISABLED ($SUPERVISOR_ROOT/run/${SESSION}.disabled). Remove that file or pass --no-disable next stop to re-enable."
   fi
 }
 
