@@ -2643,11 +2643,18 @@ cleanup_session() {
 daemon_cmd_matches_session() {
   local cmd="$1"
   printf '%s' "$cmd" | grep -q -- "--daemon" || return 1
-  if printf '%s' "$cmd" | grep -qE "[-]-session[[:space:]]+${SESSION}([[:space:]]|\$)"; then
+  if printf '%s\n' "$cmd" | awk -v s="$SESSION" '
+      {
+        for (i = 1; i < NF; i++) {
+          if ($i == "--session" && $(i + 1) == s) found = 1
+        }
+      }
+      END { exit found ? 0 : 1 }
+    '; then
     return 0
   fi
   if [[ "$SESSION" == "codex-supervisor" ]] \
-     && ! printf '%s' "$cmd" | grep -qE "[-]-session"; then
+     && ! printf '%s' "$cmd" | grep -q -- "--session"; then
     return 0
   fi
   return 1

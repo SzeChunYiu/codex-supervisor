@@ -38,4 +38,34 @@ if [[ "$actual" != "100" ]]; then
   exit 1
 fi
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_ROOT="$TMPDIR/root-regex" \
+CODEX_SUPERVISOR_SESSION='demo.session' \
+bash -c '
+  source "$1"
+  refresh_session_paths
+  ps() {
+    if [[ "$*" == "-o ppid= -p "* ]]; then
+      echo 999
+      return 0
+    fi
+    if [[ "$*" == "-axo pid=,ppid=,command=" ]]; then
+      cat <<'"'"'PSOUT'"'"'
+500 1 bash /repo/codex-supervisor.sh start --daemon --session demoXsession --prompts /tmp/p
+600 1 bash /repo/codex-supervisor.sh start --daemon --session demo.session --prompts /tmp/p
+PSOUT
+      return 0
+    fi
+    command ps "$@"
+  }
+  supervisor_daemon_pids
+' _ "$SCRIPT" > "$TMPDIR/regex-pids"
+
+actual_regex="$(cat "$TMPDIR/regex-pids")"
+if [[ "$actual_regex" != "600" ]]; then
+  echo "supervisor_daemon_pids should match literal session names, not regex-compatible names" >&2
+  echo "actual: $actual_regex" >&2
+  exit 1
+fi
+
 echo "ok: daemon pid detection ignores prompt-helper subshells"

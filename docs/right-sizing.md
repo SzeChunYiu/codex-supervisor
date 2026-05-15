@@ -82,12 +82,15 @@ that truly benefits from intra-process parallelism.
 Automated path:
 
 ```bash
+csup capacity
 csup govern --dry-run
 csup govern --apply
 ```
 
-This uses the same rule but filters prompts with `CODEX_SUPERVISOR_LANES`,
-generates only the needed dynamic workers with
+`csup capacity` reports the local safe pane headroom and the current bottleneck
+(`session_cap`, `ram`, `disk`, or `load`). `csup govern` uses the same resource
+inputs, then filters prompts with `CODEX_SUPERVISOR_LANES`, generates only the
+needed dynamic workers with
 `CODEX_SUPERVISOR_DYNAMIC_WORKERS`, and keeps the fixed `DEBUG`/`VALIDATOR`
 panes per started session.
 

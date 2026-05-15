@@ -7,6 +7,7 @@
 # Subcommands:
 #   csup start <project> [--host=<name>] [--fallback]
 #   csup submit <project> <lane> <goal text...>
+#   csup capacity
 #   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
 #   csup factory-audit [--project=<name>|<project>]
 #   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
@@ -752,37 +753,83 @@ running_local_panes() {
   tmux list-panes -a 2>/dev/null | wc -l | tr -d ' '
 }
 
-capacity_panes() {
+capacity_fields() {
   local free_ram free_disk cpus load running max_total ram_per disk_per reserve_ram reserve_disk load_room ram_room disk_room
   free_ram=$(free_ram_mb)
   free_disk=$(free_disk_gb)
   cpus=$(cpu_count)
   load=$(load1)
   running=$(running_local_panes)
-  max_total="${CSUP_GOVERNOR_MAX_TOTAL_PANES:-8}"
-  ram_per="${CSUP_GOVERNOR_RAM_MB_PER_PANE:-700}"
-  disk_per="${CSUP_GOVERNOR_DISK_MB_PER_PANE:-1024}"
-  reserve_ram="${CSUP_GOVERNOR_MIN_FREE_RAM_MB:-2048}"
-  reserve_disk="${CSUP_GOVERNOR_MIN_FREE_DISK_GB:-10}"
+  max_total=$(positive_int_or_default "${CSUP_GOVERNOR_MAX_TOTAL_PANES:-}" 8)
+  ram_per=$(positive_int_or_default "${CSUP_GOVERNOR_RAM_MB_PER_PANE:-}" 700)
+  disk_per=$(positive_int_or_default "${CSUP_GOVERNOR_DISK_MB_PER_PANE:-}" 1024)
+  reserve_ram=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_RAM_MB:-}" 2048)
+  reserve_disk=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_DISK_GB:-}" 10)
 
   ram_room=$(( (free_ram - reserve_ram) / ram_per ))
   (( ram_room < 0 )) && ram_room=0
   disk_room=$(( (free_disk - reserve_disk) * 1024 / disk_per ))
   (( disk_room < 0 )) && disk_room=0
-  load_room=$(python3 - "$cpus" "$load" <<'PY'
+  local load_limit="${CSUP_GOVERNOR_MAX_LOAD_PER_CPU:-1.25}"
+  load_room=$(python3 - "$cpus" "$load" "$load_limit" <<'PY'
 import math, sys
-cpus = max(1, int(float(sys.argv[1])))
-load = float(sys.argv[2])
-limit = float(__import__("os").environ.get("CSUP_GOVERNOR_MAX_LOAD_PER_CPU", "1.25"))
-print(max(0, int(math.floor(cpus * limit - load))))
+try:
+    cpus = max(1, int(float(sys.argv[1])))
+    load = max(0.0, float(sys.argv[2]))
+    limit = float(sys.argv[3])
+except Exception:
+    print(0)
+    raise SystemExit(0)
+if limit <= 0:
+    print(999999)
+else:
+    print(max(0, int(math.floor(cpus * limit - load))))
 PY
 )
-  local room=$(( max_total - running ))
-  (( room < 0 )) && room=0
-  for v in "$ram_room" "$disk_room" "$load_room"; do
-    (( v < room )) && room="$v"
+  local total_room=$(( max_total - running ))
+  (( total_room < 0 )) && total_room=0
+
+  local available="$total_room" bottleneck="session_cap" v label
+  for label in ram disk load; do
+    case "$label" in
+      ram) v="$ram_room" ;;
+      disk) v="$disk_room" ;;
+      load) v="$load_room" ;;
+    esac
+    if (( v < available )); then
+      available="$v"
+      bottleneck="$label"
+    fi
   done
-  echo "$room"
+
+  printf 'available=%s\n' "$available"
+  printf 'bottleneck=%s\n' "$bottleneck"
+  printf 'total_room=%s\n' "$total_room"
+  printf 'ram_room=%s\n' "$ram_room"
+  printf 'disk_room=%s\n' "$disk_room"
+  printf 'load_room=%s\n' "$load_room"
+  printf 'max_total=%s\n' "$max_total"
+  printf 'running=%s\n' "$running"
+  printf 'free_ram_mb=%s\n' "$free_ram"
+  printf 'reserve_ram_mb=%s\n' "$reserve_ram"
+  printf 'ram_mb_per_pane=%s\n' "$ram_per"
+  printf 'free_disk_gb=%s\n' "$free_disk"
+  printf 'reserve_disk_gb=%s\n' "$reserve_disk"
+  printf 'disk_mb_per_pane=%s\n' "$disk_per"
+  printf 'cpus=%s\n' "$cpus"
+  printf 'load1=%s\n' "$load"
+  printf 'max_load_per_cpu=%s\n' "$load_limit"
+}
+
+capacity_panes() {
+  local k v
+  while IFS='=' read -r k v; do
+    if [[ "$k" == "available" ]]; then
+      echo "$v"
+      return
+    fi
+  done < <(capacity_fields)
+  echo 0
 }
 
 positive_int_or_default() {
@@ -1263,6 +1310,60 @@ cmd_submit() {
   [[ "$text" == /goal* ]] || text="/goal $text"
   printf '%s\n' "$text" >> "$project_dir/$tasks_dir/$lane.txt"
   printf 'queued %s/%s: %s\n' "$project" "$lane" "$text"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: capacity
+# ---------------------------------------------------------------------------
+cmd_capacity() {
+  while (( $# > 0 )); do
+    case "$1" in
+      -h|--help) break ;;
+      --*) err "unknown flag: $1"; return 2 ;;
+      *) err "capacity takes no positional arguments"; return 2 ;;
+    esac
+    shift
+  done
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'USAGE'
+csup capacity
+
+Reports the current local safe pane headroom and the limiting resource.
+Use before large `csup govern --apply` runs to scale up to the largest safe
+parallel session count without guessing.
+USAGE
+    return 0
+  fi
+
+  local available bottleneck total_room ram_room disk_room load_room max_total running
+  local free_ram_mb reserve_ram_mb ram_mb_per_pane free_disk_gb reserve_disk_gb disk_mb_per_pane cpus load max_load_per_cpu
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      available) available="$v" ;;
+      bottleneck) bottleneck="$v" ;;
+      total_room) total_room="$v" ;;
+      ram_room) ram_room="$v" ;;
+      disk_room) disk_room="$v" ;;
+      load_room) load_room="$v" ;;
+      max_total) max_total="$v" ;;
+      running) running="$v" ;;
+      free_ram_mb) free_ram_mb="$v" ;;
+      reserve_ram_mb) reserve_ram_mb="$v" ;;
+      ram_mb_per_pane) ram_mb_per_pane="$v" ;;
+      free_disk_gb) free_disk_gb="$v" ;;
+      reserve_disk_gb) reserve_disk_gb="$v" ;;
+      disk_mb_per_pane) disk_mb_per_pane="$v" ;;
+      cpus) cpus="$v" ;;
+      load1) load="$v" ;;
+      max_load_per_cpu) max_load_per_cpu="$v" ;;
+    esac
+  done < <(capacity_fields)
+
+  printf 'csup: capacity host=%s runtime=%s available=%s bottleneck=%s\n' "$(this_host)" "$RUNTIME_ROOT" "$available" "$bottleneck"
+  printf 'limits total_room=%s ram_room=%s disk_room=%s load_room=%s max_total=%s running=%s\n' "$total_room" "$ram_room" "$disk_room" "$load_room" "$max_total" "$running"
+  printf 'inputs free_ram_mb=%s reserve_ram_mb=%s ram_mb_per_pane=%s free_disk_gb=%s reserve_disk_gb=%s disk_mb_per_pane=%s cpus=%s load1=%s max_load_per_cpu=%s\n' \
+    "$free_ram_mb" "$reserve_ram_mb" "$ram_mb_per_pane" "$free_disk_gb" "$reserve_disk_gb" "$disk_mb_per_pane" "$cpus" "$load" "$max_load_per_cpu"
 }
 
 # ---------------------------------------------------------------------------
@@ -2402,6 +2503,7 @@ sub="${1:-}"; shift 2>/dev/null || true
 case "$sub" in
   start)   cmd_start "$@" ;;
   submit)  cmd_submit "$@" ;;
+  capacity) cmd_capacity "$@" ;;
   govern)  cmd_govern "$@" ;;
   factory-audit|audit-factory) cmd_factory_audit "$@" ;;
   factory-run|run-factory|ai-factory) cmd_factory_run "$@" ;;
@@ -2420,6 +2522,7 @@ csup — codex-supervisor cross-host launcher
 
   csup start <project> [--host=<name>] [--fallback]
   csup submit <project> <lane> <goal text...>
+  csup capacity
   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
   csup factory-audit [--project=<name>|<project>]
   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
@@ -2432,6 +2535,7 @@ csup — codex-supervisor cross-host launcher
   csup tunnel [--kill]
   csup ls            list projects with .codex-supervisor.toml
   csup hosts         list known hosts and reachability
+  csup capacity      report local safe pane headroom and limiting resource
 USAGE
     ;;
   *) err "unknown subcommand: $sub"; exit 2 ;;
