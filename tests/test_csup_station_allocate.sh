@@ -65,11 +65,11 @@ if (( status != 0 )); then
   exit 1
 fi
 
-[[ "$out" == *"FULL proj/lunarc slot=1 job=111 used=8 capacity=8 requested_panes=6"* ]] || {
+[[ "$out" == *"FULL proj/lunarc slot=1 job=111 used=8 capacity=8 load_room="*" requested_panes=5"* ]] || {
   printf 'expected full existing slot, got:\n%s\n' "$out" >&2
   exit 1
 }
-[[ "$out" == *"SUBMIT proj/lunarc slot=2 job_name=csup-station-2 requested_panes=6"* ]] || {
+[[ "$out" == *"SUBMIT proj/lunarc slot=2 job_name=csup-station-2 requested_panes=5"* ]] || {
   printf 'expected second slot submission, got:\n%s\n' "$out" >&2
   exit 1
 }
@@ -83,5 +83,11 @@ if grep -q "/shared/codex-supervisor.sh start" "$TMPDIR/ssh.log"; then
   cat "$TMPDIR/ssh.log" >&2
   exit 1
 fi
+
+grep -q -- "--chdir='/remote/alloc'" "$TMPDIR/ssh.log" || {
+  printf 'holder sbatch must run from slurm_workdir so stdout/state stay off home\n' >&2
+  cat "$TMPDIR/ssh.log" >&2
+  exit 1
+}
 
 echo "ok: station allocates existing slots, books new SLURM slots, and reports queue holds"

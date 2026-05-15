@@ -15,12 +15,19 @@ DEBUG still serves the current factory outcome. It should prioritize defects,
 tests, and simplifications that block or de-risk the acceptance checklist in
 `TEAM_PLAN.md`.
 
+In the company model, DEBUG is the fixed quality / principal-engineer role. It
+does not own the roadmap; it protects the system by reviewing risky slices,
+proving defects, and producing small fixes or explicit review blockers.
+
 ## Required reading
 
 - `docs/parallel-sessions.md`
 - `docs/ai-factory.md`
+- `docs/company-operating-model.md`
+- `docs/version-management.md`
 - `docs/distributed-protocol.md` for multi-host projects
 - `docs/parallel-sessions/TEAM_PLAN.md`
+- `docs/parallel-sessions/VERSION_BOARD.md`
 - The relevant source and tests for the slice being inspected
 
 ## Writable scope
@@ -38,7 +45,10 @@ plus adjacent tests. It must not edit files owned by another active lane.
 3. Read the relevant code before editing.
 4. Make the smallest safe fix or optimization.
 5. Run targeted verification for that slice.
-6. Stop with a handoff that includes changed files, verification, blocker, and
+6. Hand the accepted/rejected review result to VALIDATOR/RELEASE_LEAD for batch
+   intake; do not open a separate review-facing PR unless the version board
+   records an exception.
+7. Stop with a handoff that includes changed files, verification, blocker, and
    the next suspicious slice if more debugging is needed.
 
 ## Stop rule

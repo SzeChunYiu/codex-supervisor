@@ -9,7 +9,7 @@ non-comment line in `codex-prompts.txt` must obey this contract:
 4. Put every extra instruction, guardrail, checklist, and stop rule in markdown.
 5. Keep one prompt per line; never paste multi-line instructions into the prompt file.
 6. Keep the final pane count within `CODEX_SUPERVISOR_MAX_PANES` (default 8).
-   By default the supervisor appends two fixed lanes, `DEBUG` and `VALIDATOR`,
+   By default the supervisor appends three fixed lanes, `GM`, `DEBUG`, and `VALIDATOR`,
    if the prompt file does not already define equivalent lanes. Leave room for
    those fixed sessions plus only the dynamic/specified workers justified by
    queue depth and host resources. For 12-20 total workers, split across

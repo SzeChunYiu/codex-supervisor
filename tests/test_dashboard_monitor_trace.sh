@@ -47,6 +47,8 @@ mod.parse_lanes = lambda path: {0: "BUGS"}
 
 def fake_host_runner(host, hosts, me, timeout, retries=1, slurm_job_id=""):
     def runner(cmd):
+        if cmd[:3] == ["tmux", "list-sessions", "-F"]:
+            return subprocess.CompletedProcess(cmd, 0, "demo-session\n", "")
         if cmd[:2] == ["tmux", "list-panes"]:
             return subprocess.CompletedProcess(cmd, 0, "0|0|codex|100|20|BUGS\n", "")
         if cmd[:2] == ["tmux", "capture-pane"]:

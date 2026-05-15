@@ -57,6 +57,7 @@ cat > "$TMPDIR/supervisor" <<'SUPERVISOR'
 {
   echo "lanes=$CODEX_SUPERVISOR_LANES"
   echo "dynamic_workers=$CODEX_SUPERVISOR_DYNAMIC_WORKERS"
+  echo "reviewer=$CODEX_SUPERVISOR_REVIEWER"
   echo "generated_only=$CODEX_SUPERVISOR_GENERATED_ONLY"
   echo "max_panes=$CODEX_SUPERVISOR_MAX_PANES"
 } > "$CSUP_CAPTURE_FILE"
@@ -94,5 +95,6 @@ PATH="$TMPDIR/bin:$PATH" \
 
 grep -q '^lanes=$' "$TMPDIR/capture.txt"
 grep -q '^dynamic_workers=4$' "$TMPDIR/capture.txt"
+grep -q '^reviewer=1$' "$TMPDIR/capture.txt"
 grep -q '^generated_only=1$' "$TMPDIR/capture.txt"
 grep -q '^max_panes=6$' "$TMPDIR/capture.txt"

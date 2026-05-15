@@ -157,7 +157,7 @@ Ledger rules:
 
 ## Fixed sessions and dynamic workers
 
-Every active project has two fixed sessions:
+Every active project has three fixed sessions:
 
 - `DEBUG`: continuously inspects, debugs, and optimizes small code slices.
 - `VALIDATOR`: validates worker results, updates markdown, and creates the next

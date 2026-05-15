@@ -75,8 +75,8 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c \
 CODEX_SUPERVISOR_PROMPTS="$ROOT/codex-prompts.example.txt" \
   "$SCRIPT" validate-prompts \
   >/tmp/codex-supervisor-validate.out
-if ! grep -q "ok: 4 prompts" /tmp/codex-supervisor-validate.out; then
-  echo "validate-prompts should accept the checked-in example prompts plus fixed roles" >&2
+if ! grep -q "ok: 3 prompts" /tmp/codex-supervisor-validate.out; then
+  echo "validate-prompts should accept the checked-in example prompts plus the fixed CEO role" >&2
   cat /tmp/codex-supervisor-validate.out >&2
   exit 1
 fi

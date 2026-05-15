@@ -66,7 +66,7 @@ The governor:
 4. Starts only non-running local sessions with queued work that fits capacity.
 5. Passes `CODEX_SUPERVISOR_LANES`, `CODEX_SUPERVISOR_DYNAMIC_WORKERS`, and
    `CODEX_SUPERVISOR_MAX_PANES` so one prompts file can be filtered down to
-   fixed `DEBUG`/`VALIDATOR` panes, specified lanes, and the dynamic worker
+   fixed `GM`/`DEBUG`/`VALIDATOR` panes, specified lanes, and the dynamic worker
    count needed for open tasks.
 
 The governor intentionally does not decide product direction. If queues grow
@@ -82,8 +82,10 @@ csup factory-audit --project=<project>
 
 `factory-audit` is the management-system check above `govern`. It reads each
 host stanza's prompt file and task directory, checks whether factory docs and
-`docs/blocker-schema.md` are installed, counts shared blockers, open work,
-lane-specific work, and prompt lines, then emits:
+`docs/blocker-schema.md` plus `docs/parallel-sessions/VERSION_BOARD.md` are
+installed, counts shared blockers, open work, lane-specific work, and prompt
+lines, verifies the shared `blockers.txt` queue exists when a task directory
+exists, then emits:
 
 - `RED` when factory docs are missing or `blockers.txt` contains `/goal` lines.
 - `YELLOW` when no shared blocker exists but queued acceptance-gap work remains.
@@ -113,7 +115,7 @@ The station API treats a request as:
 
 - `sessions`: number of supervisor tmux sessions to place.
 - `workers`: number of generated dynamic workers per session.
-- `panes_per_session = workers + 2` for the fixed `DEBUG` and `VALIDATOR`
+- `panes_per_session = workers + 3` for the fixed `GM`, `DEBUG`, and `VALIDATOR`
   panes.
 
 For SLURM hosts, station placement:
@@ -131,9 +133,11 @@ For SLURM hosts, station placement:
 
 This command is fail-closed: it does not run Codex work on the login node, and
 it does not silently fall back to local resources. Configure per-host
-`slurm_max_panes` and `slurm_slots` in `~/.config/csup/hosts.toml` so station
-capacity reflects the real node size and the maximum number of holder
-allocations the project is allowed to use.
+`slurm_max_panes` in `~/.config/csup/hosts.toml` so station capacity reflects
+how many panes that node can run without overload. The default project node cap
+is two computer nodes (`CSUP_PROJECT_MAX_NODES`, or `project_max_nodes` in host
+inventory for a lower cap; values above 2 are clamped). `slurm_slots` is capped by that policy: do not expand a project beyond two SLURM allocations; instead pack more panes into
+the existing allocations until CPU/load/disk/RAM headroom says they are full.
 
 ## Cleanup cadence
 

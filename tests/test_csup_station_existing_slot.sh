@@ -52,7 +52,7 @@ out="$(
   "$CSUP" station proj --host=lunarc --sessions=1 --workers=4 --apply 2>&1
 )"
 
-[[ "$out" == *"START proj/lunarc slot=1 job=111 node=cx01 session=proj-lunarc-station-1 workers=4 panes=6"* ]] || {
+[[ "$out" == *"START proj/lunarc slot=1 job=111 node=cx01 session=proj-lunarc-station-1 workers=4 panes=5"* ]] || {
   printf 'expected station to start on existing allocation with room, got:\n%s\n' "$out" >&2
   exit 1
 }
@@ -64,7 +64,7 @@ if grep -q "sbatch" "$TMPDIR/ssh.log"; then
 fi
 grep -q "CODEX_SUPERVISOR_GENERATED_ONLY=1" "$TMPDIR/ssh.log"
 grep -q "CODEX_SUPERVISOR_DYNAMIC_WORKERS=.*4" "$TMPDIR/ssh.log"
-grep -q "CODEX_SUPERVISOR_MAX_PANES=.*6" "$TMPDIR/ssh.log"
+grep -q "CODEX_SUPERVISOR_MAX_PANES=.*5" "$TMPDIR/ssh.log"
 grep -q "/shared/codex-supervisor.sh.* start --no-attach" "$TMPDIR/ssh.log"
 
 echo "ok: station starts requested dynamic workers on an existing SLURM allocation with room"
