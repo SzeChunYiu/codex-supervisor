@@ -1903,6 +1903,7 @@ def count_project_payload(project: dict) -> dict:
     hosts = 0
     panes = 0
     errors = 0
+    pane_issues = 0
     for inst in project.get("instances", []) or []:
         inst_panes = inst.get("panes", []) or []
         if not inst_panes:
@@ -1911,7 +1912,43 @@ def count_project_payload(project: dict) -> dict:
         panes += len(inst_panes)
         if inst.get("error"):
             errors += 1
-    return {"hosts": hosts, "panes": panes, "errors": errors}
+        for pane in inst_panes:
+            if pane_issue_reasons(inst, pane):
+                pane_issues += 1
+    return {
+        "hosts": hosts,
+        "panes": panes,
+        "errors": errors + pane_issues,
+        "issue_count": errors + pane_issues,
+        "instance_error_count": errors,
+        "pane_issue_count": pane_issues,
+    }
+
+
+def pane_issue_reasons(inst: dict, pane: dict) -> list[str]:
+    """Return dashboard-visible pane health reasons.
+
+    Keep this in sync with `health_payload()` and the frontend issue badges:
+    the header/project "issues" counts must describe the same backstage state
+    that `/api/health.json` reports.  Previously the visible dashboard counted
+    only instance errors, so idle/dead/stale panes showed health=degraded while
+    the header still displayed `issues 0`.
+    """
+    monitor = inst.get("monitor") if isinstance(inst.get("monitor"), dict) else {}
+    monitor_expected = bool(inst.get("monitor_expected", True))
+    monitor_running = (not monitor_expected) or bool(monitor.get("running"))
+    pane_state = str(pane.get("state") or "?")
+    reasons: list[str] = []
+    if monitor_expected and (
+        pane_state in {"idle", "ready", "?", "dead"}
+        or (pane_state == "goal-done" and not monitor_running)
+    ):
+        reasons.append(f"pane-{pane_state}")
+    if pane_state == "rate-limited" and not monitor_running:
+        reasons.append("rate-limited")
+    if pane.get("capture_stale"):
+        reasons.append("capture-stale")
+    return reasons
 
 
 def compact_state_panes(snapshot: dict, tail_lines: int) -> None:
@@ -1988,6 +2025,8 @@ def state_payload(project_filter: str = "", *, compact: bool = False,
     projects = snapshot.get("projects", []) or []
     apply_streaming_cache_overlay(snapshot, tail_lines)
     assign_project_slugs(projects)
+    for project in projects:
+        project.update(count_project_payload(project))
     snapshot["project_index"] = [
         {
             "name": project.get("name", ""),
@@ -3723,22 +3762,10 @@ def health_payload() -> dict:
         for inst in project.get("instances", []):
             instances += 1
             panes += len(inst.get("panes", []) or [])
-            monitor = inst.get("monitor") if isinstance(inst.get("monitor"), dict) else {}
-            monitor_expected = bool(inst.get("monitor_expected", True))
-            monitor_running = (not monitor_expected) or bool(monitor.get("running"))
             for pane in inst.get("panes", []) or []:
                 pane_state = str(pane.get("state") or "?")
                 state_counts[pane_state] = int(state_counts.get(pane_state, 0)) + 1
-                reasons: list[str] = []
-                if monitor_expected and (
-                    pane_state in {"idle", "ready", "?", "dead"}
-                    or (pane_state == "goal-done" and not monitor_running)
-                ):
-                    reasons.append(f"pane-{pane_state}")
-                if pane_state == "rate-limited" and not monitor_running:
-                    reasons.append("rate-limited")
-                if pane.get("capture_stale"):
-                    reasons.append("capture-stale")
+                reasons = pane_issue_reasons(inst, pane)
                 if reasons and len(pane_issues) < 80:
                     last_tail = ""
                     for line in reversed(pane.get("tail") or []):
@@ -3764,6 +3791,8 @@ def health_payload() -> dict:
                     "session": inst.get("session"),
                     "error": inst.get("error"),
                 })
+            monitor = inst.get("monitor") if isinstance(inst.get("monitor"), dict) else {}
+            monitor_expected = bool(inst.get("monitor_expected", True))
             if monitor_expected and monitor.get("known") and not monitor.get("running"):
                 instance_errors.append({
                     "project": project.get("name"),
@@ -6127,9 +6156,12 @@ function capturedInstances(project) {
 
 function countProject(project) {
   const counts = { hosts: 0, panes: 0, errors: 0 };
+  if (Number.isFinite(Number(project.issue_count))) {
+    counts.errors = Number(project.issue_count);
+  }
   for (const inst of capturedInstances(project)) {
     counts.hosts += 1;
-    if (inst.error) counts.errors += 1;
+    if (!Number.isFinite(Number(project.issue_count)) && inst.error) counts.errors += 1;
     counts.panes += (inst.panes || []).length;
   }
   return counts;
@@ -6143,9 +6175,12 @@ function summarize(state) {
   const counts = { projects: 0, hosts: 0, panes: 0, errors: 0, states: {} };
   counts.projects = (state.projects || []).length;
   for (const project of state.projects || []) {
+    if (Number.isFinite(Number(project.issue_count))) {
+      counts.errors += Number(project.issue_count);
+    }
     for (const inst of capturedInstances(project)) {
       counts.hosts += 1;
-      if (inst.error) counts.errors += 1;
+      if (!Number.isFinite(Number(project.issue_count)) && inst.error) counts.errors += 1;
       for (const pane of inst.panes || []) {
         counts.panes += 1;
         counts.states[pane.state] = (counts.states[pane.state] || 0) + 1;
