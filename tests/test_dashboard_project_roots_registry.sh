@@ -53,5 +53,32 @@ mod.PROJECT_CACHE_FILE.write_text(__import__("json").dumps([{
 }]))
 projects = mod.list_projects()
 assert any(p["name"] == "cached-proj" and p["hosts"].get("local", {}).get("session") == "cached" for p in projects), projects
+hosts = {
+    "lunarc": {
+        "ssh": "lunarc",
+        "scheduler": "slurm",
+        "slurm_job_name": "mcaccel-sup",
+        "remote_env": "source /shared/env.sh",
+    }
+}
+projects = [{
+    "name": "cached-lunarc-proj",
+    "path": str(home / "Desktop/cached-lunarc-proj"),
+    "hosts": {
+        "team-build-lunarc": {
+            "ssh": "lunarc",
+            "session": "team-build",
+            "prompts": "prompts.txt",
+            "role": "team",
+        }
+    },
+    "instances": [],
+}]
+merged = mod.merge_project_hosts_into_inventory(hosts, projects)
+assert merged["team-build-lunarc"]["ssh"] == "lunarc", merged
+assert merged["team-build-lunarc"]["session"] == "team-build", merged
+assert merged["team-build-lunarc"]["scheduler"] == "slurm", merged
+assert merged["team-build-lunarc"]["slurm_job_name"] == "mcaccel-sup", merged
+assert merged["team-build-lunarc"]["remote_env"] == "source /shared/env.sh", merged
 print("ok: dashboard discovers registered/cache project roots when directory scans are unavailable")
 PY

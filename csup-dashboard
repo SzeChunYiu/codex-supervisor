@@ -1408,6 +1408,69 @@ def project_instances(project: dict) -> list[dict]:
     return instances
 
 
+def _project_host_inventory_base(host: str, hcfg: dict, hosts: dict) -> dict:
+    """Return the global inventory profile a project-local host should inherit.
+
+    Project configs intentionally use descriptive host names such as
+    ``civic-team-build-lunarc`` while the shared inventory carries the
+    connection/scheduler facts under a reusable alias like ``lunarc``.  The
+    dashboard must merge those two views before probing, otherwise cached
+    project configs become "missing ssh target" cards after macOS TCC blocks
+    directory scans and the dashboard falls back to the root/cache registry.
+    """
+    if host in hosts and isinstance(hosts.get(host), dict):
+        return dict(hosts.get(host) or {})
+    ssh_target = str((hcfg or {}).get("ssh", "") or "")
+    if not ssh_target:
+        return {}
+
+    exact_matches: list[dict] = []
+    slurm_matches: list[dict] = []
+    for _name, info in hosts.items():
+        if not isinstance(info, dict):
+            continue
+        if str(info.get("ssh", "") or "") != ssh_target:
+            continue
+        info_copy = dict(info)
+        exact_matches.append(info_copy)
+        if str(info.get("scheduler", "")).lower() == "slurm":
+            slurm_matches.append(info_copy)
+    if slurm_matches:
+        return slurm_matches[0]
+    if exact_matches:
+        return exact_matches[0]
+    return {}
+
+
+def merge_project_hosts_into_inventory(hosts: dict, projects: list[dict]) -> dict:
+    """Overlay project-local host entries onto the shared host inventory.
+
+    ``project_instances()`` returns host names from each project's
+    ``.codex-supervisor.toml``.  Those names are not guaranteed to exist in
+    ``~/.config/csup/hosts.toml``; they often only provide a session/prompts
+    overlay plus ``ssh = "lunarc"``.  Probe/capture code, however, looks up
+    scheduler, remote_env, and SSH options by *that exact host name*.  Build a
+    refresh-local inventory with inherited connection facts so project and
+    backstage/session views stay aligned.
+    """
+    merged = {
+        str(name): dict(info) if isinstance(info, dict) else info
+        for name, info in (hosts or {}).items()
+    }
+    for project in projects:
+        for host, raw_hcfg in (project.get("hosts", {}) or {}).items():
+            if not isinstance(raw_hcfg, dict):
+                continue
+            host = str(host)
+            hcfg = dict(raw_hcfg)
+            base = _project_host_inventory_base(host, hcfg, merged)
+            # Project config owns session/prompt/task metadata; global
+            # inventory owns connection/scheduler defaults.  Project values
+            # intentionally override inherited defaults when both are present.
+            merged[host] = {**base, **hcfg}
+    return merged
+
+
 def discover_tmux_sessions(host: str, hosts: dict, me: str | None,
                            connection: dict | None = None) -> list[str]:
     runner = host_runner(host, hosts, me, timeout=TMUX_DISCOVERY_TIMEOUT_SECS, retries=0,
@@ -3129,6 +3192,7 @@ def refresh(lines: int):
     hosts = known_hosts()
     me = this_host_name(hosts)
     discovered_projects = list_projects()
+    hosts = merge_project_hosts_into_inventory(hosts, discovered_projects)
     project_instances_by_project: dict[str, list[dict]] = {
         project_identity(proj): project_instances(proj) for proj in discovered_projects
     }
