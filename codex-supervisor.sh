@@ -2,7 +2,9 @@
 # codex-supervisor -- run multiple codex CLI sessions in parallel tmux panes.
 #
 # Single tmux session, single window, N tiled panes -- one pane per prompt
-# plus generated DEBUG and VALIDATOR lanes by default. Auto-sends each prompt
+# plus a generated CEO lane by default. DEBUG/VALIDATOR compatibility lanes are
+# opt-in; team starts can request one MANAGER lane plus dynamic workers.
+# Auto-sends each prompt
 # once its pane is ready, respawns panes whose codex exits or hits the usage limit,
 # recreates a missing tmux session after resource checks, auto-resends prompts
 # when a /goal completes, and applies an even MxN grid layout so cells stay
@@ -64,9 +66,15 @@
 #   CODEX_SUPERVISOR_OPEN            1 = auto-open terminal, 0 = print attach hint (default: 1)
 #   CODEX_SUPERVISOR_AUTO_RESEND     1 = auto-resend prompt when /goal completes, 0 = stay idle (default: 1)
 #   CODEX_SUPERVISOR_RESEND_GRACE    seconds idle after Goal achieved before resend (default: 30)
-#   CODEX_SUPERVISOR_DEBUGGER        1 = append a generated DEBUG lane if missing (default: 1)
+#   CODEX_SUPERVISOR_CEO             1 = append a generated CEO lane if missing (default: 1)
+#   CODEX_SUPERVISOR_CEO_DOC         CEO executive markdown path
+#   CODEX_SUPERVISOR_GM              backwards-compatible alias for CODEX_SUPERVISOR_CEO
+#   CODEX_SUPERVISOR_GM_DOC          backwards-compatible alias for CODEX_SUPERVISOR_CEO_DOC
+#   CODEX_SUPERVISOR_MANAGER         1 = append a generated team MANAGER lane if missing (default: 0)
+#   CODEX_SUPERVISOR_MANAGER_DOC     team manager markdown path
+#   CODEX_SUPERVISOR_DEBUGGER        1 = append a generated DEBUG lane if missing (default: 0)
 #   CODEX_SUPERVISOR_DEBUGGER_DOC    debugger markdown path
-#   CODEX_SUPERVISOR_VALIDATOR       1 = append a generated VALIDATOR lane if missing (default: CODEX_SUPERVISOR_PLANNER or 1)
+#   CODEX_SUPERVISOR_VALIDATOR       1 = append a generated VALIDATOR lane if missing (default: CODEX_SUPERVISOR_PLANNER or 0)
 #   CODEX_SUPERVISOR_PLANNER         backwards-compatible alias for CODEX_SUPERVISOR_VALIDATOR
 #   CODEX_SUPERVISOR_VALIDATOR_DOC   validator/planner markdown path
 #   CODEX_SUPERVISOR_DYNAMIC_WORKERS number of generated dynamic worker panes (default: 0)
@@ -82,6 +90,21 @@
 #   CODEX_SUPERVISOR_START_STAGGER_SECS startup delay between pane spawns/prompts; unset = auto
 
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
+SUPERVISOR_DOC_ROOT="${CODEX_SUPERVISOR_DOC_ROOT:-$SCRIPT_DIR/docs}"
+if [[ ! -d "$SUPERVISOR_DOC_ROOT/parallel-sessions" ]]; then
+  for _doc_root_candidate in \
+    "/Users/billy/Desktop/projects/codex-supervisor/docs" \
+    "/home/billy/Desktop/projects/codex-supervisor/docs" \
+    "/projects/hep/fs10/shared/codex-tooling/supervisor/docs"; do
+    if [[ -d "$_doc_root_candidate/parallel-sessions" ]]; then
+      SUPERVISOR_DOC_ROOT="$_doc_root_candidate"
+      break
+    fi
+  done
+fi
+unset _doc_root_candidate
 
 # ---------------------------------------------------------------------------
 # Config
@@ -173,26 +196,39 @@ PERIODIC_WORKTREE_AGE_MIN="${CODEX_SUPERVISOR_PERIODIC_WORKTREE_AGE_MIN:-5}"
 # 0 disables. Default 45 minutes: long enough for small lane iterations,
 # short enough to keep the context below compacting territory.
 MAX_ITERATION_SECS="${CODEX_SUPERVISOR_MAX_ITERATION_SECS:-2700}"
-# Fixed project roles. By default every started project gets:
-#   DEBUG     - continuous code-review/debug/optimization lane.
-#   VALIDATOR - continuous validation + planning lane that writes md and queues
-#               follow-up /goal prompts for workers.
+# Fixed project roles. By default direct project starts get one real CEO
+# Codex pane. Worker-team starts should explicitly enable MANAGER and disable
+# CEO; the team manager owns debug, validation, routing, and worker acceptance.
+# DEBUG and VALIDATOR remain opt-in compatibility lanes only.
 # Existing prompt-file lanes with matching labels satisfy the fixed slots.
-DEBUGGER_ENABLED="${CODEX_SUPERVISOR_DEBUGGER:-1}"
+CEO_ENABLED="${CODEX_SUPERVISOR_CEO:-${CODEX_SUPERVISOR_GM:-${CODEX_SUPERVISOR_GENERAL_MANAGER:-1}}}"
+CEO_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_CEO+x}${CODEX_SUPERVISOR_GM+x}${CODEX_SUPERVISOR_GENERAL_MANAGER+x}"
+CEO_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/ceo-executive.md"
+CEO_DOC="${CODEX_SUPERVISOR_CEO_DOC:-${CODEX_SUPERVISOR_GM_DOC:-${CODEX_SUPERVISOR_GENERAL_MANAGER_DOC:-$CEO_DOC_DEFAULT}}}"
+MANAGER_ENABLED="${CODEX_SUPERVISOR_MANAGER:-${CODEX_SUPERVISOR_TEAM_MANAGER:-0}}"
+MANAGER_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_MANAGER+x}${CODEX_SUPERVISOR_TEAM_MANAGER+x}"
+MANAGER_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/general-manager.md"
+MANAGER_DOC="${CODEX_SUPERVISOR_MANAGER_DOC:-${CODEX_SUPERVISOR_TEAM_MANAGER_DOC:-$MANAGER_DOC_DEFAULT}}"
+# Backwards-compatible variable names for scripts that still refer to the old
+# GM fixed slot.
+GM_ENABLED="$CEO_ENABLED"
+GM_ENABLED_EXPLICIT="$CEO_ENABLED_EXPLICIT"
+GM_DOC="$CEO_DOC"
+DEBUGGER_ENABLED="${CODEX_SUPERVISOR_DEBUGGER:-0}"
 DEBUGGER_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_DEBUGGER+x}"
-DEBUGGER_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/debugger.md"
+DEBUGGER_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/debugger.md"
 DEBUGGER_DOC="${CODEX_SUPERVISOR_DEBUGGER_DOC:-$DEBUGGER_DOC_DEFAULT}"
-VALIDATOR_ENABLED="${CODEX_SUPERVISOR_VALIDATOR:-${CODEX_SUPERVISOR_PLANNER:-1}}"
+VALIDATOR_ENABLED="${CODEX_SUPERVISOR_VALIDATOR:-${CODEX_SUPERVISOR_PLANNER:-0}}"
 VALIDATOR_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_VALIDATOR+x}${CODEX_SUPERVISOR_PLANNER+x}"
 # Backwards-compatible variable name for tests/scripts that still refer to the
 # old generated planner slot.
 PLANNER_ENABLED="$VALIDATOR_ENABLED"
-VALIDATOR_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/validator-planner.md"
+VALIDATOR_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/validator-planner.md"
 VALIDATOR_DOC="${CODEX_SUPERVISOR_VALIDATOR_DOC:-${CODEX_SUPERVISOR_PLANNER_DOC:-$VALIDATOR_DOC_DEFAULT}}"
 PLANNER_DOC="$VALIDATOR_DOC"
 DYNAMIC_WORKERS="${CODEX_SUPERVISOR_DYNAMIC_WORKERS:-0}"
 DYNAMIC_WORKERS_EXPLICIT="${CODEX_SUPERVISOR_DYNAMIC_WORKERS+x}"
-DYNAMIC_WORKER_DOC_DEFAULT="/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/dynamic-worker.md"
+DYNAMIC_WORKER_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/dynamic-worker.md"
 DYNAMIC_WORKER_DOC="${CODEX_SUPERVISOR_DYNAMIC_WORKER_DOC:-$DYNAMIC_WORKER_DOC_DEFAULT}"
 # Shared blockers are factory-wide stop-the-line work. Dynamic workers should
 # take them before worker-specific or generic open tasks so lane-local progress
@@ -573,7 +609,7 @@ terminate_pane_process_tree() {
 }
 
 terminate_session_process_trees() {
-  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  tmux has-session -t "=$SESSION" 2>/dev/null || return 0
   local root_pid
   while IFS= read -r root_pid; do
     [[ -n "$root_pid" ]] || continue
@@ -1128,6 +1164,9 @@ pane_has_title_activity() {
 
 pane_capture_active() {
   local target="$1" cap="$2"
+  # Goal-done takes priority: old scrollback may still contain "Pursuing goal"
+  # or "Working" from a prior iteration after the goal completes.
+  capture_goal_done "$cap" && return 1
   capture_has "$cap" "Pursuing goal" \
     || capture_has "$cap" "Working" \
     || capture_has "$cap" "Goal active" \
@@ -1344,6 +1383,9 @@ write_state_file() {
     echo "TASKS_DIR=${TASKS_DIR}"
     echo "LANE_FILTER=${LANE_FILTER}"
     echo "GENERATED_ONLY=${GENERATED_ONLY}"
+    echo "CEO_ENABLED=${CEO_ENABLED}"
+    echo "GM_ENABLED=${CEO_ENABLED}"
+    echo "MANAGER_ENABLED=${MANAGER_ENABLED}"
     echo "DEBUGGER_ENABLED=${DEBUGGER_ENABLED}"
     echo "VALIDATOR_ENABLED=${VALIDATOR_ENABLED}"
     echo "DYNAMIC_WORKERS=${DYNAMIC_WORKERS}"
@@ -1368,6 +1410,18 @@ apply_prompt_runtime_state() {
     v=$(state_value "GENERATED_ONLY")
     [[ -n "$v" ]] && GENERATED_ONLY="$v"
   fi
+  if [[ -z "$GM_ENABLED_EXPLICIT" ]]; then
+    v=$(state_value "GM_ENABLED")
+    [[ -z "$v" ]] && v=$(state_value "CEO_ENABLED")
+    if [[ -n "$v" ]]; then
+      GM_ENABLED="$v"
+      CEO_ENABLED="$v"
+    fi
+  fi
+  if [[ -z "$MANAGER_ENABLED_EXPLICIT" ]]; then
+    v=$(state_value "MANAGER_ENABLED")
+    [[ -n "$v" ]] && MANAGER_ENABLED="$v"
+  fi
   if [[ -z "$DEBUGGER_ENABLED_EXPLICIT" ]]; then
     v=$(state_value "DEBUGGER_ENABLED")
     [[ -n "$v" ]] && DEBUGGER_ENABLED="$v"
@@ -1389,9 +1443,36 @@ apply_prompt_runtime_state() {
 declare -a PROMPTS=()
 declare -a LANE_LABELS=()
 
+prompt_has_gm_lane() {
+  local label lc
+  for label in "${LANE_LABELS[@]:-}"; do
+    lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    [[ "$lc" == "gm" || "$lc" == "general-manager" || "$lc" == "generalmanager" || "$lc" == "general_manager" || "$lc" == "ceo" || "$lc" == "executive" || "$lc" == "exec" || "$lc" == "portfolio" ]] && return 0
+  done
+  return 1
+}
+
+prompt_has_ceo_lane() {
+  local label lc
+  for label in "${LANE_LABELS[@]:-}"; do
+    lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    [[ "$lc" == "ceo" || "$lc" == "chief" || "$lc" == "executive" || "$lc" == "gm" || "$lc" == "general-manager" || "$lc" == "generalmanager" || "$lc" == "general_manager" ]] && return 0
+  done
+  return 1
+}
+
+prompt_has_manager_lane() {
+  local label lc
+  for label in "${LANE_LABELS[@]:-}"; do
+    lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    [[ "$lc" == "manager" || "$lc" == "team-manager" || "$lc" == "lead" || "$lc" == "leader" ]] && return 0
+  done
+  return 1
+}
+
 prompt_has_planner_lane() {
   local label lc
-  for label in "${LANE_LABELS[@]}"; do
+  for label in "${LANE_LABELS[@]:-}"; do
     lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
     [[ "$lc" == "validator" || "$lc" == "validate" || "$lc" == "planner" || "$lc" == "lead" || "$lc" == "leader" ]] && return 0
   done
@@ -1400,7 +1481,7 @@ prompt_has_planner_lane() {
 
 prompt_has_debugger_lane() {
   local label lc
-  for label in "${LANE_LABELS[@]}"; do
+  for label in "${LANE_LABELS[@]:-}"; do
     lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
     [[ "$lc" == "debug" || "$lc" == "debugger" || "$lc" == "optimize" || "$lc" == "optimizer" ]] && return 0
   done
@@ -1431,6 +1512,38 @@ lane_is_dynamic_worker() {
     [[ "$token_lc" == "$lc" ]] && return 0
   done
   return 1
+}
+
+ensure_ceo_prompt() {
+  (( CEO_ENABLED )) || return 0
+  prompt_has_ceo_lane && return 0
+  local idx="${#PROMPTS[@]}"
+  local doc="$CEO_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/ceo-executive.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/ceo-executive.md")"
+  elif [[ ! -f "$doc" && -f "docs/parallel-sessions/general-manager.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/general-manager.md")"
+  fi
+  local prompt="/goal You are PANE ${idx}, lane CEO. Read ${doc}, docs/company-operating-model.md, docs/ai-factory.md, docs/ceo-staffing.md, docs/parallel-sessions/TEAM_PLAN.md (create if absent). Step 1: assess workload and node resources. Step 2: run csup staff --dry-run, review output. Step 3: run csup staff --apply if understaffed. Step 4: queue decisions in codex-tasks/ceo.txt. Step 5: send manager updates."
+  validate_prompt_line "$prompt" "generated-ceo" 1 || exit 1
+  PROMPTS+=("$prompt")
+  LANE_LABELS+=("CEO")
+}
+
+ensure_gm_prompt() { ensure_ceo_prompt; }
+
+ensure_manager_prompt() {
+  (( MANAGER_ENABLED )) || return 0
+  prompt_has_manager_lane && return 0
+  local idx="${#PROMPTS[@]}"
+  local doc="$MANAGER_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/general-manager.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/general-manager.md")"
+  fi
+  local prompt="/goal You are PANE ${idx}, lane MANAGER. Read ${doc}; manage this team, debug, validate, route worker handoffs."
+  validate_prompt_line "$prompt" "generated-manager" 1 || exit 1
+  PROMPTS+=("$prompt")
+  LANE_LABELS+=("MANAGER")
 }
 
 ensure_debugger_prompt() {
@@ -1486,6 +1599,22 @@ load_prompts() {
   resolve_prompts_file
   apply_prompt_runtime_state
   if [[ -z "$PROMPTS_FILE" || ! -f "$PROMPTS_FILE" ]]; then
+    if truthy "$GENERATED_ONLY"; then
+      PROMPTS=(); LANE_LABELS=()
+      ensure_ceo_prompt
+      ensure_manager_prompt
+      ensure_debugger_prompt
+      ensure_planner_prompt
+      ensure_dynamic_worker_prompts
+      if (( ${#PROMPTS[@]} == 0 )); then
+        err "no generated prompts requested"; exit 1
+      fi
+      if (( MAX_PANES > 0 && ${#PROMPTS[@]} > MAX_PANES )); then
+        err "generated prompt set has ${#PROMPTS[@]} prompts; run at most ${MAX_PANES} panes per supervisor session"
+        exit 1
+      fi
+      return 0
+    fi
     err "prompts file not found"
     err "use --prompts <file>, set CODEX_SUPERVISOR_PROMPTS, or create ./codex-prompts.txt"
     exit 1
@@ -1515,6 +1644,8 @@ load_prompts() {
     err "CODEX_SUPERVISOR_LANES='$LANE_FILTER' matched no prompts in $PROMPTS_FILE"
     exit 1
   fi
+  ensure_ceo_prompt
+  ensure_manager_prompt
   ensure_debugger_prompt
   ensure_planner_prompt
   ensure_dynamic_worker_prompts
@@ -2766,7 +2897,7 @@ cmd_start() {
   fi
 
   local session_running=0
-  tmux has-session -t "$SESSION" 2>/dev/null && session_running=1
+  tmux has-session -t "=$SESSION" 2>/dev/null && session_running=1
   if (( ! session_running )); then
     load_prompts
     if ! ensure_start_resource_budget; then
@@ -2807,10 +2938,10 @@ cmd_start() {
     # Wait for the daemon to spin the tmux session up.
     local i
     for ((i=0; i<60; i++)); do
-      tmux has-session -t "$SESSION" 2>/dev/null && break
+      tmux has-session -t "=$SESSION" 2>/dev/null && break
       sleep 1
     done
-    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
       release_session_start_lock
       err "daemon did not bring up session within 60s; check $LOG_FILE"
       exit 1
@@ -2877,10 +3008,10 @@ _start_supervisor_main() {
   if (( _is_restart )); then
     log "daemon restart #$_is_restart: re-attaching to session '$SESSION'"
     populate_pane_idx_from_running
-    if tmux has-session -t "$SESSION" 2>/dev/null && (( ${#PANE_IDX[@]} > 0 )); then
+    if tmux has-session -t "=$SESSION" 2>/dev/null && (( ${#PANE_IDX[@]} > 0 )); then
       reconcile_live_panes_with_prompts || PANE_IDX=()
     fi
-    if ! tmux has-session -t "$SESSION" 2>/dev/null || (( ${#PANE_IDX[@]} == 0 )); then
+    if ! tmux has-session -t "=$SESSION" 2>/dev/null || (( ${#PANE_IDX[@]} == 0 )); then
       log "session gone or empty — rebuilding from scratch"
       ensure_start_resource_budget || exit 1
       write_state_file
@@ -2911,7 +3042,7 @@ _start_supervisor_main() {
     # If the tmux session is gone unexpectedly, rebuild it instead of
     # abandoning the team. `cmd_stop` terminates this daemon before/while
     # killing tmux, so explicit stops still stay stopped.
-    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
       if (( AUTO_RECREATE_SESSION )); then
         recreate_missing_session || true
         continue
@@ -3012,7 +3143,7 @@ cmd_stop() {
       *) err "stop: unknown arg $1"; return 1 ;;
     esac
   done
-  tmux has-session -t "$SESSION" 2>/dev/null && was_running=1
+  tmux has-session -t "=$SESSION" 2>/dev/null && was_running=1
   cleanup_session
   # After tearing down the panes, prune the worktrees they created. Each
   # codex pane spawns its own git worktree + node_modules; without this,
@@ -3186,7 +3317,7 @@ run_periodic_cleanup() {
 }
 
 cmd_status() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "no session '$SESSION' running"; return 1
   fi
   load_prompts
@@ -3258,7 +3389,7 @@ cmd_queue() {
 }
 
 cmd_attach() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "no session '$SESSION' running"; return 1
   fi
   if [[ -t 0 && -t 1 ]]; then
@@ -3282,7 +3413,7 @@ cmd_send() {
   if (( $# < 2 )); then err "usage: send <pane|lane> <text>"; return 1; fi
   local ref="$1"; shift
   local text="$*"
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "no session '$SESSION' running"; return 1
   fi
   load_prompts
@@ -3295,7 +3426,7 @@ cmd_send() {
 cmd_restart() {
   if (( $# < 1 )); then err "usage: restart <pane|lane>"; return 1; fi
   local ref="$1"
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "no session '$SESSION' running"; return 1
   fi
   ensure_codex_cmd
@@ -3312,7 +3443,7 @@ cmd_restart() {
 }
 
 cmd_relayout() {
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "no session '$SESSION' running"; return 1
   fi
   load_prompts
