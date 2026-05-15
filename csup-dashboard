@@ -1397,13 +1397,15 @@ def project_instances(project: dict) -> list[dict]:
     instances: list[dict] = []
     name = project.get("name", "")
     for host, hcfg in project.get("hosts", {}).items():
-        instances.append({
+        merged_hcfg = dict(hcfg or {})
+        merged_hcfg.update({
             "host": host,
             "session": hcfg.get("session") or f"{name}-{host}",
             "prompts": hcfg.get("prompts", ""),
             "role": hcfg.get("role", ""),
             "source": "project-config",
         })
+        instances.append(merged_hcfg)
     instances.extend(project.get("instances", []) or [])
     return instances
 
