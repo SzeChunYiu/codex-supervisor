@@ -2392,7 +2392,7 @@ check_pane() {
             local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
             local lane_lc effective="$ON_COMPLETE"
             lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
-            if [[ " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
+            if [[ "$CONTINUOUS_LANES" == "*" || " $CONTINUOUS_LANES " == *" $lane_lc "* ]]; then
               effective="queue-redo"
             fi
             case "$effective" in

@@ -129,4 +129,35 @@ if [[ "$(cat "$respawned_ready" 2>/dev/null || true)" != "/goal repeat debug lan
   exit 1
 fi
 
+sent_text_gone="$TMPDIR/sent-text-gone"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_ON_COMPLETE=queue \
+CODEX_SUPERVISOR_CONTINUOUS_LANES='*' \
+CODEX_SUPERVISOR_MIN_FREE_GB=0 \
+CODEX_SUPERVISOR_RESEND_GRACE=1 \
+SENT_FILE="$sent_text_gone" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(BUILD)
+  PROMPTS=("/goal repeat build lane")
+  PANE_IDX=(0)
+  ITERATION_STARTED[0]=$(($(date +%s) - 10))
+  LAST_GOAL_DONE[0]=$(($(date +%s) - 2))
+  RESPAWN_ON_GOAL_DONE=0
+  CAPTURE=$'"'"'gpt-5.5 high fast · /repo/path
+
+› '"'"'
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  pop_next_task() { return 1; }
+  send_prompt_to_pane() { printf "%s\n" "$2" > "$SENT_FILE"; return 0; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ "$(cat "$sent_text_gone" 2>/dev/null || true)" != "/goal repeat build lane" ]]; then
+  echo "continuous wildcard lanes should redo after goal-done text scrolls out under queue policy" >&2
+  exit 1
+fi
+
 echo "ok: panes auto-continue after goal-done, ready, unknown idle, and wedged ready stalls"
