@@ -377,6 +377,11 @@ DASHBOARD_LINES="${CODEX_SUPERVISOR_DASHBOARD_LINES:-12}"
 DASHBOARD_REFRESH="${CODEX_SUPERVISOR_DASHBOARD_REFRESH:-0.2}"
 DASHBOARD_LOG="${CODEX_SUPERVISOR_DASHBOARD_LOG:-$SUPERVISOR_ROOT/logs/csup-dashboard.log}"
 DASHBOARD_LOG_EXPLICIT="${CODEX_SUPERVISOR_DASHBOARD_LOG+x}"
+case "$(uname -s 2>/dev/null || true)" in
+  Darwin) DASHBOARD_USE_TMUX_DEFAULT=0 ;;
+  *)      DASHBOARD_USE_TMUX_DEFAULT=1 ;;
+esac
+DASHBOARD_USE_TMUX="${CODEX_SUPERVISOR_DASHBOARD_TMUX:-$DASHBOARD_USE_TMUX_DEFAULT}"
 DASHBOARD_PID_FILE="${CODEX_SUPERVISOR_DASHBOARD_PID_FILE:-$SUPERVISOR_ROOT/run/csup-dashboard.pid}"
 DASHBOARD_PID_FILE_EXPLICIT="${CODEX_SUPERVISOR_DASHBOARD_PID_FILE+x}"
 DASHBOARD_LOCK_DIR="${CODEX_SUPERVISOR_DASHBOARD_LOCK_DIR:-$SUPERVISOR_ROOT/run/csup-dashboard.lock}"
@@ -1175,7 +1180,7 @@ PY
   replace_unhealthy_dashboard_if_owned
 
   log "launching dashboard: $(dashboard_url) refresh=${DASHBOARD_REFRESH}s"
-  if command -v tmux >/dev/null 2>&1; then
+  if [[ "$DASHBOARD_USE_TMUX" == "1" ]] && command -v tmux >/dev/null 2>&1; then
     local dash_shell
     printf -v dash_shell 'exec %q --port %q --lines %q --refresh %q >> %q 2>&1' \
       "$DASHBOARD_CMD" "$DASHBOARD_PORT" "$DASHBOARD_LINES" "$DASHBOARD_REFRESH" "$DASHBOARD_LOG"
