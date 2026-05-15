@@ -80,5 +80,22 @@ assert merged["team-build-lunarc"]["session"] == "team-build", merged
 assert merged["team-build-lunarc"]["scheduler"] == "slurm", merged
 assert merged["team-build-lunarc"]["slurm_job_name"] == "mcaccel-sup", merged
 assert merged["team-build-lunarc"]["remote_env"] == "source /shared/env.sh", merged
+projects = [{
+    "name": "colliding-host-proj",
+    "path": str(home / "Desktop/colliding-host-proj"),
+    "hosts": {
+        "lunarc": {
+            "ssh": "lunarc-project-alias",
+            "session": "project-lunarc",
+            "prompts": "prompts.txt",
+        }
+    },
+    "instances": [],
+}]
+merged = mod.merge_project_hosts_into_inventory(hosts, projects)
+assert merged["lunarc"]["ssh"] == "lunarc", merged
+effective = mod.effective_hosts_for_instance(hosts, "lunarc", projects[0]["hosts"]["lunarc"])
+assert effective["lunarc"]["ssh"] == "lunarc-project-alias", effective
+assert effective["lunarc"]["scheduler"] == "slurm", effective
 print("ok: dashboard discovers registered/cache project roots when directory scans are unavailable")
 PY

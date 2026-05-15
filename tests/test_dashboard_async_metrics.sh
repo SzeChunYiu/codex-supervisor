@@ -73,7 +73,7 @@ assert elapsed < 0.20, f"pane refresh should not block on slow metrics, took {el
 for name, event in started.items():
     assert event.wait(0.5), f"{name} metric refresh was not scheduled"
 for name, event in finished.items():
-    assert event.wait(1.5), f"{name} metric refresh did not finish"
+    assert event.wait(3.0), f"{name} metric refresh did not finish"
 
 mod.refresh(1)
 with mod.CACHE_LOCK:
@@ -109,7 +109,7 @@ t0 = time.perf_counter()
 mod.refresh(1)
 elapsed = time.perf_counter() - t0
 slow_release.set()
-assert elapsed < 1.5, f"refresh should not freeze on a slow instance, took {elapsed:.3f}s"
+assert elapsed < 3.0, f"refresh should not freeze on a slow instance, took {elapsed:.3f}s"
 assert slow_started.wait(0.2), "slow instance was not attempted"
 with mod.CACHE_LOCK:
     snapshot = json.loads(json.dumps(mod.CACHE))

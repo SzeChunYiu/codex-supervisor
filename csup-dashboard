@@ -1462,6 +1462,15 @@ def merge_project_hosts_into_inventory(hosts: dict, projects: list[dict]) -> dic
             if not isinstance(raw_hcfg, dict):
                 continue
             host = str(host)
+            if host in merged:
+                # A project may intentionally reuse a global host name while
+                # overriding session/prompts for that project.  Do not mutate
+                # the shared inventory slot here; otherwise one project that
+                # says [hosts."lunarc"] ssh="lunarc-babbloo" can poison every
+                # other project using the canonical "lunarc" profile.  The
+                # per-instance runner below applies project overrides in a
+                # temporary one-host inventory.
+                continue
             hcfg = dict(raw_hcfg)
             base = _project_host_inventory_base(host, hcfg, merged)
             # Project config owns session/prompt/task metadata; global
@@ -1469,6 +1478,18 @@ def merge_project_hosts_into_inventory(hosts: dict, projects: list[dict]) -> dic
             # intentionally override inherited defaults when both are present.
             merged[host] = {**base, **hcfg}
     return merged
+
+
+def effective_hosts_for_instance(hosts: dict, host: str, hcfg: dict) -> dict:
+    """Return a temporary host inventory for one project instance."""
+    host = str(host)
+    hcfg = dict(hcfg or {})
+    base = _project_host_inventory_base(host, hcfg, hosts)
+    merged_info = {**base, **hcfg}
+    return {
+        **hosts,
+        host: merged_info,
+    }
 
 
 def discover_tmux_sessions(host: str, hosts: dict, me: str | None,
@@ -3220,6 +3241,7 @@ def refresh(lines: int):
 
     def build_instance(proj: dict, hcfg: dict) -> tuple[str, dict | None]:
         host = hcfg.get("host", "")
+        effective_hosts = effective_hosts_for_instance(hosts, host, hcfg)
         session = hcfg.get("session") or f"{proj['name']}-{host}"
         prompts_rel = hcfg.get("prompts", "")
         role = str(hcfg.get("role", "") or "")
@@ -3230,10 +3252,12 @@ def refresh(lines: int):
         if prompts_rel and not prompts_path.is_absolute():
             prompts_path = pathlib.Path(proj["path"]) / prompts_rel
         lane_map = parse_lanes(prompts_path) if prompts_rel else {}
-        connection = host_probe_cache.get(host) or {"reachable": False, "latency_ms": None, "error": "host not probed"}
+        connection = cached_probe_host(host, effective_hosts, me, started_at)
+        if not connection.get("reachable") and host_probe_cache.get(host, {}).get("reachable"):
+            connection = host_probe_cache.get(host) or connection
         reachable = bool(connection["reachable"])
         if prompts_rel and not lane_map and reachable and prompts_path.is_absolute() and host != me:
-            lane_map = parse_remote_lanes_cached(host, hosts, me, str(prompts_path), connection, async_ok=True)
+            lane_map = parse_remote_lanes_cached(host, effective_hosts, me, str(prompts_path), connection, async_ok=True)
         instance = {
             "host": host, "session": session, "prompts": prompts_rel,
             "role": role,
@@ -3244,7 +3268,7 @@ def refresh(lines: int):
         }
         if reachable:
             try:
-                panes = capture_session(host, hosts, me, session, lines, lane_map, connection)
+                panes = capture_session(host, effective_hosts, me, session, lines, lane_map, connection)
                 if panes is None:
                     instance["error"] = "session not running"
                     if host != me:
