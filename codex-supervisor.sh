@@ -1117,7 +1117,9 @@ replace_unhealthy_dashboard_if_owned() {
     pids="$pids $(dashboard_matching_pids_for_cmd "$legacy_cmd" | tr '\n' ' ')"
   fi
   pids="$(printf '%s\n' $pids | awk '!seen[$0]++' | tr '\n' ' ')"
-  tmux kill-session -t "$DASHBOARD_SESSION" 2>/dev/null || true
+  if [[ "$DASHBOARD_USE_TMUX" == "1" ]]; then
+    tmux kill-session -t "$DASHBOARD_SESSION" 2>/dev/null || true
+  fi
   [[ -n "$pids" ]] || return 0
   log "dashboard on $(dashboard_url) is unhealthy/stale; replacing pid(s): $pids"
   for pid in $pids; do
