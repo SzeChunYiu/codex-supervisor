@@ -52,6 +52,7 @@ file is `codex-tasks/<lane>.txt` in the first host config that declares a
 ## Dynamic allocation
 
 ```bash
+csup capacity
 csup govern --dry-run
 csup govern --apply
 ```
@@ -68,6 +69,11 @@ The governor:
    `CODEX_SUPERVISOR_MAX_PANES` so one prompts file can be filtered down to
    fixed `GM`/`DEBUG`/`VALIDATOR` panes, specified lanes, and the dynamic worker
    count needed for open tasks.
+
+Run `csup capacity` first when trying to maximize parallelism. It exposes the
+same capacity calculation as `govern` with `available=<N>` and
+`bottleneck=<session_cap|ram|disk|load>`, plus the per-resource room, so the
+operator can scale workers up to the current safe ceiling instead of guessing.
 
 The governor intentionally does not decide product direction. If queues grow
 without closing acceptance checklist gaps, the project validator should stop

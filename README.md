@@ -278,6 +278,7 @@ trees only, and one writable lease per branch/worktree/path.
 
 ```sh
 csup submit <project> <lane> "short task for that lane"
+csup capacity            # show local safe pane headroom + bottleneck
 csup govern --dry-run     # explain what would start
 csup govern --apply       # start right-sized lane subsets
 csup factory-audit <project>  # classify factory health before expanding work
@@ -295,6 +296,11 @@ csup status               # all configured projects/hosts
 into `codex-supervisor`, so one large prompts file can be reused while the
 system opens only the fixed roles, specified lanes, and open-task workers that
 fit available resources.
+
+Use `csup capacity` before aggressive scale-ups. It prints the computed safe
+local pane count plus the limiting factor (`session_cap`, `ram`, `disk`, or
+`load`) and the per-resource room used by `govern`, so operators can add the
+largest safe worker batch without guessing.
 
 `factory-audit` is the management gate for the AI factory model. It reports
 `RED` when factory docs are missing, `docs/blocker-schema.md` is absent/invalid,
