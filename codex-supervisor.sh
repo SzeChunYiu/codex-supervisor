@@ -251,6 +251,48 @@ PROMPT_MAX_WORDS="${CODEX_SUPERVISOR_MAX_PROMPT_WORDS:-50}"
 # across hosts; this script enforces a safe per-session ceiling so one prompt
 # file cannot accidentally spawn a tmux-crashing pane farm.
 MAX_PANES="${CODEX_SUPERVISOR_MAX_PANES:-8}"
+# When 1, prompt files with more lanes than MAX_PANES are *truncated* to the
+# first MAX_PANES lanes instead of refusing to start. Useful when a prompt
+# file is a superset and a SLURM node only has budget for a subset (the CEO's
+# typical workflow on shared compute nodes). Default 0 preserves the historic
+# fail-fast behaviour so silent truncation does not surprise dev workstations.
+TRUNCATE_PROMPTS="${CODEX_SUPERVISOR_TRUNCATE_PROMPTS:-0}"
+# Per-session tmux socket. Each supervisor session runs on its own tmux
+# server (different -L socket name). This isolates failure domains: when
+# Codex processes crash en-masse on one session and bring down that
+# session's tmux server, peer sessions on different servers survive
+# untouched. The cascade-error fix that lets the node scale past ~25
+# panes without one bad session taking down everything.
+# Setting to "shared" reverts to the historical single-server-all-sessions
+# behaviour for dev workstations that don't need isolation.
+TMUX_SOCKET="${CODEX_SUPERVISOR_TMUX_SOCKET:-}"
+# Node-wide cross-session pane cap. Multiple supervisor sessions on the same
+# node (LUNARC compute nodes routinely host 4-6 team sessions inside one SLURM
+# allocation) share RLIMIT_NPROC (~4096 on LUNARC) and CPU/RAM. Each codex pane
+# spawns ~4-8 OS processes (Rust binary + Node.js MCP children + shell), so the
+# safe ceiling is well below per-session MAX_PANES * session_count. Defaults to
+# 40 panes/node which keeps process count under ~320 even at peak respawn. Set
+# to 0 to disable (single-node Mac dev where per-session MAX_PANES is enough).
+NODE_MAX_PANES="${CODEX_SUPERVISOR_NODE_MAX_PANES:-40}"
+# Cross-session startup lock. When multiple supervisors start simultaneously on
+# the same node (e.g. CEO bootstraps 5 teams at once), the parallel pane spawns
+# create a process burst that exceeds RLIMIT_NPROC and crashes panes at startup.
+# Holding a node-wide lock serialises the "create panes + send prompts" phase
+# so each session's stagger applies sequentially. Set to 0 to disable.
+NODE_START_LOCK_SECS="${CODEX_SUPERVISOR_NODE_START_LOCK_SECS:-300}"
+# Respawn rate limit. If too many panes die in a short window, respawning
+# them all immediately re-triggers the same crash cascade (the underlying
+# resource pressure that killed them is still present). Below this rate the
+# supervisor respawns immediately; above it, it backs off and lets recovery
+# settle. RESPAWN_BURST_LIMIT respawns within RESPAWN_BURST_WINDOW_SECS
+# triggers RESPAWN_BACKOFF_SECS of cooldown.
+RESPAWN_BURST_LIMIT="${CODEX_SUPERVISOR_RESPAWN_BURST_LIMIT:-3}"
+RESPAWN_BURST_WINDOW_SECS="${CODEX_SUPERVISOR_RESPAWN_BURST_WINDOW_SECS:-10}"
+RESPAWN_BACKOFF_SECS="${CODEX_SUPERVISOR_RESPAWN_BACKOFF_SECS:-30}"
+# Tracks recent respawn timestamps. Bash arrays don't support easy time-window
+# eviction so we keep epoch seconds and filter on each check.
+RESPAWN_TIMES=()
+RESPAWN_BACKOFF_UNTIL=0
 RAM_MB_PER_PANE="${CODEX_SUPERVISOR_RAM_MB_PER_PANE:-600}"
 DISK_MB_PER_PANE="${CODEX_SUPERVISOR_DISK_MB_PER_PANE:-1024}"
 START_STAGGER_SECS="${CODEX_SUPERVISOR_START_STAGGER_SECS:-}"
@@ -340,13 +382,56 @@ SESSION_START_LOCK_HELD=0
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Resolve the tmux socket name for this supervisor invocation.
+# - Empty TMUX_SOCKET → default to the session name (per-session isolation).
+# - TMUX_SOCKET=shared → use tmux's "default" socket (legacy single-server mode).
+# - Any other value → use that socket name verbatim (advanced sharing setups).
+_resolve_tmux_socket() {
+  if [[ -z "$TMUX_SOCKET" ]]; then
+    # Use the session name as the socket name. Sanitise to tmux-safe chars.
+    TMUX_SOCKET=$(printf '%s' "$SESSION" | tr -c '[:alnum:]_-' '_')
+    [[ -z "$TMUX_SOCKET" ]] && TMUX_SOCKET="csup_default"
+  fi
+}
+
+# tmux wrapper: every tmux invocation in this script transparently picks up
+# the per-session socket via -L. The dashboard's streamer enumerates all
+# csup_* sockets in the user's tmux tmpdir so multi-server discovery works.
+# Setting TMUX_SOCKET=shared collapses everything to one server (legacy).
+tmux() {
+  # Lazy resolution: if TMUX_SOCKET hasn't been set yet but SESSION is known,
+  # derive it now so subcommands like `stop` and `attach` (which don't go
+  # through the full cmd_start setup) still use the right socket.
+  if [[ -z "$TMUX_SOCKET" && -n "$SESSION" ]]; then
+    _resolve_tmux_socket
+  fi
+  if [[ "$TMUX_SOCKET" == "shared" || -z "$TMUX_SOCKET" ]]; then
+    command tmux "$@"
+  else
+    command tmux -L "$TMUX_SOCKET" "$@"
+  fi
+}
+
 log() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
     | tee -a "$LOG_FILE" >&2
 }
 
-err() { echo "error: $*" >&2; }
+err() {
+  # Write to BOTH stderr (for interactive use) AND $LOG_FILE (so daemonized
+  # supervisors that have stderr redirected to /dev/null still leave a trail
+  # of why they refused to start). Before 2026-05-15 this only went to stderr,
+  # causing every guard-rejection (resource budget, pane budget, load gate,
+  # disk quota, etc.) to vanish silently when the daemon was forked with
+  # `nohup ... 2>&1` — surfaced as "dashboard already running then nothing".
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    printf '[%s] error: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE" >&2
+  else
+    echo "error: $*" >&2
+  fi
+}
 
 session_start_lock_dir() {
   local safe
@@ -1078,7 +1163,9 @@ PY
     printf -v dash_shell 'exec %q --port %q --lines %q --refresh %q >> %q 2>&1' \
       "$DASHBOARD_CMD" "$DASHBOARD_PORT" "$DASHBOARD_LINES" "$DASHBOARD_REFRESH" "$DASHBOARD_LOG"
     tmux kill-session -t "$DASHBOARD_SESSION" 2>/dev/null || true
-    tmux new-session -d -s "$DASHBOARD_SESSION" "$dash_shell"
+    # Close fd 9 (node start lock) for the dashboard tmux session — see
+    # create_tmux_session_panes for the rationale (tmux server inheritance).
+    tmux new-session -d -s "$DASHBOARD_SESSION" "$dash_shell" 9<&-
     tmux display-message -p -t "$DASHBOARD_SESSION" '#{pane_pid}' > "$DASHBOARD_PID_FILE" 2>/dev/null || true
   else
     nohup "$DASHBOARD_CMD" \
@@ -1524,7 +1611,7 @@ ensure_ceo_prompt() {
   elif [[ ! -f "$doc" && -f "docs/parallel-sessions/general-manager.md" ]]; then
     doc="$(absolute_file_path "docs/parallel-sessions/general-manager.md")"
   fi
-  local prompt="/goal You are PANE ${idx}, lane CEO. Read ${doc}, docs/company-operating-model.md, docs/ai-factory.md, docs/ceo-staffing.md, docs/parallel-sessions/TEAM_PLAN.md (create if absent). Step 1: assess workload and node resources. Step 2: run csup staff --dry-run, review output. Step 3: run csup staff --apply if understaffed. Step 4: queue decisions in codex-tasks/ceo.txt. Step 5: send manager updates."
+  local prompt="/goal You are PANE ${idx}, lane CEO. Read ${doc}, docs/company-operating-model.md, docs/ai-factory.md, docs/ceo-staffing.md, docs/parallel-sessions/TEAM_PLAN.md. decide teams, priorities, staffing, escalations; run csup staff; queue decisions in codex-tasks/ceo.txt; send manager updates."
   validate_prompt_line "$prompt" "generated-ceo" 1 || exit 1
   PROMPTS+=("$prompt")
   LANE_LABELS+=("CEO")
@@ -1610,8 +1697,14 @@ load_prompts() {
         err "no generated prompts requested"; exit 1
       fi
       if (( MAX_PANES > 0 && ${#PROMPTS[@]} > MAX_PANES )); then
+        if truthy "$TRUNCATE_PROMPTS"; then
+          log "WARNING: generated prompt set has ${#PROMPTS[@]} prompts; truncating to first ${MAX_PANES} (TRUNCATE_PROMPTS=1)"
+          PROMPTS=("${PROMPTS[@]:0:$MAX_PANES}")
+          LANE_LABELS=("${LANE_LABELS[@]:0:$MAX_PANES}")
+        else
         err "generated prompt set has ${#PROMPTS[@]} prompts; run at most ${MAX_PANES} panes per supervisor session"
         exit 1
+        fi
       fi
       return 0
     fi
@@ -1653,9 +1746,17 @@ load_prompts() {
     err "no prompts found in $PROMPTS_FILE"; exit 1
   fi
   if (( MAX_PANES > 0 && ${#PROMPTS[@]} > MAX_PANES )); then
-    err "$PROMPTS_FILE has ${#PROMPTS[@]} prompts; run at most ${MAX_PANES} panes per supervisor session"
-    err "right-size the lane subset; with csup, keep the total project panes within the same cap across hosts"
-    exit 1
+    if truthy "$TRUNCATE_PROMPTS"; then
+      local _dropped=$(( ${#PROMPTS[@]} - MAX_PANES ))
+      log "WARNING: $PROMPTS_FILE has ${#PROMPTS[@]} prompts; CODEX_SUPERVISOR_TRUNCATE_PROMPTS=1 — truncating to first ${MAX_PANES} (${_dropped} dropped)"
+      PROMPTS=("${PROMPTS[@]:0:$MAX_PANES}")
+      LANE_LABELS=("${LANE_LABELS[@]:0:$MAX_PANES}")
+    else
+      err "$PROMPTS_FILE has ${#PROMPTS[@]} prompts; run at most ${MAX_PANES} panes per supervisor session"
+      err "right-size the lane subset; with csup, keep the total project panes within the same cap across hosts"
+      err "or set CODEX_SUPERVISOR_TRUNCATE_PROMPTS=1 to auto-truncate to the first ${MAX_PANES} lanes"
+      exit 1
+    fi
   fi
 }
 
@@ -1801,6 +1902,18 @@ _open_in_terminal() {
 
 # Apply tmux configuration to make the session easy to control.
 apply_tmux_config() {
+  # Prevent the user-level tmux server from auto-exiting when all sessions
+  # transiently die (which happens under resource pressure during recreate
+  # cycles). Without exit-empty=off, the supervisor's recreate path races
+  # the server shutdown: it tries to tmux split-window after the server has
+  # already exited, fails, exits 1, and the crash-restart loop never finds
+  # the server in a usable state.
+  #
+  # exit-empty is a SERVER option, so it resets when the server dies. We
+  # also create a hidden sentinel session that holds the server up across
+  # transient empty states — see ensure_sentinel_session below.
+  tmux set-option -s exit-empty off >/dev/null 2>&1 || true
+  ensure_sentinel_session
   # Cosmetic + speed
   tmux set-option -t "$SESSION" -g status off >/dev/null 2>&1 || true
   # Keep dead panes visible so we can diagnose why a codex exited (instead
@@ -1910,6 +2023,22 @@ apply_pane_titles() {
   done
 }
 
+# Keep a hidden, do-nothing tmux session alive at all times so the tmux
+# server cannot transiently exit when all real sessions die under load.
+# Without this, the server's `exit-empty off` setting is moot — the option
+# resets when the server dies, and the next `tmux new-session` starts a
+# fresh server with defaults that may then exit again. The sentinel is a
+# tiny shell sleeping forever, costing nothing but holding the server up.
+ensure_sentinel_session() {
+  local sentinel="_csup_sentinel_"
+  tmux has-session -t "=$sentinel" 2>/dev/null && return 0
+  # `sleep infinity` is widely portable; keeps a pane open without consuming CPU.
+  tmux new-session -d -s "$sentinel" "sleep infinity" 9<&- 2>/dev/null || true
+  # Re-assert exit-empty off whenever we (re)create the sentinel — covers the
+  # case where the server died and was just restarted with default options.
+  tmux set-option -s exit-empty off >/dev/null 2>&1 || true
+}
+
 pane_dead() {
   local target="$1"
   [[ "$(tmux display-message -p -t "$target" '#{pane_dead}' 2>/dev/null)" == "1" ]]
@@ -1994,7 +2123,14 @@ wait_ready_and_send() {
       if send_prompt_to_pane "$target" "$prompt"; then
         log "[pane $i ${LANE_LABELS[$i]}] sent + verified active: $(printf '%.60s' "$prompt")..."
       else
-        log "[pane $i ${LANE_LABELS[$i]}] sent but UNCONFIRMED (retries exhausted): $(printf '%.60s' "$prompt")..."
+        # UNCONFIRMED means Codex received the keystrokes but the supervisor
+        # could not detect Working/Pursuing within ~30s. Historically we left
+        # the pane in this limbo state; this hung research/polish supervisors
+        # when many panes hit UNCONFIRMED at once and never recovered. Force a
+        # fresh respawn so the pane returns to a known state rather than
+        # silently stalling.
+        log "[pane $i ${LANE_LABELS[$i]}] sent but UNCONFIRMED (retries exhausted) — respawning: $(printf '%.60s' "$prompt")..."
+        respawn_pane_and_prompt "$i" "$prompt" "send unconfirmed"
       fi
       return 0
     fi
@@ -2004,10 +2140,41 @@ wait_ready_and_send() {
   return 1
 }
 
+# Returns 0 if respawn is allowed now, 1 if the rate limiter says wait.
+# The cascade-prevention logic: under resource pressure many panes die in
+# quick succession; respawning them all immediately re-triggers the same
+# resource exhaustion (kernel-level Codex/Node crashes) that killed them.
+# Bursting >RESPAWN_BURST_LIMIT respawns inside RESPAWN_BURST_WINDOW_SECS
+# trips a cooldown so the next death wave doesn't compound.
+respawn_rate_limit_check() {
+  local now; now=$(date +%s)
+  if (( RESPAWN_BACKOFF_UNTIL > now )); then
+    return 1
+  fi
+  # Drop timestamps older than the window.
+  local cutoff=$(( now - RESPAWN_BURST_WINDOW_SECS ))
+  local kept=() ts
+  for ts in "${RESPAWN_TIMES[@]}"; do
+    (( ts >= cutoff )) && kept+=("$ts")
+  done
+  RESPAWN_TIMES=("${kept[@]}")
+  if (( ${#RESPAWN_TIMES[@]} >= RESPAWN_BURST_LIMIT )); then
+    RESPAWN_BACKOFF_UNTIL=$(( now + RESPAWN_BACKOFF_SECS ))
+    log "respawn burst limit hit (${#RESPAWN_TIMES[@]}/${RESPAWN_BURST_LIMIT} in ${RESPAWN_BURST_WINDOW_SECS}s); backing off for ${RESPAWN_BACKOFF_SECS}s to avoid cascade"
+    return 1
+  fi
+  RESPAWN_TIMES+=("$now")
+  return 0
+}
+
 respawn_pane_and_prompt() {
   local i="$1" prompt="$2" reason="${3:-respawn}" target now pane_cmd
   target=$(pane_target "$i")
   now=$(date +%s)
+  if ! respawn_rate_limit_check; then
+    log "[pane $i ${LANE_LABELS[$i]}] ${reason}; respawn DEFERRED (rate limit / cascade backoff)"
+    return 0
+  fi
   log "[pane $i ${LANE_LABELS[$i]}] ${reason}; respawning + resending prompt"
   terminate_pane_process_tree "$target" "pane $i ${LANE_LABELS[$i]} before respawn"
   pane_cmd=$(codex_command_for_pane "$i") || return 1
@@ -2500,7 +2667,13 @@ fork_supervisor_daemon() {
   [[ "$mode" == "reattach" ]] && fork_args+=("--reattach")
   [[ -n "$PROMPTS_FILE" ]] && fork_args+=("--prompts" "$PROMPTS_FILE")
   log "forking supervisor daemon${mode:+ ($mode)}..."
-  nohup bash "$0" "${fork_args[@]}" >/dev/null 2>&1 &
+  # 2026-05-15: daemon stderr was previously redirected to /dev/null, hiding
+  # silent `exit 1` paths (resource-budget refusals, tmux failures, syntax
+  # errors). Send stderr to a sibling .stderr.log alongside the main log so
+  # post-mortems are possible.
+  local _stderr_log="${LOG_FILE%.log}.stderr.log"
+  mkdir -p "$(dirname "$_stderr_log")" 2>/dev/null || true
+  nohup bash "$0" "${fork_args[@]}" >/dev/null 2>>"$_stderr_log" &
   local daemon_pid=$!
   mkdir -p "$(dirname "$DAEMON_PID_FILE")" 2>/dev/null || true
   printf '%s\n' "$daemon_pid" > "$DAEMON_PID_FILE" 2>/dev/null || true
@@ -2670,6 +2843,101 @@ ensure_disk_space() {
     log "WARNING: only ${free}G free on $(pwd); consider running: $0 cleanup"
   fi
   return 0
+}
+
+# Count panes across ALL tmux servers (sockets) for the current user
+# (excluding the current session, since its prior tmux instance will be
+# replaced). With per-session sockets each session has its own server, so
+# `tmux ls` on our own socket can't see peer sessions — we must enumerate
+# every csup-managed socket and ask each.
+count_node_panes_excluding_self() {
+  local total=0 self_socket="$TMUX_SOCKET" sock_dir sock panes sess
+  # tmux puts sockets in $TMUX_TMPDIR/tmux-$UID/ (default $TMUX_TMPDIR=/tmp)
+  sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+  [[ -d "$sock_dir" ]] || { echo 0; return; }
+  for sock in "$sock_dir"/*; do
+    [[ -S "$sock" ]] || continue
+    local sname; sname=$(basename "$sock")
+    # Skip our own socket: this session's prior tmux instance is about to be
+    # replaced by the start. In shared mode the self_socket is empty so we
+    # fall through to filtering by session name below.
+    if [[ -n "$self_socket" && "$sname" == "$self_socket" ]]; then
+      continue
+    fi
+    while IFS= read -r sess_panes; do
+      local s_name; s_name="${sess_panes%%:*}"
+      local s_count; s_count="${sess_panes#*:}"
+      # In shared mode (or unsharded sockets) also filter the self session by name.
+      if [[ -z "$self_socket" || "$self_socket" == "shared" ]] \
+         && [[ "$s_name" == "$SESSION" ]]; then
+        continue
+      fi
+      total=$(( total + s_count ))
+    done < <(command tmux -L "$sname" list-sessions -F '#{session_name}:#{session_attached_or_zero}' 2>/dev/null \
+             | while IFS= read -r line; do
+                 local nm; nm="${line%%:*}"
+                 local n; n=$(command tmux -L "$sname" list-panes -t "$nm" 2>/dev/null | wc -l | tr -d ' ')
+                 echo "$nm:${n:-0}"
+               done)
+  done
+  echo "$total"
+}
+
+# Refuse to add a new session if the node-wide pane count would exceed the
+# safe ceiling. RLIMIT_NPROC on LUNARC is 4096 and each pane spawns ~4-8
+# processes, so 40 panes/node keeps headroom even under peak respawn.
+ensure_node_pane_budget() {
+  local incoming="${1:-${#PROMPTS[@]}}"
+  (( NODE_MAX_PANES <= 0 )) && return 0
+  local existing; existing=$(count_node_panes_excluding_self)
+  local total=$(( existing + incoming ))
+  if (( total > NODE_MAX_PANES )); then
+    err "node pane budget exceeded: ${existing} existing pane(s) + ${incoming} new = ${total} > ${NODE_MAX_PANES} (CODEX_SUPERVISOR_NODE_MAX_PANES)"
+    err "reduce panes per session, stop an idle session, or raise CODEX_SUPERVISOR_NODE_MAX_PANES only if RLIMIT_NPROC allows"
+    return 1
+  fi
+  if (( incoming >= 4 )); then
+    log "node pane budget ok: ${existing} existing + ${incoming} new = ${total}/${NODE_MAX_PANES}"
+  fi
+  return 0
+}
+
+# Path to the node-wide startup lock. One per host so each compute node has
+# its own serialization point.  Use shared scratch on LUNARC (where /tmp may
+# be node-local but the supervisor may be invoked from any node), else /tmp.
+node_start_lock_path() {
+  local node base
+  node=$(hostname -s 2>/dev/null || hostname)
+  if [[ -d "/local" && -w "/local" ]]; then
+    base="/local/codex-supervisor-${USER:-unknown}"
+  else
+    base="${TMPDIR:-/tmp}/codex-supervisor-${USER:-unknown}"
+  fi
+  mkdir -p "$base" 2>/dev/null || true
+  echo "$base/start-lock.${node}"
+}
+
+# Acquire a node-wide startup lock so only one supervisor at a time runs the
+# create-panes+send-prompts phase. Prevents the parallel-bootstrap fork burst
+# that today crashed 24 panes at startup with "pthread_create: Resource
+# temporarily unavailable". flock with NODE_START_LOCK_SECS timeout; if the
+# lock can't be acquired in that window the caller proceeds anyway (better
+# overlapping startup than a deadlock).
+acquire_node_start_lock() {
+  (( NODE_START_LOCK_SECS <= 0 )) && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  local lock; lock=$(node_start_lock_path)
+  exec 9>"$lock" 2>/dev/null || return 0
+  if flock -w "$NODE_START_LOCK_SECS" 9; then
+    log "node start lock acquired: $lock"
+    return 0
+  fi
+  log "WARNING: could not acquire node start lock within ${NODE_START_LOCK_SECS}s; proceeding without serialisation"
+  return 0
+}
+
+release_node_start_lock() {
+  exec 9>&- 2>/dev/null || true
 }
 
 # Prune git worktrees not actively in use, plus npm caches, plus old
@@ -2848,6 +3116,7 @@ cmd_start() {
     esac
   done
   refresh_session_paths
+  _resolve_tmux_socket
 
   # Kill-switch: refuse to start if the user has disabled this session
   # (or all sessions). Removing the file re-enables. This prevents stale
@@ -2868,20 +3137,29 @@ cmd_start() {
   # Self-restart loop: if _start_supervisor_main exits with a non-zero code
   # (crash), wait 5 s and try again without killing the live tmux session.
   # A clean stop (INT/TERM) exits 0 and breaks the loop immediately.
+  #
+  # IMPORTANT: _start_supervisor_main calls `exit 1` for transient resource
+  # failures (lock acquisition, budget checks, tmux pane creation) and
+  # `exit 2` from the ERR trap on a crash. `exit` in bash terminates the
+  # entire process, which would kill THIS while loop. Run it in a subshell
+  # so the exit is scoped — the subshell dies, the outer loop survives.
   if (( daemon_mode )); then
     local _restart_count=0 _rc=0
     (( reattach_mode )) && _restart_count=1
     while true; do
-      _start_supervisor_main "$_restart_count"
+      ( _start_supervisor_main "$_restart_count" )
       _rc=$?
       (( _rc == 0 )) && break   # clean stop — don't restart
       _restart_count=$(( _restart_count + 1 ))
-      if (( _restart_count > 10 )); then
+      if (( _restart_count > 20 )); then
         log "daemon crashed $_restart_count times consecutively; giving up"
         break
       fi
-      log "daemon crashed (exit $_rc); restart #$_restart_count in 5s..."
-      sleep 5
+      # Exponential backoff: transient resource issues clear on their own,
+      # but persistent failure shouldn't burn fork() at 5s intervals.
+      local _backoff=$(( 5 * (_restart_count < 6 ? 1 : (_restart_count < 12 ? 3 : 6)) ))
+      log "daemon crashed (exit $_rc); restart #$_restart_count in ${_backoff}s..."
+      sleep "$_backoff"
     done
     return
   fi
@@ -2901,6 +3179,14 @@ cmd_start() {
   if (( ! session_running )); then
     load_prompts
     if ! ensure_start_resource_budget; then
+      release_session_start_lock
+      exit 1
+    fi
+    # Cross-session pane budget. Multiple supervisors on the same node share
+    # RLIMIT_NPROC; this check refuses a new session when the total pane count
+    # would push the node into the territory where panes crash with
+    # "pthread_create: Resource temporarily unavailable" at startup.
+    if ! ensure_node_pane_budget; then
       release_session_start_lock
       exit 1
     fi
@@ -3014,8 +3300,15 @@ _start_supervisor_main() {
     if ! tmux has-session -t "=$SESSION" 2>/dev/null || (( ${#PANE_IDX[@]} == 0 )); then
       log "session gone or empty — rebuilding from scratch"
       ensure_start_resource_budget || exit 1
+      ensure_node_pane_budget || exit 1
       write_state_file
-      create_tmux_session_panes 1 || exit 1
+      acquire_node_start_lock
+      create_tmux_session_panes 1 || { release_node_start_lock; exit 1; }
+      # Release the lock BEFORE prompt_all_panes spawns background subshells.
+      # Those subshells would inherit fd 9 and hold the node-wide lock for the
+      # full ready-wait window (up to READY_TIMEOUT per pane), blocking peer
+      # sessions far longer than the pane-creation phase actually needs.
+      release_node_start_lock
       prompt_all_panes
     else
       # Session and panes still live — just reset tracking arrays and resume.
@@ -3028,10 +3321,14 @@ _start_supervisor_main() {
     fi
   else
     ensure_start_resource_budget || exit 1
+    ensure_node_pane_budget || exit 1
     write_state_file
-    create_tmux_session_panes 1 || exit 1
+    acquire_node_start_lock
+    create_tmux_session_panes 1 || { release_node_start_lock; exit 1; }
     log "session '$SESSION': ${#PROMPTS[@]} panes (lanes: ${LANE_LABELS[*]})"
     log "prompts: $PROMPTS_FILE"
+    # Release before prompt_all_panes — see comment above on subshell inheritance.
+    release_node_start_lock
     prompt_all_panes
   fi
 
@@ -3074,7 +3371,18 @@ create_tmux_session_panes() {
   fi
   local pane_cmd
   pane_cmd=$(codex_command_for_pane 0) || return 1
-  tmux new-session -d -s "$SESSION" -x "$(tmux_window_x)" -y "$(tmux_window_y)" "$pane_cmd"
+  # Ensure a tmux server is up with the right options BEFORE creating our
+  # session. Without this, a freshly-started server has exit-empty=on
+  # (default) which racy-exits if our new session dies during the spawn
+  # window. ensure_sentinel_session also creates a permanent placeholder
+  # session that holds the server up across transient empty states.
+  ensure_sentinel_session
+  # CRITICAL: close fd 9 (node start lock) for this command. tmux new-session
+  # forks the tmux server, which would otherwise inherit fd 9 and hold the
+  # node-wide lock for the entire server lifetime — blocking every other
+  # supervisor session on the node indefinitely. The bash process still owns
+  # fd 9; only the forked tmux server is denied inheritance.
+  tmux new-session -d -s "$SESSION" -x "$(tmux_window_x)" -y "$(tmux_window_y)" "$pane_cmd" 9<&-
   # Some cluster/login environments set tmux base-index=1. The supervisor and
   # dashboard intentionally use window 0 as the stable session window, so move
   # the newly created window to 0 before any split/capture operations.
@@ -3127,11 +3435,23 @@ recreate_missing_session() {
     log "recreate deferred: resource budget check failed"
     return 1
   fi
+  # Cross-session pane budget gate: if the node is still saturated from peer
+  # sessions (the most likely reason this session crashed in the first place),
+  # defer the recreate so we don't trigger another fork-burst cascade.
+  if ! ensure_node_pane_budget; then
+    log "recreate deferred: node pane budget exceeded; will retry next poll"
+    return 1
+  fi
+  acquire_node_start_lock
   if ! create_tmux_session_panes 0; then
+    release_node_start_lock
     log "recreate failed: could not rebuild tmux panes"
     return 1
   fi
   log "recreated tmux session '$SESSION'; re-sending ${#PROMPTS[@]} prompt(s)"
+  # Release before prompt_all_panes — see comment in cmd_start re. subshell
+  # inheritance of fd 9 holding the lock across the full ready-wait window.
+  release_node_start_lock
   prompt_all_panes
 }
 
