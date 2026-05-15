@@ -97,5 +97,10 @@ assert merged["lunarc"]["ssh"] == "lunarc", merged
 effective = mod.effective_hosts_for_instance(hosts, "lunarc", projects[0]["hosts"]["lunarc"])
 assert effective["lunarc"]["ssh"] == "lunarc-project-alias", effective
 assert effective["lunarc"]["scheduler"] == "slurm", effective
+instances = mod.project_instances(projects[0])
+assert instances[0]["ssh"] == "lunarc-project-alias", instances
+effective_from_instance = mod.effective_hosts_for_instance(hosts, instances[0]["host"], instances[0])
+assert effective_from_instance["lunarc"]["ssh"] == "lunarc-project-alias", effective_from_instance
+assert effective_from_instance["lunarc"]["scheduler"] == "slurm", effective_from_instance
 print("ok: dashboard discovers registered/cache project roots when directory scans are unavailable")
 PY
