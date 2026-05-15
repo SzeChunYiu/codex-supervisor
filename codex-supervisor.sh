@@ -72,6 +72,8 @@
 #   CODEX_SUPERVISOR_GM_DOC          backwards-compatible alias for CODEX_SUPERVISOR_CEO_DOC
 #   CODEX_SUPERVISOR_MANAGER         1 = append a generated team MANAGER lane if missing (default: 0)
 #   CODEX_SUPERVISOR_MANAGER_DOC     team manager markdown path
+#   CODEX_SUPERVISOR_REVIEWER        1 = append a generated REVIEWER lane if missing (default: 0)
+#   CODEX_SUPERVISOR_REVIEWER_DOC    team reviewer markdown path
 #   CODEX_SUPERVISOR_DEBUGGER        1 = append a generated DEBUG lane if missing (default: 0)
 #   CODEX_SUPERVISOR_DEBUGGER_DOC    debugger markdown path
 #   CODEX_SUPERVISOR_VALIDATOR       1 = append a generated VALIDATOR lane if missing (default: CODEX_SUPERVISOR_PLANNER or 0)
@@ -209,6 +211,10 @@ MANAGER_ENABLED="${CODEX_SUPERVISOR_MANAGER:-${CODEX_SUPERVISOR_TEAM_MANAGER:-0}
 MANAGER_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_MANAGER+x}${CODEX_SUPERVISOR_TEAM_MANAGER+x}"
 MANAGER_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/general-manager.md"
 MANAGER_DOC="${CODEX_SUPERVISOR_MANAGER_DOC:-${CODEX_SUPERVISOR_TEAM_MANAGER_DOC:-$MANAGER_DOC_DEFAULT}}"
+REVIEWER_ENABLED="${CODEX_SUPERVISOR_REVIEWER:-0}"
+REVIEWER_ENABLED_EXPLICIT="${CODEX_SUPERVISOR_REVIEWER+x}"
+REVIEWER_DOC_DEFAULT="$SUPERVISOR_DOC_ROOT/parallel-sessions/reviewer.md"
+REVIEWER_DOC="${CODEX_SUPERVISOR_REVIEWER_DOC:-$REVIEWER_DOC_DEFAULT}"
 # Backwards-compatible variable names for scripts that still refer to the old
 # GM fixed slot.
 GM_ENABLED="$CEO_ENABLED"
@@ -943,11 +949,22 @@ try:
         payload = json.loads(r.read().decode("utf-8"))
     if "status" not in payload or "panes" not in payload:
         raise SystemExit(1)
+    # 2026-05-15: NEVER replace a dashboard that is actively serving projects.
+    # The old sha256/path strictness below killed a healthy, project-serving
+    # dashboard whenever the checkout changed (constant during development) and
+    # relaunched a replacement that — on macOS — lacked Full Disk Access and
+    # then showed zero projects. A dashboard that can see projects is by
+    # definition healthy and FDA-capable; keep it regardless of binary identity.
+    try:
+        serving = int(payload.get("projects") or 0) > 0
+    except (TypeError, ValueError):
+        serving = False
+    if serving:
+        raise SystemExit(0)
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     source_path = str(source.get("path") or "")
-    # A response from any csup-dashboard binary is not good enough: localhost
-    # must be traceably served by the dashboard command this checkout selected.
-    # Otherwise an old ~/bin copy can silently occupy the port and mask fixes.
+    # Not serving any project — only now apply the strict upgrade checks so a
+    # genuinely broken/stale/foreign instance can be replaced.
     if not source_path or os.path.realpath(source_path) != expected_cmd:
         raise SystemExit(1)
     expected_sha = hashlib.sha256(open(expected_cmd, "rb").read()).hexdigest()[:16]
@@ -1473,6 +1490,7 @@ write_state_file() {
     echo "CEO_ENABLED=${CEO_ENABLED}"
     echo "GM_ENABLED=${CEO_ENABLED}"
     echo "MANAGER_ENABLED=${MANAGER_ENABLED}"
+    echo "REVIEWER_ENABLED=${REVIEWER_ENABLED}"
     echo "DEBUGGER_ENABLED=${DEBUGGER_ENABLED}"
     echo "VALIDATOR_ENABLED=${VALIDATOR_ENABLED}"
     echo "DYNAMIC_WORKERS=${DYNAMIC_WORKERS}"
@@ -1508,6 +1526,10 @@ apply_prompt_runtime_state() {
   if [[ -z "$MANAGER_ENABLED_EXPLICIT" ]]; then
     v=$(state_value "MANAGER_ENABLED")
     [[ -n "$v" ]] && MANAGER_ENABLED="$v"
+  fi
+  if [[ -z "$REVIEWER_ENABLED_EXPLICIT" ]]; then
+    v=$(state_value "REVIEWER_ENABLED")
+    [[ -n "$v" ]] && REVIEWER_ENABLED="$v"
   fi
   if [[ -z "$DEBUGGER_ENABLED_EXPLICIT" ]]; then
     v=$(state_value "DEBUGGER_ENABLED")
@@ -1553,6 +1575,15 @@ prompt_has_manager_lane() {
   for label in "${LANE_LABELS[@]:-}"; do
     lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
     [[ "$lc" == "manager" || "$lc" == "team-manager" || "$lc" == "lead" || "$lc" == "leader" ]] && return 0
+  done
+  return 1
+}
+
+prompt_has_reviewer_lane() {
+  local label lc
+  for label in "${LANE_LABELS[@]:-}"; do
+    lc=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    [[ "$lc" == "reviewer" || "$lc" == reviewer-* || "$lc" == *-reviewer ]] && return 0
   done
   return 1
 }
@@ -1633,6 +1664,20 @@ ensure_manager_prompt() {
   LANE_LABELS+=("MANAGER")
 }
 
+ensure_reviewer_prompt() {
+  (( REVIEWER_ENABLED )) || return 0
+  prompt_has_reviewer_lane && return 0
+  local idx="${#PROMPTS[@]}"
+  local doc="$REVIEWER_DOC"
+  if [[ ! -f "$doc" && -f "docs/parallel-sessions/reviewer.md" ]]; then
+    doc="$(absolute_file_path "docs/parallel-sessions/reviewer.md")"
+  fi
+  local prompt="/goal You are PANE ${idx}, lane REVIEWER. Read ${doc}; test one user path, file defects, and verify workspace-contract compliance."
+  validate_prompt_line "$prompt" "generated-reviewer" 1 || exit 1
+  PROMPTS+=("$prompt")
+  LANE_LABELS+=("REVIEWER")
+}
+
 ensure_debugger_prompt() {
   (( DEBUGGER_ENABLED )) || return 0
   prompt_has_debugger_lane && return 0
@@ -1690,6 +1735,7 @@ load_prompts() {
       PROMPTS=(); LANE_LABELS=()
       ensure_ceo_prompt
       ensure_manager_prompt
+      ensure_reviewer_prompt
       ensure_debugger_prompt
       ensure_planner_prompt
       ensure_dynamic_worker_prompts
@@ -1739,6 +1785,7 @@ load_prompts() {
   fi
   ensure_ceo_prompt
   ensure_manager_prompt
+  ensure_reviewer_prompt
   ensure_debugger_prompt
   ensure_planner_prompt
   ensure_dynamic_worker_prompts

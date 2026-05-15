@@ -16,6 +16,7 @@ PROMPTS
 labels="$(
   CODEX_SUPERVISOR_TEST_SOURCE=1 \
   CODEX_SUPERVISOR_PROMPTS="$TMPDIR/prompts.txt" \
+  CODEX_SUPERVISOR_CEO=0 \
   CODEX_SUPERVISOR_DEBUGGER=0 \
   CODEX_SUPERVISOR_PLANNER=0 \
   CODEX_SUPERVISOR_LANES='perf,WORKER-B' \
@@ -28,21 +29,21 @@ expected=$'PERF\nworker-b'
   exit 1
 }
 
-planner_prompt="$(
+ceo_prompt="$(
   CODEX_SUPERVISOR_TEST_SOURCE=1 \
   CODEX_SUPERVISOR_PROMPTS="$TMPDIR/prompts.txt" \
-  CODEX_SUPERVISOR_DEBUGGER=0 \
   CODEX_SUPERVISOR_LANES='bugs,worker-a' \
   bash -c 'source "$1"; load_prompts; last=$((${#PROMPTS[@]} - 1)); printf "%s\n" "${PROMPTS[$last]}"' _ "$SCRIPT"
 )"
 
-if [[ "$planner_prompt" != "/goal You are PANE 2, lane VALIDATOR."* ]]; then
-  printf 'generated validator should be indexed after filtered lanes, got:\n%s\n' "$planner_prompt" >&2
+if [[ "$ceo_prompt" != "/goal You are PANE 2, lane CEO."* ]]; then
+  printf 'generated CEO should be indexed after filtered lanes, got:\n%s\n' "$ceo_prompt" >&2
   exit 1
 fi
 
 if CODEX_SUPERVISOR_TEST_SOURCE=1 \
    CODEX_SUPERVISOR_PROMPTS="$TMPDIR/prompts.txt" \
+   CODEX_SUPERVISOR_CEO=0 \
    CODEX_SUPERVISOR_DEBUGGER=0 \
    CODEX_SUPERVISOR_PLANNER=0 \
    CODEX_SUPERVISOR_LANES='missing' \

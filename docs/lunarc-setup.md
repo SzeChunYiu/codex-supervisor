@@ -220,6 +220,8 @@ slurm_cpus = "40"
 slurm_mem = "200G"
 slurm_slots = "2"       # station may book csup job names: mcaccel-sup, mcaccel-sup-2
 slurm_max_panes = "24"  # conservative pane capacity per allocation
+slurm_start_batch_size = "32"  # supervisor starts per persistent srun step
+slurm_start_stagger_secs = "2" # delay between starts inside a batch
 slurm_workdir = "/projects/hep/fs10/shared/nnbar/billy/mcaccel-supervisor"
 slurm_output = "/projects/hep/fs10/shared/nnbar/billy/mcaccel-supervisor/holder.%j.log"
 remote_env = "source /projects/hep/fs10/shared/codex-tooling/env-shared.sh"
@@ -260,16 +262,44 @@ AI sessions should not pick LUNARC nodes themselves. They should ask the
 station for capacity:
 
 ```bash
+csup factory-run <project> --host=lunarc --scenario=resume --dry-run
+csup factory-run <project> --host=lunarc --scenario=resume --apply
 csup station <project> --host=lunarc --sessions=1 --workers=4 --dry-run
 csup station <project> --host=lunarc --sessions=1 --workers=4 --apply
 ```
+
+Prefer `factory-run` when resuming an AI factory from queues: it counts queued
+`/goal` work, refuses no-work launches, selects a conservative worker/session
+budget, then delegates to `station`. Use raw `station` only when the operator
+already knows the exact session and worker counts.
 
 `station` first uses running holder allocations when they have enough free pane
 room. If the current allocation is full, it submits the next configured slot
 (`slurm_job_name-2`, `slurm_job_name-3`, up to `slurm_slots`). If the new holder
 job remains queued after `CSUP_SLURM_WAIT_SECS`, it reports a `HOLD` with
 `reason=slurm_queue` and starts no workers. This is intentional: the login node
-is only a scheduler/control endpoint, never a Codex compute target.
+is only a scheduler/control endpoint, never a Codex compute target. Per-project
+LUNARC usage is capped at two computer nodes by default. Use `slurm_max_panes`,
+`CODEX_SUPERVISOR_MAX_LOAD_PER_CPU`, and queue depth to pack safe pane counts
+onto those two allocations; do not create a third holder for the same project.
+
+For high-density runs, `station` batches supervisor starts on each running
+allocation. A request for many sessions can therefore use one persistent
+`srun --overlap` launcher per batch instead of one `srun` job step per session,
+which reduces SLURM step/fork pressure when the total pane count is above 100.
+Use host `slurm_start_batch_size` or env `CSUP_STATION_START_BATCH_SIZE` to
+lower the batch size if the launch command becomes too large; the default is 32
+sessions per persistent step. Starts inside each batch are serialized with a
+small delay (`slurm_start_stagger_secs` or `CSUP_STATION_START_STAGGER_SECS`,
+default 2 seconds) to avoid creating a second fork storm inside the compute
+allocation.
+
+LUNARC login-node safety is fail-closed. LUNARC host stanzas must set
+`scheduler = "slurm"`; otherwise `csup start` refuses to run. Every persistent
+launcher also checks that `SLURM_JOB_ID` is present inside the `srun` payload
+before starting tmux/Codex. If no allocation is running and the scheduler keeps
+the holder queued, `station` reports `HOLD` rather than spawning on the login
+node.
 
 ## Isolation policy
 

@@ -27,18 +27,16 @@ with tempfile.TemporaryDirectory() as d:
     lanes = mod.parse_lanes(prompts)
     assert lanes[0] == "bugs", lanes
     assert lanes[1] == "perf", lanes
-    assert lanes[2] == "DEBUG", lanes
-    assert lanes[3] == "VALIDATOR", lanes
+    assert 2 not in lanes, lanes
 
 with tempfile.TemporaryDirectory() as d:
     prompts = pathlib.Path(d) / "prompts.txt"
     prompts.write_text(
         "/goal You are PANE 0, lane bugs. Work.\n"
-        "/goal You are PANE 1, lane DEBUG. Work.\n"
-        "/goal You are PANE 2, lane VALIDATOR. Work.\n"
+        "/goal You are PANE 1, lane CEO. Work.\n"
     )
     lanes = mod.parse_lanes(prompts)
-    assert lanes == {0: "bugs", 1: "DEBUG", 2: "VALIDATOR"}, lanes
+    assert lanes == {0: "bugs", 1: "CEO"}, lanes
 
-print("ok: dashboard labels generated DEBUG/VALIDATOR panes")
+print("ok: dashboard labels generated CEO panes")
 PY

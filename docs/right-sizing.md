@@ -13,7 +13,7 @@ the point where the server crashes. Wrong-sizing isn't free — it directly
 causes the chronic "tmux server died, all sessions lost" failure mode.
 
 `codex-supervisor` enforces a per-session ceiling with
-`CODEX_SUPERVISOR_MAX_PANES=8` by default. It also adds two fixed panes by
+`CODEX_SUPERVISOR_MAX_PANES=8` by default. It also adds three fixed panes by
 default (`DEBUG` and `VALIDATOR`), projects per-pane RAM/disk before launch,
 lowers worker CPU priority with `nice`, uses a lean worker `CODEX_HOME`,
 staggers multi-pane startup, caps common native/thread-pool fanout per pane,

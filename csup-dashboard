@@ -36,25 +36,56 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
-PROJECT_SEARCH_DIRS = [
-    pathlib.Path.home() / "Desktop/projects",
-    pathlib.Path("/Users/billy/Desktop/projects"),
-    pathlib.Path("/home/billy/Desktop/projects"),
-    pathlib.Path("/Volumes/MyDrive/nnbar/nnbar/simulation").parent,
-    # ~/Desktop is TCC-protected on macOS — a dashboard process without
-    # Full Disk Access can't iterdir() it. Projects whose real tree lives on
-    # /Volumes/MyDrive are reachable there regardless of TCC.
-    pathlib.Path("/Volumes/MyDrive/projects"),
-    pathlib.Path("/Volumes/MyDrive/projects/Game"),
-]
-# Direct project roots (single dirs, not "scan everything under").
-EXTRA_PROJECT_ROOTS = [
-    pathlib.Path("/Users/billy/Desktop/projects/codex-supervisor"),
-    pathlib.Path("/Users/billy/Desktop/projects/Game/neural_grow-pr-runtime-blockers"),
-    pathlib.Path("/Users/billy/Desktop/projects/Game/neural_grow"),
-    pathlib.Path("/Volumes/MyDrive/nnbar/nnbar/simulation"),
-    pathlib.Path("/Volumes/MyDrive/projects/Game/neural_grow"),
-]
+# Detect when we are running on a LUNARC compute node so the dashboard can use
+# the right config + project locations without manual --project-root flags or
+# HOME overrides on every launch. cn*/cx*/cg* are the SLURM allocation
+# hostnames; on those nodes the user's $HOME is over disk quota and the shared
+# config lives under /projects/hep/fs10/shared/codex-tooling/per-user/$USER.
+def _running_on_lunarc_compute_node() -> bool:
+    try:
+        host = socket.gethostname().split(".", 1)[0]
+    except Exception:
+        return False
+    if not host:
+        return False
+    return host[:2] in {"cn", "cx", "cg"} and host[2:3].isdigit()
+
+if _running_on_lunarc_compute_node():
+    _lunarc_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "scyiu"
+    _lunarc_shared = pathlib.Path(
+        f"/projects/hep/fs10/shared/codex-tooling/per-user/{_lunarc_user}/csup"
+    )
+    _lunarc_shared_hosts = _lunarc_shared / "hosts.toml"
+    if _lunarc_shared_hosts.is_file():
+        HOSTS_FILE = _lunarc_shared_hosts
+    # Search for projects under the standard LUNARC project tree.
+    _lunarc_project_base = pathlib.Path(f"/projects/hep/fs10/shared/nnbar/{_lunarc_user.replace('scyiu', 'billy')}")
+    PROJECT_SEARCH_DIRS = [
+        _lunarc_project_base,
+        pathlib.Path(f"/projects/hep/fs10/shared/nnbar/billy"),
+    ]
+    EXTRA_PROJECT_ROOTS: list[pathlib.Path] = []
+    # $HOME is quota-limited on LUNARC compute nodes — store state files in
+    # the shared project tree instead so the dashboard can find them.
+    STATE_GLOB = _lunarc_project_base / ".csup-state" / ".codex-supervisor-*.state"
+    STATE_GLOB.parent.mkdir(parents=True, exist_ok=True)
+else:
+    PROJECT_SEARCH_DIRS = [
+        pathlib.Path.home() / "Desktop/projects",
+        pathlib.Path("/Users/billy/Desktop/projects"),
+        pathlib.Path("/home/billy/Desktop/projects"),
+        pathlib.Path("/Volumes/MyDrive/nnbar/nnbar/simulation").parent,
+        # ~/Desktop is TCC-protected on macOS — a dashboard process without
+        # Full Disk Access can't iterdir() it. Projects whose real tree lives on
+        # /Volumes/MyDrive are reachable there regardless of TCC.
+        pathlib.Path("/Volumes/MyDrive/projects"),
+        pathlib.Path("/Volumes/MyDrive/projects/Game"),
+    ]
+    # Direct project roots (single dirs, not "scan everything under").
+    EXTRA_PROJECT_ROOTS = [
+        pathlib.Path("/Users/billy/Desktop/projects/codex-supervisor"),
+        pathlib.Path("/Volumes/MyDrive/nnbar/nnbar/simulation"),
+    ]
 DIRECT_PROJECT_FALLBACKS = {
     str(pathlib.Path("/Volumes/MyDrive/nnbar/nnbar/simulation")): {
         "project": {"name": "nnbar"},
@@ -66,7 +97,8 @@ DIRECT_PROJECT_FALLBACKS = {
         },
     },
 }
-STATE_GLOB = pathlib.Path.home() / ".codex-supervisor-*.state"
+if not _running_on_lunarc_compute_node():
+    STATE_GLOB = pathlib.Path.home() / ".codex-supervisor-*.state"
 DEFAULT_TAIL = 12
 DEFAULT_REFRESH = 0.2
 SSH_TIMEOUT = 20
@@ -134,6 +166,13 @@ PROMPT_LANE_CACHE: dict = {}
 PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
 REMOTE_CAPTURE_CACHE_SECS = float(os.environ.get("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", "0.5"))
 REMOTE_CAPTURE_ERROR_RETRY_SECS = float(os.environ.get("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", "15"))
+# How long to keep showing the last-known panes for a session whose host went
+# unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
+# card from the UI even though the work is still running — that's the
+# "dashboard flickering" most users perceive as instability. Default 90s gives
+# the supervisor enough time to recover and the dashboard's next probe to
+# succeed without the user seeing the gap.
+REMOTE_CAPTURE_STICKY_SECS = float(os.environ.get("CSUP_DASHBOARD_REMOTE_CAPTURE_STICKY_SECS", "90"))
 REMOTE_INITIAL_CAPTURE_ASYNC = os.environ.get("CSUP_DASHBOARD_REMOTE_INITIAL_CAPTURE_ASYNC", "1").lower() not in {"0", "false", "no", "off"}
 PROMPT_LANE_CACHE_SECS = float(os.environ.get("CSUP_DASHBOARD_PROMPT_LANE_CACHE_SECS", "60"))
 STATE_CAPTURE_MIN_LINES = int(os.environ.get("CSUP_DASHBOARD_STATE_CAPTURE_MIN_LINES", "80"))
@@ -240,6 +279,109 @@ def toml_read(path: pathlib.Path) -> dict:
                 v = v[1:-1]
             cur[m.group(1)] = v
     return data
+
+
+def toml_read_text(text: str) -> dict:
+    """Same parser as toml_read but operating on an in-memory string. Used by
+    merge_remote_project_hosts to parse a .codex-supervisor.toml fetched via
+    ssh cat without writing it to disk."""
+    data: dict = {}
+    cur = data
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            cur = data
+            for part in s[1:-1].split("."):
+                cur = cur.setdefault(part.strip('"'), {})
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)(\s*#.*)?$', s)
+        if m:
+            v = m.group(2).strip()
+            if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+                v = v[1:-1]
+            cur[m.group(1)] = v
+    return data
+
+
+# Cache fetched remote project tomls so repeated dashboard refreshes do not
+# fire one ssh-cat per refresh. Key: (ssh_target, remote_path). Value:
+# {"ts": float, "hosts": dict}.
+REMOTE_PROJECT_TOML_CACHE: dict[tuple[str, str], dict] = {}
+REMOTE_PROJECT_TOML_CACHE_LOCK = threading.Lock()
+REMOTE_PROJECT_TOML_CACHE_SECS = float(
+    os.environ.get("CSUP_DASHBOARD_REMOTE_TOML_CACHE_SECS", "60")
+)
+
+
+def merge_remote_project_hosts(local_hosts: dict) -> dict:
+    """Look at each host in local_hosts that references a remote SLURM workdir
+    and merge any additional [hosts.*] entries from that remote project's
+    .codex-supervisor.toml into the returned dict. Local entries always win.
+
+    This closes the bootstrap-divergence gap: when the CEO running on a SLURM
+    compute node appends a new [hosts."ng-newteam-lunarc"] entry to the remote
+    project toml, the local Mac copy lags until a human syncs it. Without
+    this merge the dashboard hides the new team. With it, the merged hosts
+    show up in the next refresh and the dashboard captures their panes.
+    """
+    merged = dict(local_hosts or {})
+    if not merged:
+        return merged
+    # Collect (ssh_target, remote_project_dir) tuples we should try to fetch.
+    sources: set[tuple[str, str]] = set()
+    for _hname, hcfg in (local_hosts or {}).items():
+        if not isinstance(hcfg, dict):
+            continue
+        ssh_target = str(hcfg.get("ssh", "") or "").strip()
+        # `project_dir` is what csup stores in the per-host config; fall back
+        # to `slurm_workdir` for older configs that only have the SLURM path.
+        remote_dir = (
+            str(hcfg.get("project_dir", "") or "").strip()
+            or str(hcfg.get("slurm_workdir", "") or "").strip()
+        )
+        if not ssh_target or ssh_target in {"local", ""}:
+            continue
+        if not remote_dir:
+            continue
+        sources.add((ssh_target, remote_dir.rstrip("/")))
+    now = time.time()
+    for ssh_target, remote_dir in sources:
+        remote_toml = f"{remote_dir}/.codex-supervisor.toml"
+        cache_key = (ssh_target, remote_toml)
+        cached: dict | None = None
+        with REMOTE_PROJECT_TOML_CACHE_LOCK:
+            entry = REMOTE_PROJECT_TOML_CACHE.get(cache_key)
+            if entry and now - float(entry.get("ts", 0)) < REMOTE_PROJECT_TOML_CACHE_SECS:
+                cached = entry
+        remote_hosts: dict = {}
+        if cached:
+            remote_hosts = dict(cached.get("hosts") or {})
+        else:
+            try:
+                r = subprocess.run(
+                    ["ssh", *SSH_BASE_OPTS, ssh_command_target(ssh_target),
+                     "cat", shlex.quote(remote_toml)],
+                    capture_output=True, text=True, timeout=8.0,
+                )
+                if r.returncode == 0 and r.stdout:
+                    parsed = toml_read_text(r.stdout)
+                    remote_hosts = dict(parsed.get("hosts", {}) or {})
+            except Exception as e:
+                # Cache the failure briefly so we don't hammer SSH on every
+                # refresh when the remote is unreachable.
+                remote_hosts = {}
+                print(f"remote toml fetch skipped {ssh_target}:{remote_toml}: {e}",
+                      file=sys.stderr)
+            with REMOTE_PROJECT_TOML_CACHE_LOCK:
+                REMOTE_PROJECT_TOML_CACHE[cache_key] = {"ts": now, "hosts": remote_hosts}
+        # Merge: only add hosts not already in local.
+        for host_name, host_cfg in remote_hosts.items():
+            if host_name in merged:
+                continue
+            merged[host_name] = host_cfg
+    return merged
 
 
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;:]*)m")
@@ -517,56 +659,98 @@ TARGET_W = int(os.environ.get("CSUP_STREAMER_WIDTH", "160"))
 TARGET_H = int(os.environ.get("CSUP_STREAMER_HEIGHT", "50"))
 
 _wide_windows = set()
-def ensure_wide(session):
+def list_sockets():
+    """Enumerate every tmux server socket owned by the current user.
+
+    Per-session sockets mean we can't just call 'tmux ls' once anymore — each
+    supervisor session runs its own tmux server. The dashboard's streamer
+    must visit each socket and aggregate sessions across them so the whole
+    fleet shows up in one capture pass.
+
+    Returns a list of socket names (the -L argument). Empty list means fall
+    back to the default socket so single-server / legacy installs still work.
+    """
+    import glob, os as _os
+    sock_dir = _os.environ.get("TMUX_TMPDIR", "/tmp") + f"/tmux-{_os.getuid()}"
+    socks = []
+    if _os.path.isdir(sock_dir):
+        for path in sorted(glob.glob(sock_dir + "/*")):
+            try:
+                if _os.path.isfile(path):
+                    continue
+                # tmux server sockets are unix sockets; stat to confirm
+                import stat
+                if stat.S_ISSOCK(_os.stat(path).st_mode):
+                    socks.append(_os.path.basename(path))
+            except OSError:
+                continue
+    if not socks:
+        # Fall back to default socket name so 'tmux ls' still works.
+        socks = ["default"]
+    return socks
+
+def tmux_cmd(socket, *args):
+    """Build a tmux command targeting a specific socket."""
+    if socket and socket != "default":
+        return ["tmux", "-L", socket, *args]
+    return ["tmux", *args]
+
+def ensure_wide(socket, session):
     # List all windows in this session; force TARGET_W on any that are narrow.
     # Sets window-size=manual first so attached clients can't shrink them back.
     r = subprocess.run(
-        ["tmux", "list-windows", "-t", session, "-F", "#{window_index}\t#{window_width}"],
+        tmux_cmd(socket, "list-windows", "-t", session, "-F", "#{window_index}\t#{window_width}"),
         capture_output=True, text=True)
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
             continue
         widx, ww = parts[0], parts[1]
-        key = f"{session}:{widx}"
+        key = f"{socket}:{session}:{widx}"
         w = int(ww) if ww.isdigit() else 0
         if w < TARGET_W and key not in _wide_windows:
             subprocess.run(
-                ["tmux", "set-window-option", "-t", f"{session}:{widx}", "window-size", "manual"],
+                tmux_cmd(socket, "set-window-option", "-t", f"{session}:{widx}", "window-size", "manual"),
                 capture_output=True)
             subprocess.run(
-                ["tmux", "resize-window", "-t", f"{session}:{widx}", "-x", str(TARGET_W), "-y", str(TARGET_H)],
+                tmux_cmd(socket, "resize-window", "-t", f"{session}:{widx}", "-x", str(TARGET_W), "-y", str(TARGET_H)),
                 capture_output=True)
             _wide_windows.add(key)
 
 def capture_all():
-    r = subprocess.run(["tmux", "ls", "-F", "#{session_name}"], capture_output=True, text=True)
-    if r.returncode != 0:
-        return []
     out = []
-    for session in [s.strip() for s in r.stdout.splitlines() if s.strip()]:
-        ensure_wide(session)
-        fmt = "#{pane_index}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_title}"
-        r2 = subprocess.run(["tmux", "list-panes", "-t", f"={session}", "-F", fmt], capture_output=True, text=True)
-        if r2.returncode != 0:
+    for socket in list_sockets():
+        r = subprocess.run(tmux_cmd(socket, "ls", "-F", "#{session_name}"), capture_output=True, text=True)
+        if r.returncode != 0:
             continue
-        panes = []
-        for line in r2.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 3:
+        for session in [s.strip() for s in r.stdout.splitlines() if s.strip()]:
+            ensure_wide(socket, session)
+            fmt = "#{pane_index}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_title}"
+            r2 = subprocess.run(tmux_cmd(socket, "list-panes", "-t", f"={session}", "-F", fmt), capture_output=True, text=True)
+            if r2.returncode != 0:
                 continue
-            idx = int(parts[0]) if parts[0].isdigit() else 0
-            cap = subprocess.run(
-                ["tmux", "capture-pane", "-e", "-t", f"={session}:.{idx}", "-p", "-S", f"-{CAP_LINES}"],
-                capture_output=True, text=True)
-            panes.append({
-                "index": idx, "dead": parts[1] == "1", "cmd": parts[2],
-                "width": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
-                "height": int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
-                "title": parts[5] if len(parts) > 5 else "",
-                "ansi": cap.stdout if cap.returncode == 0 else "",
-            })
-        out.append({"session": session, "panes": panes, "ts": time.time()})
+            panes = []
+            # tmux's pane-base-index is 1 on many LUNARC/cluster installs but 0
+            # on Mac. Prompt files always use 0-based "PANE N" ordinals. We
+            # emit BOTH the tmux pane_index AND a normalised 0-based ordinal
+            # (position within this list) so the dashboard's lane_label_for_capture
+            # can resolve MANAGER (prompt 0) regardless of tmux's base-index.
+            for ordinal, line in enumerate(r2.stdout.splitlines()):
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                idx = int(parts[0]) if parts[0].isdigit() else 0
+                cap = subprocess.run(
+                    tmux_cmd(socket, "capture-pane", "-e", "-t", f"={session}:.{idx}", "-p", "-S", f"-{CAP_LINES}"),
+                    capture_output=True, text=True)
+                panes.append({
+                    "index": idx, "ordinal": ordinal, "dead": parts[1] == "1", "cmd": parts[2],
+                    "width": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
+                    "height": int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
+                    "title": parts[5] if len(parts) > 5 else "",
+                    "ansi": cap.stdout if cap.returncode == 0 else "",
+                })
+            out.append({"session": session, "panes": panes, "ts": time.time()})
     return out
 
 def pane_hash(p):
@@ -962,10 +1146,22 @@ def list_projects() -> list[dict]:
         seen.add(child_key)
         d = toml_read(cfg) or fallback
         name = d.get("project", {}).get("name", child.name)
+        local_hosts = dict(d.get("hosts", {}) or {})
+        # Cross-machine sync: if any host points at a remote SLURM workdir,
+        # also fetch the project's .codex-supervisor.toml from there and merge
+        # any hosts that the local copy is missing. This closes the divergence
+        # gap where the CEO (running on a compute node) registers a new team
+        # session in the remote toml but the local copy never sees it, so the
+        # Mac dashboard hides the new session despite live panes existing.
+        try:
+            merged_remote = merge_remote_project_hosts(local_hosts)
+        except Exception as e:
+            print(f"remote toml merge skipped for {child}: {e}", file=sys.stderr)
+            merged_remote = local_hosts
         out.append({
             "name": name,
             "path": str(child),
-            "hosts": d.get("hosts", {}),
+            "hosts": merged_remote,
             "instances": [],
         })
         by_root[str(child)] = out[-1]
@@ -1039,10 +1235,49 @@ def prompt_path_for_project(root: pathlib.Path, raw: str) -> str:
 
 
 def state_instances() -> list[dict]:
+    """Read local .codex-supervisor-*.state files.
+
+    Skip stale state files whose PROJECT_ROOT no longer exists OR whose
+    referenced tmux session is not currently running locally. Without this
+    filter, an old state file pointing at a path that has since moved or a
+    session that died long ago creates a "phantom" project in the dashboard
+    with no panes — exactly the duplicate-tag bug observed in the wild.
+    """
     hosts = known_hosts()
     me = this_host_name(hosts)
     local_host = me or socket.gethostname()
     instances: list[dict] = []
+    # Cache local tmux session names so we don't run tmux ls per state file.
+    # With per-session sockets we enumerate each socket and union their
+    # session lists; legacy single-socket installs still resolve through the
+    # default socket here.
+    local_tmux_sessions: set[str] | None = None
+    try:
+        import glob as _glob
+        sock_dir = f"{os.environ.get('TMUX_TMPDIR', '/tmp')}/tmux-{os.getuid()}"
+        sockets: list[str] = []
+        if os.path.isdir(sock_dir):
+            for p in _glob.glob(sock_dir + "/*"):
+                try:
+                    import stat as _stat
+                    if _stat.S_ISSOCK(os.stat(p).st_mode):
+                        sockets.append(os.path.basename(p))
+                except OSError:
+                    continue
+        if not sockets:
+            sockets = ["default"]
+        sessions: set[str] = set()
+        for sock in sockets:
+            cmd = ["tmux"] + (["-L", sock] if sock != "default" else []) + ["ls", "-F", "#{session_name}"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+            if r.returncode == 0:
+                for line in (r.stdout or "").splitlines():
+                    line = line.strip()
+                    if line:
+                        sessions.add(line)
+        local_tmux_sessions = sessions
+    except Exception:
+        local_tmux_sessions = None
     for state in STATE_GLOB.parent.glob(STATE_GLOB.name):
         vals = read_state_file(state)
         root_raw = vals.get("PROJECT_ROOT") or ""
@@ -1050,9 +1285,22 @@ def state_instances() -> list[dict]:
         if not root_raw or not prompts_raw:
             continue
         root = pathlib.Path(root_raw)
+        # Drop state files whose project root has vanished — those are leftover
+        # from moved/deleted projects and only create phantom entries.
+        try:
+            if not root.exists():
+                continue
+        except OSError:
+            continue
+        session_name = session_from_state_path(state)
+        # If we have a tmux session list and this session is not in it, the
+        # state file is stale — the supervisor for it died or moved hosts.
+        # Drop it so we don't surface a "no panes" phantom.
+        if local_tmux_sessions is not None and session_name not in local_tmux_sessions:
+            continue
         instances.append({
             "host": local_host,
-            "session": session_from_state_path(state),
+            "session": session_name,
             "prompts": prompt_path_for_project(root, prompts_raw),
             "source": str(state),
             "project_root": str(root),
@@ -2084,19 +2332,45 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
 
     if host != me:
         script = r'''
-import json, subprocess, sys
+import json, subprocess, sys, os, glob, stat
 session = sys.argv[1]
 lines = int(sys.argv[2])
 lines = max(1, lines)
-# Verify the session exists with an exact name match before listing panes.
-# tmux list-panes -t <name> silently falls back to a prefix-matched session,
-# so without this check a missing session (e.g. babbloo-laptop) would return
-# another session's panes (e.g. babbloo-laptop-meta).
-_ls = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True)
-if session not in (_ls.stdout or "").splitlines():
+# With per-session tmux sockets, the supervisor uses `tmux -L <session_name>`.
+# Find which socket hosts this session: try a socket named exactly after the
+# session first (the supervisor's default), then default socket, then any
+# other socket in the user's tmpdir. tmux list-sessions on the wrong socket
+# returns success with empty output, so we explicitly grep for the name.
+def find_socket(session_name):
+    sock_dir = f"{os.environ.get('TMUX_TMPDIR', '/tmp')}/tmux-{os.getuid()}"
+    candidates = [session_name, "default"]
+    try:
+        for p in sorted(glob.glob(sock_dir + "/*")):
+            try:
+                if stat.S_ISSOCK(os.stat(p).st_mode):
+                    name = os.path.basename(p)
+                    if name not in candidates:
+                        candidates.append(name)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    for sock in candidates:
+        cmd = ["tmux"] + (["-L", sock] if sock != "default" else []) + ["list-sessions", "-F", "#{session_name}"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and session_name in (r.stdout or "").splitlines():
+            return sock
+    return None
+
+socket = find_socket(session)
+if not socket:
     raise SystemExit(1)
+def tx(*args):
+    if socket == "default":
+        return ["tmux", *args]
+    return ["tmux", "-L", socket, *args]
 fmt = "#{pane_index}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_title}"
-r = subprocess.run(["tmux", "list-panes", "-t", session, "-F", fmt], capture_output=True, text=True)
+r = subprocess.run(tx("list-panes", "-t", session, "-F", fmt), capture_output=True, text=True)
 if r.returncode != 0:
     raise SystemExit(r.returncode)
 out = []
@@ -2107,7 +2381,7 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
     idx = int(parts[0])
     height = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
     cap_lines = max(lines, int(sys.argv[3]))
-    c = subprocess.run(["tmux", "capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"], capture_output=True, text=True)
+    c = subprocess.run(tx("capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"), capture_output=True, text=True)
     out.append({
         "index": idx,
         "ordinal": ordinal,
@@ -3867,6 +4141,119 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   background: rgba(15,15,18,.94);
   box-shadow: 0 12px 42px rgba(0,0,0,.22);
 }
+.project-head {
+  padding: 9px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  border-bottom: 1px solid var(--codex-border-soft);
+  background: linear-gradient(180deg, #18181e, #121216);
+}
+.project-head .name { color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .03em; }
+.project-head .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-muted); font-size: 10px; }
+.instance { padding: 10px 12px 12px; border-bottom: 1px solid #18181e; }
+.instance:last-child { border-bottom: none; }
+.instance-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; min-width: 0; font-size: 11px; }
+.host-badge {
+  color: #fff; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: #24242d; font-weight: 700; letter-spacing: .02em;
+}
+.host-badge.mac-mini { background: rgba(200,169,238,.18); color: var(--codex-purple); }
+.host-badge.laptop { background: rgba(171,223,167,.16); color: var(--codex-green); }
+.session { color: var(--codex-dim); font-family: var(--mono); }
+.conn {
+  padding: 1px 7px; border-radius: 999px; border: 1px solid transparent;
+  font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+}
+.conn-ok { color: var(--codex-green); background: rgba(171,223,167,.10); border-color: rgba(171,223,167,.20); }
+.conn-bad { color: var(--codex-orange); background: rgba(255,191,122,.10); border-color: rgba(255,191,122,.22); }
+.prompts { color: var(--codex-muted); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.err { color: var(--codex-orange); }
+
+.grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 54ch), 1fr)); align-items: start; contain: layout style; }
+.pane {
+  --pane-lines: 28;
+  background: var(--codex-bg);
+  border: 1px solid var(--codex-border);
+  border-radius: 9px;
+  overflow: hidden;
+  cursor: pointer;
+  min-height: 190px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 8px 20px rgba(0,0,0,.24);
+  contain: layout paint style;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  transition: border-color .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.pane:hover { border-color: #44444d; transform: translate3d(0,-1px,0); box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 12px 28px rgba(0,0,0,.30); will-change: transform, box-shadow; }
+.pane-head {
+  min-height: 34px;
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--codex-border-soft);
+  background: linear-gradient(180deg, #151519, #101013);
+  color: var(--codex-dim);
+  font-size: 10px;
+}
+.lane-tag { color: #fff; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-idx, .pane-dims { color: var(--codex-muted); }
+.state-badge {
+  padding: 1px 7px; border-radius: 999px; border: 1px solid transparent;
+  font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+}
+.state-badge.working { color: var(--codex-green); background: rgba(171,223,167,.12); border-color: rgba(171,223,167,.22); }
+.state-badge.goal-done { color: var(--codex-blue); background: rgba(125,211,252,.11); border-color: rgba(125,211,252,.20); }
+.state-badge.ready { color: var(--codex-purple); background: rgba(200,169,238,.11); border-color: rgba(200,169,238,.20); }
+.state-badge.idle { color: var(--codex-dim); background: rgba(255,255,255,.035); border-color: rgba(255,255,255,.055); }
+.state-badge.dead { color: var(--codex-red); background: rgba(255,138,128,.10); border-color: rgba(255,138,128,.22); }
+.state-badge.rate-limited { color: var(--codex-orange); background: rgba(255,191,122,.10); border-color: rgba(255,191,122,.22); }
+.model-badge { margin-left: auto; color: var(--codex-yellow); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28ch; }
+.pane-terminal { padding: 9px 10px 11px; max-height: min(64vh, calc((var(--pane-lines, 28) * 1.36em) + 24px)); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.terminal-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  color: var(--codex-fg);
+  font: 12px/1.36 var(--mono);
+  letter-spacing: 0;
+  contain: content;
+}
+body.wrap .terminal-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+body.wrap .pane-terminal { overflow-x: hidden; }
+.pane.s-dead { opacity: .72; }
+.empty {
+  color: var(--codex-muted); padding: 16px; border: 1px dashed var(--codex-border);
+  border-radius: 9px; background: rgba(255,255,255,.018);
+}
+
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.88); display: none; align-items: center; justify-content: center; z-index: 100; padding: 18px; }
+.modal.open { display: flex; }
+.modal-body { width: min(1120px, 94vw); max-height: 92vh; overflow: hidden; background: var(--codex-bg); border: 1px solid var(--codex-border); border-radius: 10px; box-shadow: 0 20px 70px rgba(0,0,0,.55); }
+.modal-title { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--codex-border-soft); background: #141418; color: #fff; font-weight: 700; font-size: 12px; }
+.modal-title span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-title button { margin-left: auto; }
+.modal-scroll { max-height: calc(92vh - 48px); overflow: auto; padding: 12px; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.project, .metric-card, .chart-card, .activity-panel, .project-card-link { contain: layout paint style; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  .pane:hover { transform: none; will-change: auto; }
+}
+@media (max-width: 720px) {
+  body { padding: 10px; }
+  .shellbar { grid-template-columns: 1fr; }
+  .actions { justify-content: flex-start; }
+  .project-head { grid-template-columns: 1fr; gap: 3px; }
+  .metric-card { min-height: 82px; }
+  .token-graphs { grid-template-columns: 1fr; }
+  .activity-head { align-items: flex-start; flex-direction: column; }
+  .activity-text { white-space: normal; }
+  .prompts { display: none; }
+}
+
+
 .company-office {
   margin: 0 0 12px;
   border: 1px solid rgba(246,226,183,.22);
@@ -4063,7 +4450,7 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   opacity: .55;
 }
 .office-person::after {
-  content: attr(data-emote);
+  content: attr(data-thought);
   position: absolute;
   top: -8px; left: calc(50% + 8px);
   min-width: 20px;
@@ -4079,7 +4466,6 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   animation: office-emote 2.8s steps(2, end) infinite;
   animation-delay: var(--walk-delay, 0s);
 }
-.office-person.goal-done { animation-duration: 1.3s, 11s; }
 .office-person.ready, .office-person.idle { animation: office-idle 1.8s steps(2, end) infinite; }
 .office-person.dead { animation: none; filter: grayscale(.65); opacity: .70; }
 .office-person.gm { background: linear-gradient(180deg, rgba(74,52,18,.88), rgba(22,17,9,.90)); border-color: rgba(255,209,102,.46); }
@@ -4167,13 +4553,6 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   padding: 10px;
   background: rgba(0,0,0,.16);
 }
-@keyframes office-walk {
-  0% { transform: translate3d(calc(var(--walk-x, 8px) * -1), 0, 0); }
-  20% { transform: translate3d(calc(var(--walk-x, 8px) * -.35), calc(var(--walk-y, 5px) * .65), 0); }
-  50% { transform: translate3d(calc(var(--walk-x, 8px) * .55), calc(var(--walk-y, 5px) * -1), 0); }
-  80% { transform: translate3d(calc(var(--walk-x, 8px) * .12), calc(var(--walk-y, 5px) * .8), 0); }
-  100% { transform: translate3d(var(--walk-x, 8px), 0, 0); }
-}
 @keyframes office-idle {
   0%, 100% { margin-top: 0; }
   50% { margin-top: 2px; }
@@ -4183,13 +4562,289 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   to { background-position: -96px 0; }
 }
 @keyframes avatar-step {
-  0%, 100% { transform: translateY(0) scaleX(1); }
-  50% { transform: translateY(-1px) scaleX(.96); }
+  0%, 100% { transform: translateY(0) scaleX(var(--face-x, 1)); }
+  50% { transform: translateY(-1px) scaleX(calc(var(--face-x, 1) * .96)); }
 }
 @keyframes office-emote {
   0%, 58%, 100% { opacity: 0; transform: translateY(2px) scale(.92); }
   64%, 92% { opacity: 1; transform: translateY(-2px) scale(1); }
 }
+/* ── office-v2 enhancements ─────────────────────────────────────────────── */
+@keyframes office-type {
+  0%, 100% { transform: translate3d(0, 0, 0) scaleX(var(--face-x, 1)); }
+  25%       { transform: translate3d(1px, 1px, 0) scaleX(var(--face-x, 1)); }
+  75%       { transform: translate3d(-1px, 0px, 0) scaleX(var(--face-x, 1)); }
+}
+@keyframes office-celebrate {
+  0%,100% { transform: translate3d(0, 0, 0); }
+  10%      { transform: translate3d(0, -6px, 0); }
+  20%      { transform: translate3d(0, 0, 0); }
+  30%      { transform: translate3d(0, -5px, 0); }
+  40%      { transform: translate3d(0, 0, 0); }
+  50%      { transform: translate3d(0, -4px, 0); }
+  60%      { transform: translate3d(0, 0, 0); }
+}
+@keyframes office-rl-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(0,0,0,.24), 0 0 4px var(--codex-orange); }
+  50%       { box-shadow: 0 0 0 2px rgba(0,0,0,.24), 0 0 14px var(--codex-orange); }
+}
+@keyframes office-chat-pulse {
+  0%, 100% { transform: scale(1);   opacity: .9; }
+  50%       { transform: scale(1.2); opacity: 1; }
+}
+@keyframes office-steam {
+  0%, 100% { transform: translateY(0) rotate(-5deg); }
+  50%       { transform: translateY(-3px) rotate(5deg); }
+}
+/* ── Project office: unified panel layout ────────────────── */
+.project-office-panel {
+  margin: 0 0 14px;
+  border: 1px solid rgba(255,209,102,.20);
+  border-radius: 10px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(246,226,183,.04) 25%, transparent 25%) 0 0 / 14px 14px,
+    radial-gradient(circle at 4% 0%, rgba(246,226,183,.10), transparent 22rem),
+    linear-gradient(180deg, rgba(20,17,12,.98), rgba(10,11,16,.98));
+}
+.project-office-body {
+  display: flex;
+  align-items: stretch;
+  min-height: 140px;
+  padding: 10px 12px;
+  gap: 0;
+}
+.project-office-ceo-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 80px;
+  padding-right: 12px;
+}
+.project-office-divider {
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(255,209,102,.22) 30%, rgba(255,209,102,.22) 70%, transparent);
+  margin: 0 10px;
+  flex-shrink: 0;
+}
+.project-office-rows {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.project-office-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 4px 6px;
+  background: rgba(0,0,0,.18);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.05);
+  flex-wrap: wrap;
+}
+.project-office-row-label {
+  font-size: 8px;
+  font-weight: 900;
+  color: rgba(255,255,255,.28);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  min-width: 56px;
+  align-self: center;
+}
+.office-ceo-empty {
+  color: rgba(255,209,102,.30);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+/* ── Redesigned person card inside project-office-panel ── */
+.project-office-panel .office-person {
+  position: relative !important; /* override absolute from .office-person.office-agent */
+  left: auto !important;
+  top: auto !important;
+  width: 54px;
+  min-height: 104px;  /* 4px top pad + 64px avatar + 4px gap + 32px desk */
+  padding: 4px 4px 0;
+  display: flex !important;
+  flex-direction: column;
+  align-items: center;
+  overflow: visible;
+  border: 2px solid rgba(0,0,0,.42) !important;
+  border-radius: 5px 5px 3px 3px !important;
+  background: rgba(7,8,10,.80) !important;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07), 3px 3px 0 rgba(0,0,0,.30) !important;
+  animation:
+    office-idle 1.15s steps(2, end) infinite,
+    desk-sway 14s ease-in-out infinite alternate !important;
+  animation-delay: var(--walk-delay, 0s), var(--walk-delay, 0s) !important;
+}
+.project-office-panel .office-person.gm {
+  background: linear-gradient(180deg, rgba(74,52,18,.88), rgba(22,17,9,.90)) !important;
+  border-color: rgba(255,209,102,.46) !important;
+}
+.project-office-panel .office-person.manager {
+  background: linear-gradient(180deg, rgba(12,49,70,.88), rgba(7,18,28,.92)) !important;
+  border-color: rgba(125,211,252,.42) !important;
+}
+.project-office-panel .office-person.planner {
+  background: linear-gradient(180deg, rgba(55,35,75,.86), rgba(18,12,28,.92)) !important;
+  border-color: rgba(200,169,238,.42) !important;
+}
+.project-office-panel .office-person.worker {
+  background: linear-gradient(180deg, rgba(18,62,37,.84), rgba(8,20,14,.92)) !important;
+  border-color: rgba(171,223,167,.36) !important;
+}
+.project-office-panel .agent-nameplate,
+.project-office-panel .person-meta {
+  display: none;
+}
+/* Desk surface — lower 32px of each card, portrait orientation */
+.office-desk-surface {
+  display: none;
+}
+.project-office-panel .office-desk-surface {
+  display: flex;
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 32px;
+  background: linear-gradient(180deg, #5c3f1a 0%, #3a2710 55%, #261a08 100%);
+  border-top: 2px solid rgba(255,209,102,.45);
+  border-radius: 0 0 3px 3px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 9px;
+  padding: 0 2px;
+}
+.project-office-panel .ceo-card {
+  width: 64px !important;
+  min-height: 112px !important;
+  transform: scale(1.12) !important;
+  border-color: rgba(255,209,102,.55) !important;
+  background: linear-gradient(180deg, rgba(74,52,18,.92), rgba(20,15,6,.95)) !important;
+}
+.project-office-panel .ceo-card .office-desk-surface {
+  background: linear-gradient(180deg, #7a5520 0%, #4f3510 55%, #33200a 100%);
+  border-color: rgba(255,209,102,.70);
+}
+/* Sprite avatar: fully visible inside project-office-panel (undo seated-at-desk clip) */
+.project-office-panel .pixel-avatar.sprite-avatar {
+  position: relative !important;
+  width: 32px !important;
+  height: 64px !important;  /* full frame height — character fully visible */
+  margin: 4px 0 0 0 !important;
+  clip-path: none !important;
+  transform: scaleX(var(--face-x, 1)) !important;
+  transform-origin: 50% 50% !important;
+  animation: sprite-idle-breathe 3.8s ease-in-out infinite !important;
+  animation-delay: var(--walk-delay, 0s) !important;
+  image-rendering: pixelated;
+  background-position: 0 0 !important;
+  z-index: 4;
+}
+/* Working agents: rhythmic desk-lean card + faster typing sprite */
+.project-office-panel .office-person.working {
+  animation:
+    desk-lean 0.42s ease-in-out infinite,
+    office-idle 2s steps(2, end) infinite !important;
+  animation-delay: var(--walk-delay, 0s), var(--walk-delay, 0s) !important;
+}
+.project-office-panel .office-person.working .pixel-avatar.sprite-avatar {
+  animation: office-typing 0.55s ease-in-out infinite !important;
+  animation-delay: var(--walk-delay, 0s) !important;
+}
+/* Idle / ready: occasional look-around */
+.project-office-panel .office-person.idle .pixel-avatar.sprite-avatar,
+.project-office-panel .office-person.ready .pixel-avatar.sprite-avatar {
+  animation: sprite-idle-look 9s ease-in-out infinite !important;
+  animation-delay: var(--walk-delay, 0s) !important;
+}
+/* Goal-done: celebrate + stretch */
+.project-office-panel .office-person.goal-done {
+  animation:
+    office-celebrate 1.4s steps(4, end) 3,
+    office-idle 3s steps(2, end) infinite 4.2s !important;
+  animation-delay: var(--walk-delay, 0s) !important;
+}
+.project-office-panel .office-person.goal-done .pixel-avatar.sprite-avatar {
+  animation: sprite-idle-stretch 5s ease-in-out infinite !important;
+  animation-delay: var(--walk-delay, 0s) !important;
+}
+/* Desk surface: screen glow when working */
+.project-office-panel .office-person.working .office-desk-surface {
+  box-shadow: 0 -2px 8px rgba(171,223,167,.25);
+}
+.project-office-panel .office-person.gm.working .office-desk-surface {
+  box-shadow: 0 -2px 8px rgba(255,209,102,.30);
+}
+/* New keyframes for project office panel */
+@keyframes desk-sway {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  33% { transform: translate3d(1.5px, -0.5px, 0); }
+  66% { transform: translate3d(-1px, 0.5px, 0); }
+}
+@keyframes desk-lean {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(1px, -0.5px, 0); }
+  50% { transform: translate3d(-0.5px, 0.5px, 0); }
+  80% { transform: translate3d(0.5px, 0, 0); }
+}
+
+@keyframes office-walk {
+  0%   { transform: translate3d(calc(var(--walk-x, 8px)*-1), 0, 0); }
+  12%  { transform: translate3d(calc(var(--walk-x, 8px)*-.7), calc(var(--walk-y, 5px)*-.5), 0); }
+  25%  { transform: translate3d(calc(var(--walk-x, 8px)*-.2), calc(var(--walk-y, 5px)*1), 0); }
+  37%  { transform: translate3d(calc(var(--walk-x, 8px)*.3), calc(var(--walk-y, 5px)*.3), 0); }
+  50%  { transform: translate3d(calc(var(--walk-x, 8px)*.6), calc(var(--walk-y, 5px)*-1), 0); }
+  62%  { transform: translate3d(calc(var(--walk-x, 8px)*.85), calc(var(--walk-y, 5px)*.6), 0); }
+  80%  { transform: translate3d(calc(var(--walk-x, 8px)*.4), calc(var(--walk-y, 5px)*-.3), 0); }
+  100% { transform: translate3d(var(--walk-x, 8px), 0, 0); }
+}
+.office-person.working {
+  animation: office-type .18s steps(2, end) infinite,
+             office-idle 2.5s steps(2, end) infinite;
+  animation-delay: var(--walk-delay, 0s), var(--walk-delay, 0s);
+}
+.office-person.goal-done {
+  animation: office-celebrate 1.2s steps(4, end) 3,
+             office-idle 3s steps(2, end) infinite 3.6s;
+  animation-delay: var(--walk-delay, 0s);
+}
+.office-person.talking::before {
+  content: '💬';
+  position: absolute; top: -14px; right: -4px;
+  font-size: 10px;
+  animation: office-chat-pulse .8s ease-in-out infinite;
+}
+.status-light.rate-limited {
+  animation: office-rl-pulse 1.6s ease-in-out infinite;
+}
+.office-desk {
+  display: inline-block; width: 28px; height: 14px;
+  background: linear-gradient(180deg, #3a2e1e 60%, #2a2010 100%);
+  border: 1px solid rgba(255,209,102,.30); border-radius: 2px;
+  margin: 0 3px; position: relative; vertical-align: bottom;
+}
+.office-desk::after {
+  content: '🖥'; position: absolute; top: -10px; left: 6px; font-size: 9px; opacity: .70;
+}
+.office-coffee {
+  display: inline-block; font-size: 14px; margin: 0 4px;
+  animation: office-steam 2s ease-in-out infinite;
+}
+.office-meeting-table {
+  display: inline-block; width: 36px; height: 36px;
+  background: radial-gradient(circle, rgba(74,52,18,.60), rgba(40,30,10,.80));
+  border: 2px solid rgba(255,209,102,.28); border-radius: 50%;
+  margin: 4px;
+}
+/* ── end office-v2 enhancements ─────────────────────────────────────────── */
 
 /* AgentOffice v2: 16px-grid top-down pixel coworking map. React renders HUD/DOM overlays;
    the office world stays as explicit pixel primitives and sprite containers. */
@@ -4953,7 +5608,7 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
 }
 .host-badge.mac-mini { background: rgba(200,169,238,.18); color: var(--codex-purple); }
 .host-badge.laptop { background: rgba(171,223,167,.16); color: var(--codex-green); }
-.session { color: var(--codex-dim); }
+.session { color: var(--codex-dim); font-family: var(--mono); }
 .conn {
   padding: 1px 7px; border-radius: 999px; border: 1px solid transparent;
   font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
@@ -4988,7 +5643,7 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
   color: var(--codex-dim);
   font-size: 10px;
 }
-.lane-tag { color: #fff; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.lane-tag { color: #fff; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-role-badge {
   padding: 1px 6px;
   border-radius: 999px;
@@ -5030,6 +5685,40 @@ a.action { text-decoration: none; display: inline-flex; align-items: center; }
 body.wrap .terminal-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 body.wrap .pane-terminal { overflow-x: hidden; }
 .pane.s-dead { opacity: .72; }
+/* Role-based card accents */
+.pane.role-gm {
+  border-color: rgba(255,209,102,.35);
+  background: linear-gradient(180deg, rgba(255,209,102,.05) 0%, var(--codex-bg) 44%);
+  grid-column: 1 / -1;
+}
+.pane.role-gm .pane-head {
+  background: linear-gradient(180deg, rgba(255,209,102,.10) 0%, #101013 100%);
+  border-bottom-color: rgba(255,209,102,.20);
+}
+.pane.role-gm:hover { border-color: rgba(255,209,102,.52); }
+.pane.role-manager {
+  border-color: rgba(125,211,252,.28);
+  background: linear-gradient(180deg, rgba(125,211,252,.035) 0%, var(--codex-bg) 44%);
+}
+.pane.role-manager .pane-head {
+  background: linear-gradient(180deg, rgba(125,211,252,.07) 0%, #101013 100%);
+  border-bottom-color: rgba(125,211,252,.16);
+}
+.pane.role-manager:hover { border-color: rgba(125,211,252,.44); }
+/* CEO section: sits right below office panel, above team instances */
+.ceo-section {
+  padding: 0 12px 12px;
+  background: linear-gradient(180deg, rgba(255,209,102,.04) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(255,209,102,.14);
+}
+.ceo-section-head {
+  padding: 8px 0 6px;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: rgba(255,209,102,.55);
+}
 .empty {
   color: var(--codex-muted); padding: 16px; border: 1px dashed var(--codex-border);
   border-radius: 9px; background: rgba(255,255,255,.018);
@@ -5538,7 +6227,7 @@ function overviewProjectModel(state) {
   return (state.projects || []).map(project => ({
     name: project.name,
     path: project.path,
-    slug: project.slug || projectSlug(project.name),
+    slug: projectSlug(project.name),
     counts: countProject(project),
   }));
 }
@@ -5680,6 +6369,7 @@ function renderPortfolioCompanyOffice(state) {
   office.appendChild(floors);
   return office;
 }
+
 
 function recentTokenEvents(state) {
   return (((state || {}).token_usage || {}).recent_token_events || [])
@@ -6192,480 +6882,6 @@ function paneTailHtml(pane) {
   return pane.tail_html || escapeHtml((pane.tail || []).join('\n'));
 }
 
-
-// MIT-licensed character sprites adapted from harishkotra/agent-office.
-const AGENT_OFFICE_CHARACTER_SPRITES = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAAGbmlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHhtcDpDcmVhdGVEYXRlPSIyMDI2LTAyLTE2VDExOjM0OjQxWiIgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDItMTZUMTM6MTg6MzVaIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTAyLTE2VDEzOjE4OjM1WiIgZGM6Zm9ybWF0PSJpbWFnZS9wbmciIHBob3Rvc2hvcDpDb2xvck1vZGU9IjMiIHBob3Rvc2hvcDpJQ0NQcm9maWxlPSJzUkdCIElFQzYxOTY2LTIuMSIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDowZjE1NzQ1Ny1jZWZlLWJkNDMtOGRjNC0wODM5NmM0MjI5MTQiIHhtcE1NOkRvY3VtZW50SUQ9InhtcC5kaWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0Ij4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6ZDUyN2YxZjUtOWE1MC0wMTQ3LTkxNzAtN2VjOGY3N2I5YzJmPC9yZGY6bGk+IDwvcmRmOkJhZz4gPC9waG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDExOjM0OjQxWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/Pu5QeR4AAAisSURBVHja7V3LbuVEELVgBhSkkLloeCRDeGl4CAGLERkxSIxGbFDYRELKIvtZIQHb+YAREiuWsIsEK9gg+AFW/ANbYDXfwOKSMi6r3K6ufpXdbqct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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDIwOjA0OjA0WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQyMDowNDowNFoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MzYxODRhNjktNmYzOC1hYTQyLThkMTUtMDRmMDhlNDllYjZiIiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6OGZkYTg1NzktZDZjOC0xZTQ3LWE2YjAtYzFmYzExNWIzZDUzIiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6YWNiOWJjNWEtMmQ2Ni01ZDRhLTlhZjMtYmM4YjRjMDE2NWE4IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDIwOjA0OjA0WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDozNjE4NGE2OS02ZjM4LWFhNDItOGQxNS0wNGYwOGU0OWViNmIiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMjA6MDQ6MDRaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmFjYjliYzVhLTJkNjYtNWQ0YS05YWYzLWJjOGI0YzAxNjVhOCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjAzWiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OTowM1oiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MmY1ZjlhYjAtN2QzNC02NTQ5LWI2OTgtYWE4N2JkOTk5NTY5IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6ZjlmMmJhYzUtODBiYy1lODQ2LTljYTItY2YxMDRmYzIzYTQ0IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6ZjM3MjFmNDYtODJlMy1jNzQ4LTlmYjYtOWUyMTg5ODM2Y2VlIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjAzWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDoyZjVmOWFiMC03ZDM0LTY1NDktYjY5OC1hYTg3YmQ5OTk1NjkiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MDNaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmYzNzIxZjQ2LTgyZTMtYzc0OC05ZmI2LTllMjE4OTgzNmNlZSIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU4OjQ4WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1ODo0OFoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6YWVmMjk3YTItMTk5OS0xZTQ5LWJjMjMtZGZiMGI5NGNkOGQ4IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6ZmRhMjdhYWQtNzc0NC1iZDRjLWI1OTktN2QyNGFhZDI5MmQwIiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6Y2YyNGIwNTctZjBiMi02NTRmLWEyNmQtYTc1YjFiZTZkOWUwIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU4OjQ4WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDphZWYyOTdhMi0xOTk5LTFlNDktYmMyMy1kZmIwYjk0Y2Q4ZDgiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTg6NDhaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmNmMjRiMDU3LWYwYjItNjU0Zi1hMjZkLWE3NWIxYmU2ZDllMCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjIzWiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OToyM1oiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MGVmMTI3OTgtOWY4Mi1hOTQ4LThmZDgtNTVhNWZkYTFjNjJiIiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6MTBkNGNlNmYtZDM3Ni0yYTQwLWE2M2YtMDM0YmRiOTMxYTM2IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6YjU5M2U3OWEtYjVjZS1kNTQ2LWI0YjQtMTIxMWQ2ZTU3MGY0IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjIzWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDowZWYxMjc5OC05ZjgyLWE5NDgtOGZkOC01NWE1ZmRhMWM2MmIiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MjNaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmI1OTNlNzlhLWI1Y2UtZDU0Ni1iNGI0LTEyMTFkNmU1NzBmNCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjM5WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OTozOVoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6ZDI1NDFlNGYtNmMyYi00MzQ5LTg2ZTAtN2Y1ZDFlZjI1Yzk3IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6NmQ2NzBiZjYtOTVlNy0zOTRkLTg3ZmMtNWEyOGYyMWE0Mjc1IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6Zjk4NTUzNDItOWVhYi0yODRlLWI5ZWQtNjAxMWUwMjY5OTRkIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjM5WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDpkMjU0MWU0Zi02YzJiLTQzNDktODZlMC03ZjVkMWVmMjVjOTciIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MzlaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmY5ODU1MzQyLTllYWItMjg0ZS1iOWVkLTYwMTFlMDI2OTk0ZCIgc3RSZWY6ZG9j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"];
-
-const OFFICE_HANDOFF_MS = 6200;
-const OFFICE_HANDOFF_SEEN = new Set();
-const OFFICE_HANDOFF_ACTIVE_UNTIL = new Map();
-
-function officeHandoffKey(person) {
-  return person.key || [person.name, person.meta, person.role].join('|');
-}
-
-function officeShouldRunHandoff(person) {
-  const key = officeHandoffKey(person);
-  const isFinishedWorker = person.role === 'worker' && (person.state || 'idle') === 'goal-done';
-  if (!isFinishedWorker) {
-    OFFICE_HANDOFF_SEEN.delete(key);
-    OFFICE_HANDOFF_ACTIVE_UNTIL.delete(key);
-    return false;
-  }
-  const now = Date.now();
-  const activeUntil = OFFICE_HANDOFF_ACTIVE_UNTIL.get(key) || 0;
-  if (activeUntil > now) return true;
-  if (!OFFICE_HANDOFF_SEEN.has(key)) {
-    OFFICE_HANDOFF_SEEN.add(key);
-    OFFICE_HANDOFF_ACTIVE_UNTIL.set(key, now + OFFICE_HANDOFF_MS);
-    return true;
-  }
-  return false;
-}
-
-function companyRoleForLane(lane, session, host) {
-  const raw = String(lane || session || host || '').toLowerCase();
-  if (raw.includes('gm') || raw.includes('general-manager') || raw.includes('general_manager') || raw.includes('general manager') || raw.includes('ceo') || raw.includes('chief')) return 'gm';
-  if (raw.includes('validator') || raw.includes('debug') || raw.includes('manager') || raw.includes('meta')) return 'manager';
-  if (raw.includes('planner') || raw.includes('plan-') || raw.startsWith('plan')) return 'planner';
-  return 'worker';
-}
-
-function companyRoleLabel(role) {
-  return role === 'gm' ? 'Executive'
-    : role === 'manager' ? 'Manager'
-    : role === 'planner' ? 'Planner'
-    : 'Worker';
-}
-
-function teamPaneRoleRank(role) {
-  return role === 'gm' ? 0
-    : role === 'manager' ? 1
-    : role === 'planner' ? 2
-    : 3;
-}
-
-function teamPaneSortKey(item, fallbackIndex) {
-  const role = item.role || 'worker';
-  const pane = item.pane || {};
-  const idx = Number.isFinite(Number(pane.index)) ? Number(pane.index) : fallbackIndex;
-  return [teamPaneRoleRank(role), idx];
-}
-
-function sortTeamPaneItems(items) {
-  return [...items].sort((a, b) => {
-    const ak = teamPaneSortKey(a, a.originalOrder || 0);
-    const bk = teamPaneSortKey(b, b.originalOrder || 0);
-    return (ak[0] - bk[0]) || (ak[1] - bk[1]) || ((a.originalOrder || 0) - (b.originalOrder || 0));
-  });
-}
-
-function officeHash(text) {
-  let hash = 0;
-  const value = String(text || '');
-  for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
-  return Math.abs(hash);
-}
-
-function officeApplyTimeOfDay() {
-  const h = new Date().getHours();
-  let sky;
-  if (h >= 6 && h < 9) {
-    sky = 'linear-gradient(180deg, rgba(255,180,80,.45), rgba(255,140,60,.30), rgba(100,160,220,.40))';
-  } else if (h >= 9 && h < 18) {
-    sky = 'linear-gradient(180deg, rgba(80,160,255,.55), rgba(140,200,255,.35), rgba(200,230,255,.25))';
-  } else if (h >= 18 && h < 21) {
-    sky = 'linear-gradient(180deg, rgba(255,100,60,.40), rgba(120,60,140,.35), rgba(30,20,60,.55))';
-  } else {
-    sky = 'linear-gradient(180deg, rgba(10,15,40,.80), rgba(20,30,70,.60), rgba(8,10,25,.75))';
-  }
-  document.querySelectorAll('.office-prop.office-window').forEach(w => {
-    w.style.setProperty('--window-sky', sky);
-  });
-}
-(function() {
-  officeApplyTimeOfDay();
-  setInterval(officeApplyTimeOfDay, 300000);
-})();
-
-function officeEmote(person) {
-  const state = person.state || '';
-  if (state === 'dead') return '💀';
-  if (state === 'rate-limited') return '⏳';
-  if (state === 'goal-done') return '✅';
-  if (state === 'working') {
-    if (person.role === 'gm') return '♛';
-    if (person.role === 'manager') return '📋';
-    if (person.role === 'planner') return '🗺';
-    return '⌨';
-  }
-  if (person.role === 'gm') return '♛';
-  if (person.role === 'manager') return '☰';
-  if (person.role === 'planner') return '◇';
-  return '…';
-}
-
-function officeThought(person, handoffActive) {
-  const state = person.state || 'idle';
-  const seed = officeHash((person.key || person.name || '') + state);
-  if (state === 'dead') return 'offline — reconnecting';
-  if (state === 'rate-limited') return 'waiting for API quota…';
-  if (state === 'goal-done') {
-    if (person.role === 'worker') return handoffActive ? 'submitting to manager…' : 'task complete ✓';
-    if (person.role === 'manager') return 'review done ✓';
-    if (person.role === 'planner') return 'plan ready ✓';
-    return 'goal reached ✓';
-  }
-  if (person.role === 'gm') {
-    const t = ['steering direction', 'reviewing strategy', 'scanning progress', 'prioritizing work', 'aligning team'];
-    return t[seed % t.length];
-  }
-  if (person.role === 'manager') {
-    const t = ['reviewing output', 'unblocking team', 'routing next task', 'quality check', 'clearing blockers'];
-    return t[seed % t.length];
-  }
-  if (person.role === 'planner') {
-    const t = ['drafting next steps', 'writing plan cells', 'mapping dependencies', 'outlining approach', 'scheduling tasks'];
-    return t[seed % t.length];
-  }
-  if (state === 'working') {
-    const t = ['running tests…', 'writing code…', 'debugging issue…', 'building feature…', 'editing files…', 'reading context…', 'applying changes…'];
-    return t[seed % t.length];
-  }
-  return 'standing by';
-}
-
-function officeAgentGridPosition(index, role, zoneKind) {
-  if (zoneKind === 'team') {
-    const col = index % 8;
-    const row = Math.floor(index / 8);
-    const face = row % 2 ? 'face-up' : 'face-down';
-    return {
-      x: 5 + col * 4,
-      y: 3 + row * 5,
-      handoffX: 2,
-      handoffY: 6 + row * 5,
-      face,
-      seat: (role === 'manager' || role === 'planner') ? 'team-manager-seat shima-seat section-team-seat' : 'team-long-desk-chair shima-seat section-team-seat',
-    };
-  }
-  if (zoneKind === 'executive') return { x: 4 + (index % 2) * 4, y: 6, handoffX: 8, handoffY: 7, seat: 'executive-desk' };
-  if (zoneKind === 'ops') {
-    const managerSeats = [{ x: 8, y: 5 }, { x: 12, y: 5 }, { x: 16, y: 5 }, { x: 10, y: 9 }, { x: 14, y: 9 }];
-    const plannerSeats = [{ x: 3, y: 7 }, { x: 6, y: 7 }, { x: 3, y: 10 }, { x: 6, y: 10 }];
-    const seats = role === 'planner' ? plannerSeats : managerSeats;
-    const seat = seats[index % seats.length];
-    return { x: seat.x, y: seat.y, handoffX: 9, handoffY: 7, seat: role === 'planner' ? 'planning-bank' : 'manager-review-desk' };
-  }
-  const longDeskSeats = [
-    { x: 5, y: 3, face: 'face-down' }, { x: 9, y: 3, face: 'face-down' }, { x: 13, y: 3, face: 'face-down' }, { x: 17, y: 3, face: 'face-down' }, { x: 21, y: 3, face: 'face-down' },
-    { x: 5, y: 8, face: 'face-up' }, { x: 9, y: 8, face: 'face-up' }, { x: 13, y: 8, face: 'face-up' }, { x: 17, y: 8, face: 'face-up' }, { x: 21, y: 8, face: 'face-up' },
-  ];
-  const seat = longDeskSeats[index % longDeskSeats.length];
-  return { x: seat.x, y: seat.y, handoffX: 1, handoffY: 7, face: seat.face, seat: 'team-long-desk-chair shima-seat section-team-seat' };
-}
-
-function companyPersonCard(person, index, zoneKind) {
-  const state = person.state || 'idle';
-  const submitting = officeShouldRunHandoff(person);
-  const moving = submitting || (person.role !== 'worker' && state === 'rate-limited');
-  const seed = officeHash(person.name + person.meta + person.role);
-  const pos = officeAgentGridPosition(index, person.role, zoneKind);
-  const direction = submitting ? 'face-left' : (person.role === 'worker' ? (pos.face || 'face-down') : ((seed % 3) === 0 ? 'face-down' : ((seed % 2) ? 'face-right' : 'face-left')));
-  const seated = !moving && (person.role === 'worker' || person.role === 'planner' || person.role === 'manager');
-  const card = el('article', { cls: 'office-person office-agent ' + direction + ' ' + person.role + ' ' + state + ' ' + pos.seat + (seated ? ' seated-at-desk' : '') + (moving ? ' moving submitting-route to-section-manager' : ' at-seat'), title: person.title || person.name });
-  card.style.setProperty('--agent-x', pos.x);
-  card.style.setProperty('--agent-y', pos.y);
-  card.style.setProperty('--agent-submit-x', pos.handoffX);
-  card.style.setProperty('--agent-submit-y', pos.handoffY);
-  card.style.setProperty('--walk-x', ((pos.handoffX - pos.x) * 16) + 'px');
-  card.style.setProperty('--walk-y', ((pos.handoffY - pos.y) * 16) + 'px');
-  card.style.setProperty('--face-x', direction === 'face-left' ? '-1' : '1');
-  card.style.setProperty('--walk-delay', '-' + ((seed % 7000) / 1000).toFixed(2) + 's');
-  card.style.setProperty('--sprite-url', 'url("' + AGENT_OFFICE_CHARACTER_SPRITES[seed % AGENT_OFFICE_CHARACTER_SPRITES.length] + '")');
-  card.dataset.emote = officeEmote(person);
-  card.dataset.thought = officeThought(person, submitting);
-  card.dataset.seat = pos.seat;
-  card.appendChild(el('span', { cls: 'status-light ' + (person.state || 'idle'), title: person.state || 'idle' }));
-  card.appendChild(el('div', { cls: 'agent-thought', text: officeThought(person, submitting) }));
-  const chatLines = ['nice', 'agreed', 'on it', 'makes sense', 'got it', 'exactly', 'one sec', 'done ✓', 'hm…', 'lgtm', 'check this', 'hmm good point', 'yep', 'almost'];
-  card.appendChild(el('div', { cls: 'agent-chat', text: chatLines[seed % chatLines.length] }));
-  card.appendChild(el('div', { cls: 'pixel-avatar sprite-avatar', title: companyRoleLabel(person.role) + ' — agent-office sprite' }));
-  const label = el('div', { cls: 'agent-nameplate' });
-  label.appendChild(el('span', { cls: 'person-name', text: person.name }));
-  label.appendChild(el('span', { cls: 'person-role', text: companyRoleLabel(person.role) }));
-  card.appendChild(label);
-  card.appendChild(el('div', { cls: 'person-meta', text: person.meta, title: person.meta }));
-  return card;
-}
-
-function companyOfficeModel(project) {
-  const people = { gm: [], manager: [], planner: [], worker: [] };
-  for (const inst of capturedInstances(project)) {
-    for (const pane of inst.panes || []) {
-      const lane = pane.lane || ('pane' + pane.index);
-      const role = companyRoleForLane(lane, inst.session, inst.host);
-      people[role].push({
-        role,
-        key: [project.name, inst.host, inst.session, pane.index, lane].join('|'),
-        name: lane,
-        state: pane.dead ? 'dead' : (pane.state || 'idle'),
-        meta: inst.host + ' · pane #' + pane.index + (pane.model ? ' · ' + pane.model : ''),
-        title: project.name + ' · ' + inst.session + ' · ' + lane,
-      });
-    }
-  }
-  return people;
-}
-
-function paneOfficePerson(project, inst, pane, originalOrder) {
-  const lane = pane.lane || ('pane' + pane.index);
-  const role = companyRoleForLane(lane, inst.session, inst.host);
-  return {
-    role,
-    pane,
-    originalOrder,
-    key: [project.name, inst.host, inst.session, pane.index, lane].join('|'),
-    name: lane,
-    state: pane.dead ? 'dead' : (pane.state || 'idle'),
-    meta: inst.host + ' · pane #' + pane.index + (pane.model ? ' · ' + pane.model : ''),
-    title: project.name + ' · ' + inst.session + ' · ' + lane,
-  };
-}
-
-function teamSortedOfficeModel(project) {
-  const teams = [];
-  for (const inst of capturedInstances(project)) {
-    const people = (inst.panes || []).map((pane, originalOrder) => paneOfficePerson(project, inst, pane, originalOrder));
-    if (!people.length) continue;
-    teams.push({
-      key: instanceKey(project, inst),
-      label: 'Team ' + inst.host + ' · ' + inst.session,
-      people,
-      detail: people.length + ' panes · same order as terminal cards below',
-    });
-  }
-  return teams;
-}
-
-function officeZoneProp(cls, x, y, w, h, text, title) {
-  const prop = el('span', { cls: 'office-prop ' + cls, text: text || '', title: title || cls });
-  prop.style.setProperty('--x', x);
-  prop.style.setProperty('--y', y);
-  prop.style.setProperty('--w', w);
-  prop.style.setProperty('--h', h);
-  return prop;
-}
-
-function officeZoneDecor(zoneKind) {
-  const decor = el('div', { cls: 'office-decor ' + zoneKind, title: '16px-grid top-down pixel office furniture' });
-  const props = zoneKind === 'executive' ? [
-    ['desk big-desk', 2, 3, 5, 2, '', 'muted brown executive desk'],
-    ['monitor glow cyan', 4, 2, 2, 1, '', 'monitor glow'],
-    ['keyboard', 4, 5, 2, 1, '', 'keyboard'],
-    ['plant decorative-corner', 12, 2, 1, 2, '', 'decorative corner plant'],
-    ['bookshelf decorative-corner', 12, 7, 2, 4, '', 'bookshelf'],
-    ['whiteboard', 1, 9, 5, 2, 'PLAN', 'strategy whiteboard'],
-  ] : zoneKind === 'ops' ? [
-    ['meeting-table meeting-room', 2, 2, 7, 3, '', 'meeting room table'],
-    ['desk manager-long-desk manager-review-desk', 9, 5, 6, 2, '', 'manager review desk for handoffs'],
-    ['chair manager-chair', 10, 7, 1, 1, '', 'manager chair'],
-    ['chair manager-chair', 13, 7, 1, 1, '', 'manager chair'],
-    ['desk planning-long-desk', 2, 6, 5, 2, '', 'planner team desk'],
-    ['chair planner-chair', 3, 8, 1, 1, '', 'planner chair'],
-    ['chair planner-chair', 5, 8, 1, 1, '', 'planner chair'],
-    ['mug accent orange', 3, 2, 1, 1, '', 'coffee mug'],
-    ['notepad accent yellow', 7, 4, 1, 1, '', 'notepad'],
-    ['whiteboard collaboration-area', 10, 2, 5, 2, 'SYNC', 'collaboration whiteboard'],
-    ['printer', 12, 8, 2, 2, '', 'printer'],
-    ['water-cooler coffee-pantry', 3, 8, 1, 3, '', 'water cooler'],
-    ['plant decorative-corner', 14, 9, 1, 2, '', 'decorative plant'],
-  ] : [
-    ['desk section-manager-desk manager-handoff', 0, 5, 2, 4, '係長', 'section manager desk at the end of the shima island'],
-    ['chair section-manager-chair', 2, 6, 1, 1, '', 'section manager chair'],
-    ['desk team-long-desk shima-island work-desks', 4, 5, 21, 2, '', 'Japanese shima island: workers face each other across one long desk bank'],
-    ['chair worker-chair chair-top', 5, 3, 1, 1, '', 'assigned top-row worker chair'],
-    ['chair worker-chair chair-top', 9, 3, 1, 1, '', 'assigned top-row worker chair'],
-    ['chair worker-chair chair-top', 13, 3, 1, 1, '', 'assigned top-row worker chair'],
-    ['chair worker-chair chair-top', 17, 3, 1, 1, '', 'assigned top-row worker chair'],
-    ['chair worker-chair chair-top', 21, 3, 1, 1, '', 'assigned top-row worker chair'],
-    ['chair worker-chair chair-bottom', 5, 8, 1, 1, '', 'assigned bottom-row worker chair'],
-    ['chair worker-chair chair-bottom', 9, 8, 1, 1, '', 'assigned bottom-row worker chair'],
-    ['chair worker-chair chair-bottom', 13, 8, 1, 1, '', 'assigned bottom-row worker chair'],
-    ['chair worker-chair chair-bottom', 17, 8, 1, 1, '', 'assigned bottom-row worker chair'],
-    ['chair worker-chair chair-bottom', 21, 8, 1, 1, '', 'assigned bottom-row worker chair'],
-    ['laptop glow green', 5, 5, 1, 1, '', 'top-row laptop on desk'],
-    ['monitor glow purple', 9, 5, 1, 1, '', 'top-row monitor on desk'],
-    ['laptop glow cyan', 13, 5, 1, 1, '', 'top-row laptop on desk'],
-    ['monitor glow green', 17, 6, 1, 1, '', 'bottom-row monitor on desk'],
-    ['keyboard', 21, 6, 1, 1, '', 'bottom-row keyboard on desk'],
-    ['route-line submit-path section-manager-only-route', 1, 7, 6, 1, '', 'finished-work route to section manager only'],
-    ['coffee coffee-pantry', 1, 8, 3, 2, '', 'coffee pantry'],
-    ['bookshelf decorative-corner', 15, 7, 2, 4, '', 'bookshelf'],
-    ['plant decorative-corner', 6, 9, 1, 2, '', 'plant'],
-    ['window office-window', 8, 0, 7, 1, '', 'night window'],
-    ['cabinet low-storage', 18, 4, 1, 5, '', 'low storage cabinet'],
-    ['notepad accent yellow', 11, 8, 1, 1, '', 'notepad'],
-  ];
-  for (const [cls, x, y, w, h, text, title] of props) decor.appendChild(officeZoneProp(cls, x, y, w, h, text, title));
-  return decor;
-}
-
-function officeFloor(label, people, zoneKind) {
-  const floor = el('div', { cls: 'office-floor office-zone ' + zoneKind });
-  floor.appendChild(el('div', { cls: 'floor-label', text: label }));
-  floor.appendChild(officeZoneDecor(zoneKind));
-  const grid = el('div', { cls: 'office-people' });
-  if (!people.length) {
-    grid.appendChild(el('div', { cls: 'office-empty', text: 'No active seats in this role yet.' }));
-  } else {
-    people.forEach((person, idx) => grid.appendChild(companyPersonCard(person, idx, zoneKind)));
-  }
-  floor.appendChild(grid);
-  return floor;
-}
-
-function officeTeamFloor(team) {
-  const floor = el('div', { cls: 'office-floor office-zone team team-sorted-zone', title: team.detail });
-  floor.appendChild(el('div', { cls: 'floor-label', text: team.label }));
-  floor.appendChild(el('div', { cls: 'floor-subtitle', text: team.detail }));
-  const decor = officeZoneDecor('team');
-  const clock = el('div', { cls: 'office-clock', title: 'office clock' });
-  function tickClock() {
-    const now = new Date();
-    clock.textContent = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
-  }
-  tickClock();
-  setInterval(tickClock, 30000);
-  decor.appendChild(clock);
-  floor.appendChild(decor);
-  const grid = el('div', { cls: 'office-people team-pane-order' });
-  sortTeamPaneItems(team.people).forEach((person, idx) => grid.appendChild(companyPersonCard(person, idx, 'team')));
-  floor.appendChild(grid);
-  return floor;
-}
-
-function roleStateCounts(people) {
-  const counts = {};
-  for (const person of people) {
-    const state = person.state || 'idle';
-    counts[state] = (counts[state] || 0) + 1;
-  }
-  return Object.entries(counts).map(([state, count]) => count + ' ' + state).join(' · ') || '0 panes';
-}
-
-function teamStructureNode(label, people, detail) {
-  const node = el('article', { cls: 'team-structure-node ' + label.toLowerCase().replace(/[^a-z]+/g, '-') });
-  node.appendChild(el('div', { cls: 'team-structure-role', text: label }));
-  node.appendChild(el('div', { cls: 'team-structure-counts', text: roleStateCounts(people) }));
-  const list = el('div', { cls: 'team-structure-list' });
-  for (const person of people.slice(0, 8)) {
-    const row = el('span', { cls: 'team-structure-pane ' + (person.state || 'idle'), text: person.name + ' · ' + (person.state || 'idle') });
-    list.appendChild(row);
-  }
-  if (people.length > 8) list.appendChild(el('span', { cls: 'team-structure-pane more', text: '+' + (people.length - 8) + ' more' }));
-  node.appendChild(list);
-  if (detail) node.appendChild(el('div', { cls: 'team-structure-detail', text: detail }));
-  return node;
-}
-
-function renderTeamStructure(model) {
-  const strip = el('section', { cls: 'team-structure', title: 'Live team structure synced from panes below' });
-  strip.appendChild(teamStructureNode('Executive', model.gm, 'owns direction'));
-  strip.appendChild(el('div', { cls: 'team-structure-arrow', text: '→' }));
-  strip.appendChild(teamStructureNode('Manager panes', model.manager.concat(model.planner), 'reviews + routes work'));
-  strip.appendChild(el('div', { cls: 'team-structure-arrow', text: '→' }));
-  strip.appendChild(teamStructureNode('Worker panes', model.worker, 'same panes as terminal cards below'));
-  return strip;
-}
-
-function renderCompanyOffice(project) {
-  const model = companyOfficeModel(project);
-  const teams = teamSortedOfficeModel(project);
-  const counts = countProject(project);
-  const office = el('section', { cls: 'company-office', title: 'Company-style AI organization map' });
-  const head = el('div', { cls: 'office-head' });
-  const title = el('div');
-  title.appendChild(el('div', { cls: 'office-title', text: project.name + ' AI company office' }));
-  title.appendChild(el('div', { cls: 'office-subtitle', text: 'team-sorted pixel office view · same order as TUI panes below · ' + counts.panes + ' live panes' }));
-  head.appendChild(title);
-  const legend = el('div', { cls: 'office-legend' });
-  for (const role of ['gm', 'manager', 'planner', 'worker']) {
-    const chip = el('span', { cls: 'role-chip' });
-    chip.appendChild(el('span', { cls: 'role-dot ' + role }));
-    chip.append(companyRoleLabel(role));
-    legend.appendChild(chip);
-  }
-  head.appendChild(legend);
-  office.appendChild(head);
-  office.appendChild(renderTeamStructure(model));
-
-  const floors = el('div', { cls: 'office-grid team-sorted-office' });
-  if (teams.length) {
-    for (const team of teams) floors.appendChild(officeTeamFloor(team));
-  } else {
-    floors.appendChild(officeFloor('No active team panes', [], 'team'));
-  }
-  office.appendChild(floors);
-  return office;
-}
-
-function projectGmPanes(project) {
-  const gms = [];
-  for (const inst of capturedInstances(project)) {
-    for (const pane of inst.panes || []) {
-      const lane = pane.lane || ('pane' + pane.index);
-      if (companyRoleForLane(lane, inst.session, inst.host) === 'gm') {
-        gms.push({ inst, pane, lane });
-      }
-    }
-  }
-  return gms;
-}
-
-function projectGmState(project) {
-  const gms = projectGmPanes(project);
-  if (!gms.length) return 'dead';
-  if (gms.some(({ pane }) => pane.state === 'working' || pane.state === 'rate-limited')) return 'working';
-  if (gms.every(({ pane }) => pane.state === 'goal-done')) return 'goal-done';
-  if (gms.some(({ pane }) => pane.state === 'dead')) return 'dead';
-  return 'idle';
-}
-
-function renderGmSessionSummaryPane(project) {
-  const gms = projectGmPanes(project);
-  const state = projectGmState(project);
-  const card = el('article', { cls: 'pane gm-session-summary-pane s-' + state, title: gms.length ? 'Executive Codex session summary' : 'Executive Codex session missing' });
-  const ph = el('div', { cls: 'pane-head' });
-  ph.appendChild(el('span', { cls: 'lane-tag', text: 'Executive' }));
-  ph.appendChild(el('span', { cls: 'pane-idx', text: gms.length ? 'real' : 'missing' }));
-  ph.appendChild(el('span', { cls: 'state-badge ' + state, text: state }));
-  ph.appendChild(el('span', { cls: 'pane-dims', text: gms.length + ' session' + (gms.length === 1 ? '' : 's') }));
-  ph.appendChild(el('span', { cls: 'model-badge', text: gms.length ? 'Codex session' : 'start required', title: gms.length ? 'Executive is backed by real tmux/Codex pane(s)' : 'Start/restart with generated CEO enabled' }));
-  card.appendChild(ph);
-  const terminal = el('div', { cls: 'pane-terminal' });
-  const pre = el('pre', { cls: 'terminal-pre' });
-  if (gms.length) {
-    pre.textContent = [
-      'Executive Codex session(s) for ' + project.name,
-      '',
-      ...gms.map(({ inst, pane, lane }) => '- ' + inst.host + ' · ' + inst.session + ' · pane #' + pane.index + ' · lane ' + lane + ' · ' + (pane.state || 'idle')),
-      '',
-      'Executive duty: read all docs, decide which teams to open, review manager reports, run csup staff.',
-    ].join('\n');
-  } else {
-    pre.textContent = [
-      'Executive Codex session missing for ' + project.name,
-      '',
-      'This dashboard no longer fabricates a virtual Executive.',
-      'Restart this project with generated CEO enabled so a real Executive pane appears below.',
-    ].join('\n');
-  }
-  terminal.appendChild(pre);
-  card.appendChild(terminal);
-  return card;
-}
-
 function paneContentSignature(pane) {
   return pane.tail_html || (pane.tail || []).join('\n');
 }
@@ -6773,15 +6989,6 @@ function updatePaneChrome(entry, pane, lane) {
     entry.modelEl.title = model;
     setText(entry.modelEl, model);
   }
-  if (entry.roleEl) {
-    const role = companyRoleForLane(lane, entry.session, entry.host);
-    entry.roleEl.className = 'pane-role-badge role-' + role;
-    entry.roleEl.title = role === 'manager' ? 'Manager pane: debugs, validates, accepts work and routes workers'
-      : role === 'planner' ? 'Planner pane: maintains plan and queue'
-      : role === 'gm' ? 'Executive pane: real Codex executive session'
-      : 'Worker pane: executes one bounded task';
-    setText(entry.roleEl, companyRoleLabel(role));
-  }
 }
 
 function updateVisiblePane(entry, pane, lane, key, forceTerminal) {
@@ -6839,19 +7046,94 @@ function renderProject(p, paneCache, paneElementCache, instanceElementCache) {
   head.appendChild(el('span', { cls: 'path', text: p.path, title: p.path }));
   proj.appendChild(head);
   proj.appendChild(renderCompanyOffice(p));
+
   const instances = capturedInstances(p);
   if (!instances.length) {
     proj.appendChild(el('div', { cls: 'empty', text: 'No active supervisor tmux panes were captured for this project.' }));
+    return proj;
   }
-  // Sort instances so executive/CEO sessions appear first, then managers, then workers
-  const sortedInstances = [...instances].sort((a, b) => {
-    const bestRank = inst => Math.min(99, ...(inst.panes || []).map(p2 => {
-      const l = p2.lane || '';
-      return teamPaneRoleRank(companyRoleForLane(l, inst.session, inst.host));
-    }));
-    return bestRank(a) - bestRank(b);
-  });
-  for (const inst of sortedInstances) {
+
+  // Shared helper: build a pane card, register in caches, return the element
+  function buildPaneCard(inst, pane) {
+    const lane = pane.lane || ('pane' + pane.index);
+    const role = companyRoleForLane(lane, inst.session, inst.host);
+    const dims = pane.width && pane.height ? pane.width + '\xd7' + pane.height : '';
+    const key = paneKey(p, inst, pane);
+    paneCache.set(key, { project: p.name, host: inst.host, session: inst.session, pane });
+    const card = el('article', { cls: 'pane s-' + pane.state + ' role-' + role, title: 'Open latest tail for ' + lane });
+    card.dataset.paneKey = key;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', 'Open latest tail for ' + lane);
+    observePaneCard(card);
+    const displayLines = pane.tail_line_count || (pane.tail || []).length || pane.height || 28;
+    card.style.setProperty('--pane-lines', Math.max(8, Math.min(32, displayLines)));
+    const ph = el('div', { cls: 'pane-head' });
+    const laneEl = el('span', { cls: 'lane-tag', text: lane });
+    ph.appendChild(laneEl);
+    ph.appendChild(el('span', { cls: 'pane-idx', text: '#' + pane.index }));
+    const stateEl = el('span', { cls: 'state-badge ' + pane.state, text: pane.state });
+    ph.appendChild(stateEl);
+    const dimsEl = el('span', { cls: 'pane-dims', text: dims });
+    dimsEl.hidden = !dims;
+    ph.appendChild(dimsEl);
+    let roleBadge = null;
+    if (role !== 'worker') {
+      roleBadge = el('span', { cls: 'pane-role-badge role-' + role, text: companyRoleLabel(role) });
+      ph.appendChild(roleBadge);
+    }
+    const modelEl = el('span', { cls: 'model-badge', text: pane.model || '', title: pane.model || '' });
+    modelEl.hidden = !pane.model;
+    ph.appendChild(modelEl);
+    card.appendChild(ph);
+    const terminal = el('div', { cls: 'pane-terminal' });
+    const pre = el('pre', { cls: 'terminal-pre' });
+    pre.innerHTML = paneTailHtml(pane);
+    pre.__tailSignature = paneContentSignature(pane);
+    card.__paneState = pane.state || 'idle';
+    terminal.appendChild(pre);
+    scrollPaneToBottom(terminal);
+    card.appendChild(terminal);
+    if (paneElementCache) {
+      paneElementCache.set(key, { card, terminal, pre, laneEl, stateEl, dimsEl, modelEl, roleBadge });
+    }
+    return card;
+  }
+
+  // ── CEO section ─────────────────────────────────────────────────────────
+  // Collect all gm/CEO panes across ALL instances and render at the top.
+  const ceoPaneItems = [];
+  for (const inst of instances) {
+    for (const pane of (inst.panes || [])) {
+      const lane = pane.lane || ('pane' + pane.index);
+      if (companyRoleForLane(lane, inst.session, inst.host) === 'gm') {
+        ceoPaneItems.push({ inst, pane });
+      }
+    }
+  }
+  if (ceoPaneItems.length) {
+    const ceoSection = el('div', { cls: 'ceo-section' });
+    ceoSection.appendChild(el('div', { cls: 'ceo-section-head', text: '♛ Executive' }));
+    const ceoGrid = el('div', { cls: 'grid' });
+    ceoPaneItems.forEach(({ inst, pane }) => ceoGrid.appendChild(buildPaneCard(inst, pane)));
+    ceoSection.appendChild(ceoGrid);
+    proj.appendChild(ceoSection);
+  }
+
+  // ── Team sections ────────────────────────────────────────────────────────
+  // Render each instance, skipping gm panes (already shown above),
+  // with manager panes sorted first within each team.
+  for (const inst of instances) {
+    const teamPanes = [...(inst.panes || [])].filter(pane => {
+      const lane = pane.lane || ('pane' + pane.index);
+      return companyRoleForLane(lane, inst.session, inst.host) !== 'gm';
+    }).sort((a, b) => {
+      const ra = teamPaneRoleRank(companyRoleForLane(a.lane || ('pane' + a.index), inst.session, inst.host));
+      const rb = teamPaneRoleRank(companyRoleForLane(b.lane || ('pane' + b.index), inst.session, inst.host));
+      return ra - rb || (a.index - b.index);
+    });
+    if (!teamPanes.length) continue;
+
     const instDiv = el('div', { cls: 'instance' });
     const ihead = el('div', { cls: 'instance-head' });
     ihead.appendChild(el('span', { cls: 'host-badge ' + inst.host, text: inst.host }));
@@ -6871,61 +7153,8 @@ function renderProject(p, paneCache, paneElementCache, instanceElementCache) {
     }
     instDiv.appendChild(ihead);
 
-    const grid = el('div', { cls: 'grid team-tui-pane-order', title: 'Executive pane is shown first, then managers, then workers.' });
-    const orderedPanes = sortTeamPaneItems((inst.panes || []).map((pane, originalOrder) => {
-      const lane = pane.lane || ('pane' + pane.index);
-      return {
-        pane,
-        lane,
-        role: companyRoleForLane(lane, inst.session, inst.host),
-        originalOrder,
-      };
-    }));
-    for (const item of orderedPanes) {
-      const pane = item.pane;
-      const role = item.role;
-      const lane = pane.lane || ('pane' + pane.index);
-      const dims = pane.width && pane.height ? pane.width + '×' + pane.height : '';
-      const key = paneKey(p, inst, pane);
-      paneCache.set(key, { project: p.name, host: inst.host, session: inst.session, pane });
-      const card = el('article', { cls: 'pane s-' + pane.state, title: 'Open latest tail for ' + lane });
-      card.dataset.paneKey = key;
-      card.tabIndex = 0;
-      card.setAttribute('role', 'button');
-      card.setAttribute('aria-label', 'Open latest tail for ' + lane);
-      observePaneCard(card);
-      const displayLines = pane.tail_line_count || (pane.tail || []).length || pane.height || 28;
-      card.style.setProperty('--pane-lines', Math.max(8, Math.min(32, displayLines)));
-      const ph = el('div', { cls: 'pane-head' });
-      const laneEl = el('span', { cls: 'lane-tag', text: lane });
-      // Hide synthetic lane labels that duplicate the role badge
-      laneEl.hidden = (lane === 'MANAGER' || lane === 'CEO');
-      ph.appendChild(laneEl);
-      const roleEl = el('span', { cls: 'pane-role-badge role-' + role, text: companyRoleLabel(role), title: role === 'manager' ? 'Manager pane: debugs, validates, accepts work and routes workers' : role === 'planner' ? 'Planner pane: maintains plan and queue' : role === 'gm' ? 'Executive pane: real Codex executive session' : 'Worker pane: executes one bounded task' });
-      ph.appendChild(roleEl);
-      ph.appendChild(el('span', { cls: 'pane-idx', text: '#' + pane.index }));
-      const stateEl = el('span', { cls: 'state-badge ' + pane.state, text: pane.state });
-      ph.appendChild(stateEl);
-      const dimsEl = el('span', { cls: 'pane-dims', text: dims });
-      dimsEl.hidden = !dims;
-      ph.appendChild(dimsEl);
-      const modelEl = el('span', { cls: 'model-badge', text: pane.model || '', title: pane.model || '' });
-      modelEl.hidden = !pane.model;
-      ph.appendChild(modelEl);
-      card.appendChild(ph);
-      const terminal = el('div', { cls: 'pane-terminal' });
-      const pre = el('pre', { cls: 'terminal-pre' });
-      pre.innerHTML = paneTailHtml(pane);
-      pre.__tailSignature = paneContentSignature(pane);
-      card.__paneState = pane.state || 'idle';
-      terminal.appendChild(pre);
-      scrollPaneToBottom(terminal);
-      card.appendChild(terminal);
-      if (paneElementCache) {
-        paneElementCache.set(key, { card, terminal, pre, laneEl, roleEl, stateEl, dimsEl, modelEl, host: inst.host, session: inst.session });
-      }
-      grid.appendChild(card);
-    }
+    const grid = el('div', { cls: 'grid' });
+    teamPanes.forEach(pane => grid.appendChild(buildPaneCard(inst, pane)));
     instDiv.appendChild(grid);
     proj.appendChild(instDiv);
   }
@@ -7084,25 +7313,6 @@ async function tick(force) {
   })();
   return tickInFlight;
 }
-// Social chat bubbles: randomly pick idle agents near each other and show brief chat
-(function officeSocialLoop() {
-  function pulse() {
-    const agents = Array.from(document.querySelectorAll('.office-person.office-agent.at-seat:not(.dead):not(.submitting-route)'));
-    if (agents.length < 2) return;
-    // Pick two random adjacent agents from same floor
-    const floors = Array.from(document.querySelectorAll('.office-floor'));
-    floors.forEach(floor => {
-      const floorAgents = Array.from(floor.querySelectorAll('.office-person.office-agent.at-seat:not(.dead)'));
-      if (floorAgents.length < 2) return;
-      const i = Math.floor(Math.random() * (floorAgents.length - 1));
-      const pair = [floorAgents[i], floorAgents[i + 1]];
-      pair.forEach(a => a.classList.add('social'));
-      setTimeout(() => pair.forEach(a => a.classList.remove('social')), 3200);
-    });
-  }
-  setInterval(pulse, 7000 + Math.random() * 4000);
-})();
-
 tick();
 // SSE push: re-fetch immediately when the server signals new streaming data.
 // Falls back to polling if SSE is unavailable.
@@ -7123,10 +7333,8 @@ tick();
     };
   }
   connectSSE();
-  // Fallback polling catches local panes and any missed SSE deltas. Keep it at
-  // the live UI cadence now that /api/state.json overlays the streaming cache
-  // cheaply instead of waiting for a full refresh-loop capture.
-  setInterval(() => { if (!document.hidden) tick(false); }, UI_REFRESH_MS);
+  // Fallback polling at reduced rate (catches non-streaming updates e.g. local panes)
+  setInterval(() => { if (!document.hidden) tick(false); }, 1000);
   setInterval(() => {
     if (!latestState || !lastSuccessfulFetchAt || document.hidden) return;
     if (Date.now() - lastSuccessfulFetchAt > POLL_STALE_WARN_MS) {
@@ -7135,6 +7343,587 @@ tick();
     }
   }, Math.max(1000, Math.floor(POLL_STALE_WARN_MS / 2)));
 })();
+// MIT-licensed character sprites adapted from harishkotra/agent-office.
+const AGENT_OFFICE_CHARACTER_SPRITES = ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAAGbmlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHhtcDpDcmVhdGVEYXRlPSIyMDI2LTAyLTE2VDExOjM0OjQxWiIgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDItMTZUMTM6MTg6MzVaIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTAyLTE2VDEzOjE4OjM1WiIgZGM6Zm9ybWF0PSJpbWFnZS9wbmciIHBob3Rvc2hvcDpDb2xvck1vZGU9IjMiIHBob3Rvc2hvcDpJQ0NQcm9maWxlPSJzUkdCIElFQzYxOTY2LTIuMSIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDowZjE1NzQ1Ny1jZWZlLWJkNDMtOGRjNC0wODM5NmM0MjI5MTQiIHhtcE1NOkRvY3VtZW50SUQ9InhtcC5kaWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0Ij4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6ZDUyN2YxZjUtOWE1MC0wMTQ3LTkxNzAtN2VjOGY3N2I5YzJmPC9yZGY6bGk+IDwvcmRmOkJhZz4gPC9waG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6MGYxNTc0NTctY2VmZS1iZDQzLThkYzQtMDgzOTZjNDIyOTE0IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDExOjM0OjQxWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/Pu5QeR4AAAisSURBVHja7V3LbuVEELVgBhSkkLloeCRDeGl4CAGLERkxSIxGbFDYRELKIvtZIQHb+YAREiuWsIsEK9gg+AFW/ANbYDXfwOKSMi6r3K6ufpXdbqct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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDIwOjA0OjA0WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQyMDowNDowNFoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MzYxODRhNjktNmYzOC1hYTQyLThkMTUtMDRmMDhlNDllYjZiIiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6OGZkYTg1NzktZDZjOC0xZTQ3LWE2YjAtYzFmYzExNWIzZDUzIiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6YWNiOWJjNWEtMmQ2Ni01ZDRhLTlhZjMtYmM4YjRjMDE2NWE4IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDIwOjA0OjA0WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDozNjE4NGE2OS02ZjM4LWFhNDItOGQxNS0wNGYwOGU0OWViNmIiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMjA6MDQ6MDRaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmFjYjliYzVhLTJkNjYtNWQ0YS05YWYzLWJjOGI0YzAxNjVhOCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjAzWiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OTowM1oiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MmY1ZjlhYjAtN2QzNC02NTQ5LWI2OTgtYWE4N2JkOTk5NTY5IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6ZjlmMmJhYzUtODBiYy1lODQ2LTljYTItY2YxMDRmYzIzYTQ0IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6ZjM3MjFmNDYtODJlMy1jNzQ4LTlmYjYtOWUyMTg5ODM2Y2VlIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjAzWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDoyZjVmOWFiMC03ZDM0LTY1NDktYjY5OC1hYTg3YmQ5OTk1NjkiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MDNaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmYzNzIxZjQ2LTgyZTMtYzc0OC05ZmI2LTllMjE4OTgzNmNlZSIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU4OjQ4WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1ODo0OFoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6YWVmMjk3YTItMTk5OS0xZTQ5LWJjMjMtZGZiMGI5NGNkOGQ4IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6ZmRhMjdhYWQtNzc0NC1iZDRjLWI1OTktN2QyNGFhZDI5MmQwIiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6Y2YyNGIwNTctZjBiMi02NTRmLWEyNmQtYTc1YjFiZTZkOWUwIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU4OjQ4WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDphZWYyOTdhMi0xOTk5LTFlNDktYmMyMy1kZmIwYjk0Y2Q4ZDgiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTg6NDhaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmNmMjRiMDU3LWYwYjItNjU0Zi1hMjZkLWE3NWIxYmU2ZDllMCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjIzWiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OToyM1oiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6MGVmMTI3OTgtOWY4Mi1hOTQ4LThmZDgtNTVhNWZkYTFjNjJiIiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6MTBkNGNlNmYtZDM3Ni0yYTQwLWE2M2YtMDM0YmRiOTMxYTM2IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6YjU5M2U3OWEtYjVjZS1kNTQ2LWI0YjQtMTIxMWQ2ZTU3MGY0IiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjIzWiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDowZWYxMjc5OC05ZjgyLWE5NDgtOGZkOC01NWE1ZmRhMWM2MmIiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MjNaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmI1OTNlNzlhLWI1Y2UtZDU0Ni1iNGI0LTEyMTFkNmU1NzBmNCIgc3RSZWY6ZG9j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", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAABgCAYAAADFNvbQAAAACXBIWXMAAAsTAAALEwEAmpwYAAALDWlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wMi0xNlQxMTozNDo0MVoiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTAyLTE2VDE0OjU5OjM5WiIgeG1wOk1ldGFkYXRhRGF0ZT0iMjAyNi0wMi0xNlQxNDo1OTozOVoiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiBwaG90b3Nob3A6SUNDUHJvZmlsZT0ic1JHQiBJRUM2MTk2Ni0yLjEiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6ZDI1NDFlNGYtNmMyYi00MzQ5LTg2ZTAtN2Y1ZDFlZjI1Yzk3IiB4bXBNTTpEb2N1bWVudElEPSJhZG9iZTpkb2NpZDpwaG90b3Nob3A6NmQ2NzBiZjYtOTVlNy0zOTRkLTg3ZmMtNWEyOGYyMWE0Mjc1IiB4bXBNTTpPcmlnaW5hbERvY3VtZW50SUQ9InhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzIj4gPHBob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHJkZjpCYWc+IDxyZGY6bGk+YWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjI5YWFmNzNjLTViOGMtOWE0MC1hYjk2LWNhZWQ3YjU4MmZmYTwvcmRmOmxpPiA8cmRmOmxpPmFkb2JlOmRvY2lkOnBob3Rvc2hvcDo1ZTRlNTM3Ni0yMjg0LWM3NDEtOTNmMC05ODQ0ZDZiY2U2OGI8L3JkZjpsaT4gPHJkZjpsaT54bXAuZGlkOjIwYjUxYTRhLWIwYjktNDc0Mi1iZTQ2LTQyN2Y4NGFkYmQ0MjwvcmRmOmxpPiA8cmRmOmxpPnhtcC5kaWQ6N2EzMGIwYWEtZmE1NS1hYzRlLWFkODItNjEwNTRiMzllMWUzPC9yZGY6bGk+IDxyZGY6bGk+eG1wLmRpZDpkNTI3ZjFmNS05YTUwLTAxNDctOTE3MC03ZWM4Zjc3YjljMmY8L3JkZjpsaT4gPC9yZGY6QmFnPiA8L3Bob3Rvc2hvcDpEb2N1bWVudEFuY2VzdG9ycz4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo3YTMwYjBhYS1mYTU1LWFjNGUtYWQ4Mi02MTA1NGIzOWUxZTMiIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTE6MzQ6NDFaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249InNhdmVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOmVkOWJmNTQ3LTYwZGItNTg0Ny05MTVhLTVmYzU3NmJhMDgyMSIgc3RFdnQ6d2hlbj0iMjAyNi0wMi0xNlQxMzo1NzoyN1oiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCBDQyAyMDE5IChXaW5kb3dzKSIgc3RFdnQ6Y2hhbmdlZD0iLyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6Zjk4NTUzNDItOWVhYi0yODRlLWI5ZWQtNjAxMWUwMjY5OTRkIiBzdEV2dDp3aGVuPSIyMDI2LTAyLTE2VDE0OjU5OjM5WiIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTkgKFdpbmRvd3MpIiBzdEV2dDpjaGFuZ2VkPSIvIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjb252ZXJ0ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImZyb20gYXBwbGljYXRpb24vdm5kLmFkb2JlLnBob3Rvc2hvcCB0byBpbWFnZS9wbmciLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImRlcml2ZWQiIHN0RXZ0OnBhcmFtZXRlcnM9ImNvbnZlcnRlZCBmcm9tIGFwcGxpY2F0aW9uL3ZuZC5hZG9iZS5waG90b3Nob3AgdG8gaW1hZ2UvcG5nIi8+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJzYXZlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDpkMjU0MWU0Zi02YzJiLTQzNDktODZlMC03ZjVkMWVmMjVjOTciIHN0RXZ0OndoZW49IjIwMjYtMDItMTZUMTQ6NTk6MzlaIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOmY5ODU1MzQyLTllYWItMjg0ZS1iOWVkLTYwMTFlMDI2OTk0ZCIgc3RSZWY6ZG9j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"];
+
+const OFFICE_HANDOFF_MS = 6200;
+const OFFICE_HANDOFF_SEEN = new Set();
+const OFFICE_HANDOFF_ACTIVE_UNTIL = new Map();
+
+function officeHandoffKey(person) {
+  return person.key || [person.name, person.meta, person.role].join('|');
+}
+
+function officeShouldRunHandoff(person) {
+  const key = officeHandoffKey(person);
+  const isFinishedWorker = person.role === 'worker' && (person.state || 'idle') === 'goal-done';
+  if (!isFinishedWorker) {
+    OFFICE_HANDOFF_SEEN.delete(key);
+    OFFICE_HANDOFF_ACTIVE_UNTIL.delete(key);
+    return false;
+  }
+  const now = Date.now();
+  const activeUntil = OFFICE_HANDOFF_ACTIVE_UNTIL.get(key) || 0;
+  if (activeUntil > now) return true;
+  if (!OFFICE_HANDOFF_SEEN.has(key)) {
+    OFFICE_HANDOFF_SEEN.add(key);
+    OFFICE_HANDOFF_ACTIVE_UNTIL.set(key, now + OFFICE_HANDOFF_MS);
+    return true;
+  }
+  return false;
+}
+
+function companyRoleForLane(lane, session, host) {
+  const raw = String(lane || session || host || '').toLowerCase();
+  if (raw.includes('gm') || raw.includes('general-manager') || raw.includes('general_manager') || raw.includes('general manager') || raw.includes('ceo') || raw.includes('chief')) return 'gm';
+  if (raw.includes('validator') || raw.includes('debug') || raw.includes('manager') || raw.includes('meta')) return 'manager';
+  if (raw.includes('planner') || raw.includes('plan-') || raw.startsWith('plan')) return 'planner';
+  return 'worker';
+}
+
+function companyRoleLabel(role) {
+  return role === 'gm' ? 'Executive'
+    : role === 'manager' ? 'Manager'
+    : role === 'planner' ? 'Planner'
+    : 'Worker';
+}
+
+function teamPaneRoleRank(role) {
+  return role === 'gm' ? 0
+    : role === 'manager' ? 1
+    : role === 'planner' ? 2
+    : 3;
+}
+
+function teamPaneSortKey(item, fallbackIndex) {
+  const role = item.role || 'worker';
+  const pane = item.pane || {};
+  const idx = Number.isFinite(Number(pane.index)) ? Number(pane.index) : fallbackIndex;
+  return [teamPaneRoleRank(role), idx];
+}
+
+function sortTeamPaneItems(items) {
+  return [...items].sort((a, b) => {
+    const ak = teamPaneSortKey(a, a.originalOrder || 0);
+    const bk = teamPaneSortKey(b, b.originalOrder || 0);
+    return (ak[0] - bk[0]) || (ak[1] - bk[1]) || ((a.originalOrder || 0) - (b.originalOrder || 0));
+  });
+}
+
+function officeHash(text) {
+  let hash = 0;
+  const value = String(text || '');
+  for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  return Math.abs(hash);
+}
+
+function officeApplyTimeOfDay() {
+  const h = new Date().getHours();
+  let sky;
+  if (h >= 6 && h < 9) {
+    sky = 'linear-gradient(180deg, rgba(255,180,80,.45), rgba(255,140,60,.30), rgba(100,160,220,.40))';
+  } else if (h >= 9 && h < 18) {
+    sky = 'linear-gradient(180deg, rgba(80,160,255,.55), rgba(140,200,255,.35), rgba(200,230,255,.25))';
+  } else if (h >= 18 && h < 21) {
+    sky = 'linear-gradient(180deg, rgba(255,100,60,.40), rgba(120,60,140,.35), rgba(30,20,60,.55))';
+  } else {
+    sky = 'linear-gradient(180deg, rgba(10,15,40,.80), rgba(20,30,70,.60), rgba(8,10,25,.75))';
+  }
+  document.querySelectorAll('.office-prop.office-window').forEach(w => {
+    w.style.setProperty('--window-sky', sky);
+  });
+}
+(function() {
+  officeApplyTimeOfDay();
+  setInterval(officeApplyTimeOfDay, 300000);
+})();
+
+// Periodic micro-interactions: random chat bubbles + screen glow pulses in project office panels
+function officeInteractTick() {
+  const cards = Array.from(document.querySelectorAll('.project-office-panel .office-person'));
+  if (cards.length) {
+    const chatCount = Math.random() < 0.28 ? 2 : 1;
+    const picks = [...cards].sort(() => Math.random() - 0.5).slice(0, Math.min(chatCount, cards.length));
+    picks.forEach(card => {
+      card.classList.add('social');
+      setTimeout(() => card.classList.remove('social'), 1600 + Math.random() * 2400);
+    });
+  }
+  setTimeout(officeInteractTick, 2800 + Math.random() * 4200);
+}
+setTimeout(officeInteractTick, 1800);
+
+function officeEmote(person) {
+  const state = person.state || '';
+  if (state === 'dead') return '💀';
+  if (state === 'rate-limited') return '⏳';
+  if (state === 'goal-done') return '✅';
+  if (state === 'working') {
+    if (person.role === 'gm') return '♛';
+    if (person.role === 'manager') return '📋';
+    if (person.role === 'planner') return '🗺';
+    return '⌨';
+  }
+  if (person.role === 'gm') return '♛';
+  if (person.role === 'manager') return '☰';
+  if (person.role === 'planner') return '◇';
+  return '…';
+}
+
+function officeThought(person, handoffActive) {
+  const state = person.state || 'idle';
+  const seed = officeHash((person.key || person.name || '') + state);
+  if (state === 'dead') return 'offline — reconnecting';
+  if (state === 'rate-limited') return 'waiting for API quota…';
+  if (state === 'goal-done') {
+    if (person.role === 'worker') return handoffActive ? 'submitting to section manager…' : 'submitted · seated';
+    if (person.role === 'manager') return 'review done ✓';
+    if (person.role === 'planner') return 'plan ready ✓';
+    return 'goal reached ✓';
+  }
+  if (person.role === 'gm') {
+    const t = ['steering direction', 'reviewing strategy', 'scanning progress', 'prioritizing work', 'aligning team'];
+    return t[seed % t.length];
+  }
+  if (person.role === 'manager') {
+    const t = ['reviewing output', 'unblocking team', 'routing next task', 'quality check', 'clearing blockers'];
+    return t[seed % t.length];
+  }
+  if (person.role === 'planner') {
+    const t = ['drafting next steps', 'writing plan cells', 'mapping dependencies', 'outlining approach', 'scheduling tasks'];
+    return t[seed % t.length];
+  }
+  if (state === 'working') {
+    const t = ['running tests…', 'writing code…', 'debugging issue…', 'building feature…', 'editing files…', 'reading context…', 'applying changes…'];
+    return t[seed % t.length];
+  }
+  return 'standing by';
+}
+
+function officeAgentGridPosition(index, role, zoneKind) {
+  if (zoneKind === 'team') {
+    const col = index % 8;
+    const row = Math.floor(index / 8);
+    const face = row % 2 ? 'face-up' : 'face-down';
+    return {
+      x: 5 + col * 4,
+      y: 3 + row * 5,
+      handoffX: 2,
+      handoffY: 6 + row * 5,
+      face,
+      seat: (role === 'manager' || role === 'planner') ? 'team-manager-seat shima-seat section-team-seat' : 'team-long-desk-chair shima-seat section-team-seat',
+    };
+  }
+  if (zoneKind === 'executive') return { x: 4 + (index % 2) * 4, y: 6, handoffX: 8, handoffY: 7, seat: 'executive-desk' };
+  if (zoneKind === 'ops') {
+    const managerSeats = [{ x: 8, y: 5 }, { x: 12, y: 5 }, { x: 16, y: 5 }, { x: 10, y: 9 }, { x: 14, y: 9 }];
+    const plannerSeats = [{ x: 3, y: 7 }, { x: 6, y: 7 }, { x: 3, y: 10 }, { x: 6, y: 10 }];
+    const seats = role === 'planner' ? plannerSeats : managerSeats;
+    const seat = seats[index % seats.length];
+    return { x: seat.x, y: seat.y, handoffX: 9, handoffY: 7, seat: role === 'planner' ? 'planning-bank' : 'manager-review-desk' };
+  }
+  const longDeskSeats = [
+    { x: 5, y: 3, face: 'face-down' }, { x: 9, y: 3, face: 'face-down' }, { x: 13, y: 3, face: 'face-down' }, { x: 17, y: 3, face: 'face-down' }, { x: 21, y: 3, face: 'face-down' },
+    { x: 5, y: 8, face: 'face-up' }, { x: 9, y: 8, face: 'face-up' }, { x: 13, y: 8, face: 'face-up' }, { x: 17, y: 8, face: 'face-up' }, { x: 21, y: 8, face: 'face-up' },
+  ];
+  const seat = longDeskSeats[index % longDeskSeats.length];
+  return { x: seat.x, y: seat.y, handoffX: 1, handoffY: 7, face: seat.face, seat: 'team-long-desk-chair shima-seat section-team-seat' };
+}
+
+function companyPersonCard(person, index, zoneKind) {
+  const state = person.state || 'idle';
+  const submitting = officeShouldRunHandoff(person);
+  const moving = submitting || (person.role !== 'worker' && state === 'rate-limited');
+  const seed = officeHash(person.name + person.meta + person.role);
+  const pos = officeAgentGridPosition(index, person.role, zoneKind);
+  const direction = submitting ? 'face-left' : (person.role === 'worker' ? (pos.face || 'face-down') : ((seed % 3) === 0 ? 'face-down' : ((seed % 2) ? 'face-right' : 'face-left')));
+  const seated = !moving && (person.role === 'worker' || person.role === 'planner' || person.role === 'manager');
+  const card = el('article', { cls: 'office-person office-agent ' + direction + ' ' + person.role + ' ' + state + ' ' + pos.seat + (seated ? ' seated-at-desk' : '') + (moving ? ' moving submitting-route to-section-manager' : ' at-seat') + (submitting ? ' talking' : ''), title: (person.title || person.name) + (submitting ? ' · submitting to section manager' : (person.role === 'worker' && state === 'goal-done' ? ' · submitted · seated' : '')) });
+  card.style.setProperty('--agent-x', pos.x);
+  card.style.setProperty('--agent-y', pos.y);
+  card.style.setProperty('--agent-submit-x', pos.handoffX);
+  card.style.setProperty('--agent-submit-y', pos.handoffY);
+  // Moving (handoff) characters keep exact grid-based walk distances; idle characters get varied paths
+  if (moving) {
+    card.style.setProperty('--walk-x', ((pos.handoffX - pos.x) * 16) + 'px');
+    card.style.setProperty('--walk-y', ((pos.handoffY - pos.y) * 16) + 'px');
+  } else {
+    const wx = (6 + ((seed * 7 + index * 3) % 140) / 10).toFixed(1);
+    const wy = (3 + ((seed * 3 + index * 5) % 60) / 10).toFixed(1);
+    card.style.setProperty('--walk-x', wx + 'px');
+    card.style.setProperty('--walk-y', wy + 'px');
+  }
+  card.style.setProperty('--face-x', direction === 'face-left' ? '-1' : '1');
+  card.style.setProperty('--walk-delay', '-' + ((seed % 7000) / 1000).toFixed(2) + 's');
+  card.style.setProperty('--sprite-url', 'url("' + AGENT_OFFICE_CHARACTER_SPRITES[seed % AGENT_OFFICE_CHARACTER_SPRITES.length] + '")');
+  card.dataset.emote = officeEmote(person);
+  // Build rich thought bubble content
+  let thoughtText;
+  if (state === 'working' && person.activity) {
+    const act = String(person.activity);
+    thoughtText = act.length > 18 ? act.slice(0, 18) + '…' : act;
+  } else if (state === 'idle' || state === 'ready') {
+    const idleEmotes = ['💤', '☕', '🤔'];
+    thoughtText = idleEmotes[seed % idleEmotes.length];
+  } else if (state === 'goal-done') {
+    const doneEmotes = ['✅', '🎉'];
+    thoughtText = doneEmotes[seed % doneEmotes.length];
+  } else {
+    thoughtText = officeThought(person, submitting);
+  }
+  card.dataset.thought = thoughtText;
+  card.dataset.seat = pos.seat;
+  card.appendChild(el('span', { cls: 'status-light ' + (person.state || 'idle'), title: person.state || 'idle' }));
+  card.appendChild(el('div', { cls: 'agent-thought', text: officeThought(person, submitting) }));
+  const chatLines = ['nice', 'agreed', 'on it', 'makes sense', 'got it', 'exactly', 'one sec', 'done ✓', 'hm…', 'lgtm', 'check this', 'hmm good point', 'yep', 'almost'];
+  card.appendChild(el('div', { cls: 'agent-chat', text: chatLines[seed % chatLines.length] }));
+  card.appendChild(el('div', { cls: 'pixel-avatar sprite-avatar', title: companyRoleLabel(person.role) + ' — agent-office sprite' }));
+  const label = el('div', { cls: 'agent-nameplate' });
+  label.appendChild(el('span', { cls: 'person-name', text: person.name }));
+  label.appendChild(el('span', { cls: 'person-role', text: companyRoleLabel(person.role) }));
+  card.appendChild(label);
+  card.appendChild(el('div', { cls: 'person-meta', text: person.meta, title: person.meta }));
+  // Portrait desk surface (visible only inside .project-office-panel via CSS)
+  const deskSurface = el('div', { cls: 'office-desk-surface' });
+  const deskItems = person.role === 'gm' ? ['🖥', '📋', '☕'] :
+                    person.role === 'manager' ? ['🖥', '📋'] :
+                    ['🖥', '⌨'];
+  deskItems.forEach(item => {
+    const span = document.createElement('span');
+    span.textContent = item;
+    deskSurface.appendChild(span);
+  });
+  card.appendChild(deskSurface);
+  return card;
+}
+
+function companyOfficeModel(project) {
+  const people = { gm: [], manager: [], planner: [], worker: [] };
+  for (const inst of capturedInstances(project)) {
+    for (const pane of inst.panes || []) {
+      const lane = pane.lane || ('pane' + pane.index);
+      const role = companyRoleForLane(lane, inst.session, inst.host);
+      people[role].push({
+        role,
+        key: [project.name, inst.host, inst.session, pane.index, lane].join('|'),
+        name: lane,
+        state: pane.dead ? 'dead' : (pane.state || 'idle'),
+        meta: inst.host + ' · pane #' + pane.index + (pane.model ? ' · ' + pane.model : ''),
+        title: project.name + ' · ' + inst.session + ' · ' + lane,
+      });
+    }
+  }
+  return people;
+}
+
+function paneOfficePerson(project, inst, pane, originalOrder) {
+  const lane = pane.lane || ('pane' + pane.index);
+  const role = companyRoleForLane(lane, inst.session, inst.host);
+  return {
+    role,
+    pane,
+    originalOrder,
+    key: [project.name, inst.host, inst.session, pane.index, lane].join('|'),
+    name: lane,
+    state: pane.dead ? 'dead' : (pane.state || 'idle'),
+    meta: inst.host + ' · pane #' + pane.index + (pane.model ? ' · ' + pane.model : ''),
+    title: project.name + ' · ' + inst.session + ' · ' + lane,
+  };
+}
+
+function teamSortedOfficeModel(project) {
+  const teams = [];
+  for (const inst of capturedInstances(project)) {
+    const people = (inst.panes || []).map((pane, originalOrder) => paneOfficePerson(project, inst, pane, originalOrder));
+    if (!people.length) continue;
+    teams.push({
+      key: instanceKey(project, inst),
+      label: 'Team ' + inst.host + ' · ' + inst.session,
+      people,
+      detail: people.length + ' panes · same order as TUI panes below · same order as terminal cards below',
+    });
+  }
+  return teams;
+}
+
+function officeZoneProp(cls, x, y, w, h, text, title) {
+  const prop = el('span', { cls: 'office-prop ' + cls, text: text || '', title: title || cls });
+  prop.style.setProperty('--x', x);
+  prop.style.setProperty('--y', y);
+  prop.style.setProperty('--w', w);
+  prop.style.setProperty('--h', h);
+  return prop;
+}
+
+function officeZoneDecor(zoneKind) {
+  const decor = el('div', { cls: 'office-decor ' + zoneKind, title: '16px-grid top-down pixel coworking map' });
+  const props = zoneKind === 'executive' ? [
+    ['desk big-desk', 2, 3, 5, 2, '', 'muted brown executive desk'],
+    ['monitor glow cyan', 4, 2, 2, 1, '', 'monitor glow'],
+    ['keyboard', 4, 5, 2, 1, '', 'keyboard'],
+    ['plant decorative-corner', 12, 2, 1, 2, '', 'decorative corner plant'],
+    ['bookshelf decorative-corner', 12, 7, 2, 4, '', 'bookshelf'],
+    ['whiteboard', 1, 9, 5, 2, 'PLAN', 'strategy whiteboard'],
+  ] : zoneKind === 'ops' ? [
+    ['meeting-table meeting-room', 2, 2, 7, 3, '', 'meeting room table'],
+    ['desk manager-long-desk manager-review-desk', 9, 5, 6, 2, '', 'manager review desk for handoffs'],
+    ['chair manager-chair', 10, 7, 1, 1, '', 'manager chair'],
+    ['chair manager-chair', 13, 7, 1, 1, '', 'manager chair'],
+    ['desk planning-long-desk', 2, 6, 5, 2, '', 'planner team desk'],
+    ['chair planner-chair', 3, 8, 1, 1, '', 'planner chair'],
+    ['chair planner-chair', 5, 8, 1, 1, '', 'planner chair'],
+    ['mug accent orange', 3, 2, 1, 1, '', 'coffee mug'],
+    ['notepad accent yellow', 7, 4, 1, 1, '', 'notepad'],
+    ['whiteboard collaboration-area', 10, 2, 5, 2, 'SYNC', 'collaboration whiteboard'],
+    ['printer', 12, 8, 2, 2, '', 'printer'],
+    ['water-cooler coffee-pantry', 3, 8, 1, 3, '', 'water cooler'],
+    ['plant decorative-corner', 14, 9, 1, 2, '', 'decorative plant'],
+  ] : [
+    ['desk section-manager-desk manager-handoff', 0, 5, 2, 4, '係長', 'section manager desk at the end of the shima island'],
+    ['chair section-manager-chair', 2, 6, 1, 1, '', 'section manager chair'],
+    ['desk team-long-desk shima-island work-desks', 4, 5, 21, 2, '', 'Japanese shima island: workers face each other across one long desk bank'],
+    ['chair worker-chair chair-top', 5, 3, 1, 1, '', 'assigned top-row worker chair'],
+    ['chair worker-chair chair-top', 9, 3, 1, 1, '', 'assigned top-row worker chair'],
+    ['chair worker-chair chair-top', 13, 3, 1, 1, '', 'assigned top-row worker chair'],
+    ['chair worker-chair chair-top', 17, 3, 1, 1, '', 'assigned top-row worker chair'],
+    ['chair worker-chair chair-top', 21, 3, 1, 1, '', 'assigned top-row worker chair'],
+    ['chair worker-chair chair-bottom', 5, 8, 1, 1, '', 'assigned bottom-row worker chair'],
+    ['chair worker-chair chair-bottom', 9, 8, 1, 1, '', 'assigned bottom-row worker chair'],
+    ['chair worker-chair chair-bottom', 13, 8, 1, 1, '', 'assigned bottom-row worker chair'],
+    ['chair worker-chair chair-bottom', 17, 8, 1, 1, '', 'assigned bottom-row worker chair'],
+    ['chair worker-chair chair-bottom', 21, 8, 1, 1, '', 'assigned bottom-row worker chair'],
+    ['laptop glow green', 5, 5, 1, 1, '', 'top-row laptop on desk'],
+    ['monitor glow purple', 9, 5, 1, 1, '', 'top-row monitor on desk'],
+    ['laptop glow cyan', 13, 5, 1, 1, '', 'top-row laptop on desk'],
+    ['monitor glow green', 17, 6, 1, 1, '', 'bottom-row monitor on desk'],
+    ['keyboard', 21, 6, 1, 1, '', 'bottom-row keyboard on desk'],
+    ['route-line submit-path section-manager-only-route', 1, 7, 6, 1, '', 'finished-work route to section manager only'],
+    ['coffee coffee-pantry', 1, 8, 3, 2, '', 'coffee pantry'],
+    ['bookshelf decorative-corner', 15, 7, 2, 4, '', 'bookshelf'],
+    ['plant decorative-corner', 6, 9, 1, 2, '', 'plant'],
+    ['window office-window', 8, 0, 7, 1, '', 'night window'],
+    ['cabinet low-storage', 18, 4, 1, 5, '', 'low storage cabinet'],
+    ['notepad accent yellow', 11, 8, 1, 1, '', 'notepad'],
+  ];
+  for (const [cls, x, y, w, h, text, title] of props) decor.appendChild(officeZoneProp(cls, x, y, w, h, text, title));
+  // Add inline environmental props based on zone kind
+  if (zoneKind === 'team') {
+    // Row of desks along the bottom of the zone decor
+    const deskRow = el('div', { cls: 'office-decor-row' });
+    deskRow.style.cssText = 'position:absolute;bottom:12px;left:16px;display:flex;align-items:flex-end;gap:2px;z-index:2;pointer-events:none;';
+    for (let d = 0; d < 5; d++) deskRow.appendChild(el('div', { cls: 'office-desk', title: 'workstation desk' }));
+    decor.appendChild(deskRow);
+  }
+  if (zoneKind === 'team') {
+    const coffee = el('div', { cls: 'office-coffee', title: 'coffee station' });
+    coffee.textContent = '☕';
+    coffee.style.cssText = 'position:absolute;bottom:10px;right:14px;z-index:2;pointer-events:none;';
+    decor.appendChild(coffee);
+  }
+  if (zoneKind === 'executive') {
+    const table = el('div', { cls: 'office-meeting-table', title: 'executive meeting table' });
+    table.style.cssText = 'position:absolute;bottom:16px;right:18px;z-index:2;pointer-events:none;';
+    decor.appendChild(table);
+  }
+  return decor;
+}
+
+function officeFloor(label, people, zoneKind) {
+  const floor = el('div', { cls: 'office-floor office-zone ' + zoneKind });
+  floor.appendChild(el('div', { cls: 'floor-label', text: label }));
+  floor.appendChild(officeZoneDecor(zoneKind));
+  const grid = el('div', { cls: 'office-people' });
+  if (!people.length) {
+    grid.appendChild(el('div', { cls: 'office-empty', text: 'No active seats in this role yet.' }));
+  } else {
+    people.forEach((person, idx) => grid.appendChild(companyPersonCard(person, idx, zoneKind)));
+  }
+  floor.appendChild(grid);
+  return floor;
+}
+
+function officeTeamFloor(team) {
+  const floor = el('div', { cls: 'office-floor office-zone team team-sorted-zone', title: team.detail });
+  floor.appendChild(el('div', { cls: 'floor-label', text: team.label }));
+  floor.appendChild(el('div', { cls: 'floor-subtitle', text: team.detail }));
+  const decor = officeZoneDecor('team');
+  const clock = el('div', { cls: 'office-clock', title: 'office clock' });
+  function tickClock() {
+    const now = new Date();
+    clock.textContent = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+  }
+  tickClock();
+  setInterval(tickClock, 30000);
+  decor.appendChild(clock);
+  floor.appendChild(decor);
+  const grid = el('div', { cls: 'office-people team-pane-order team-tui-pane-order' });
+  sortTeamPaneItems(team.people).forEach((person, idx) => grid.appendChild(companyPersonCard(person, idx, 'team')));
+  floor.appendChild(grid);
+  return floor;
+}
+
+function roleStateCounts(people) {
+  const counts = {};
+  for (const person of people) {
+    const state = person.state || 'idle';
+    counts[state] = (counts[state] || 0) + 1;
+  }
+  return Object.entries(counts).map(([state, count]) => count + ' ' + state).join(' · ') || '0 panes';
+}
+
+function teamStructureNode(label, people, detail) {
+  const node = el('article', { cls: 'team-structure-node ' + label.toLowerCase().replace(/[^a-z]+/g, '-') });
+  node.appendChild(el('div', { cls: 'team-structure-role', text: label }));
+  node.appendChild(el('div', { cls: 'team-structure-counts', text: roleStateCounts(people) }));
+  const list = el('div', { cls: 'team-structure-list' });
+  for (const person of people.slice(0, 8)) {
+    const row = el('span', { cls: 'team-structure-pane ' + (person.state || 'idle'), text: person.name + ' · ' + (person.state || 'idle') });
+    list.appendChild(row);
+  }
+  if (people.length > 8) list.appendChild(el('span', { cls: 'team-structure-pane more', text: '+' + (people.length - 8) + ' more' }));
+  node.appendChild(list);
+  if (detail) node.appendChild(el('div', { cls: 'team-structure-detail', text: detail }));
+  return node;
+}
+
+function renderTeamStructure(model) {
+  const strip = el('section', { cls: 'team-structure', title: 'Live team structure synced from panes below' });
+  strip.appendChild(teamStructureNode('Executive', model.gm, 'CEO pane'));
+  strip.appendChild(el('div', { cls: 'team-structure-arrow', text: '→' }));
+  strip.appendChild(teamStructureNode('Manager panes', model.manager.concat(model.planner), 'Manager panes are shown first · Manager pane: debugs, validates, accepts work and routes workers'));
+  strip.appendChild(el('div', { cls: 'team-structure-arrow', text: '→' }));
+  strip.appendChild(teamStructureNode('Worker panes', model.worker, 'Worker pane: executes one bounded task · same panes as terminal cards below'));
+  return strip;
+}
+
+function renderCompanyOffice(project) {
+  const model = companyOfficeModel(project);
+  const teams = teamSortedOfficeModel(project);
+  const counts = countProject(project);
+  const office = el('section', { cls: 'company-office project-office-panel' });
+
+  // Header
+  const head = el('div', { cls: 'office-head' });
+  const titleWrap = el('div');
+  titleWrap.appendChild(el('div', { cls: 'office-title', text: project.name + ' AI company office' }));
+  titleWrap.appendChild(el('div', { cls: 'office-subtitle', text: counts.panes + ' live panes · team-sorted pixel office view · pixel office view' }));
+  head.appendChild(titleWrap);
+  const legend = el('div', { cls: 'office-legend' });
+  for (const role of ['gm', 'manager', 'planner', 'worker']) {
+    const chip = el('span', { cls: 'role-chip' });
+    chip.appendChild(el('span', { cls: 'role-dot ' + role }));
+    chip.append(companyRoleLabel(role));
+    legend.appendChild(chip);
+  }
+  head.appendChild(legend);
+  office.appendChild(head);
+
+  // Body: CEO column + team rows
+  const body = el('div', { cls: 'project-office-body' });
+
+  // LEFT: CEO column (all gm-role panes from all instances)
+  const ceoCol = el('div', { cls: 'project-office-ceo-col' });
+  const ceoPanes = [];
+  for (const inst of capturedInstances(project)) {
+    for (let i = 0; i < (inst.panes || []).length; i++) {
+      const pane = inst.panes[i];
+      const person = paneOfficePerson(project, inst, pane, i);
+      if (person.role === 'gm') ceoPanes.push({ person, i });
+    }
+  }
+  if (ceoPanes.length === 0) {
+    ceoCol.appendChild(el('div', { cls: 'office-ceo-empty', text: 'CEO' }));
+  } else {
+    ceoPanes.forEach(({ person, i }) => {
+      const card = companyPersonCard(person, i, 'executive');
+      card.classList.add('ceo-card');
+      ceoCol.appendChild(card);
+    });
+  }
+  body.appendChild(ceoCol);
+
+  // Divider
+  body.appendChild(el('div', { cls: 'project-office-divider' }));
+
+  // RIGHT: team rows
+  const rowsWrap = el('div', { cls: 'project-office-rows' });
+  if (teams.length === 0) {
+    rowsWrap.appendChild(el('div', { cls: 'office-empty', text: 'No active panes' }));
+  } else {
+    for (const team of teams) {
+      const row = el('div', { cls: 'project-office-row' });
+      const rowLabel = el('span', { cls: 'project-office-row-label', text: team.label });
+      row.appendChild(rowLabel);
+      const members = team.people || [];
+      members.forEach((person, idx) => {
+        const card = companyPersonCard(person, idx, 'team');
+        row.appendChild(card);
+      });
+      rowsWrap.appendChild(row);
+    }
+  }
+  body.appendChild(rowsWrap);
+  office.appendChild(body);
+  return office;
+}
+
+function projectGmPanes(project) {
+  const gms = [];
+  for (const inst of capturedInstances(project)) {
+    for (const pane of inst.panes || []) {
+      const lane = pane.lane || ('pane' + pane.index);
+      if (companyRoleForLane(lane, inst.session, inst.host) === 'gm') {
+        gms.push({ inst, pane, lane });
+      }
+    }
+  }
+  return gms;
+}
+
+function projectGmState(project) {
+  const gms = projectGmPanes(project);
+  if (!gms.length) return 'dead';
+  if (gms.some(({ pane }) => pane.state === 'working' || pane.state === 'rate-limited')) return 'working';
+  if (gms.every(({ pane }) => pane.state === 'goal-done')) return 'goal-done';
+  if (gms.some(({ pane }) => pane.state === 'dead')) return 'dead';
+  return 'idle';
+}
+
+function renderGmSessionSummaryPane(project) {
+  const gms = projectGmPanes(project);
+  const state = projectGmState(project);
+  const card = el('article', { cls: 'pane gm-session-summary-pane s-' + state, title: gms.length ? 'Real CEO Codex session summary' : 'Real CEO Codex session missing' });
+  const ph = el('div', { cls: 'pane-head' });
+  ph.appendChild(el('span', { cls: 'lane-tag', text: 'CEO pane' }));
+  ph.appendChild(el('span', { cls: 'pane-idx', text: gms.length ? 'real' : 'missing' }));
+  ph.appendChild(el('span', { cls: 'state-badge ' + state, text: state }));
+  ph.appendChild(el('span', { cls: 'pane-dims', text: gms.length + ' session' + (gms.length === 1 ? '' : 's') }));
+  ph.appendChild(el('span', { cls: 'model-badge', text: gms.length ? 'Real CEO Codex session' : 'start required', title: gms.length ? 'Real CEO Codex session is backed by real tmux/Codex pane(s)' : 'Start/restart with generated CEO enabled' }));
+  card.appendChild(ph);
+  const terminal = el('div', { cls: 'pane-terminal' });
+  const pre = el('pre', { cls: 'terminal-pre' });
+  if (gms.length) {
+    pre.textContent = [
+      'Real CEO Codex session(s) for ' + project.name,
+      '',
+      ...gms.map(({ inst, pane, lane }) => '- ' + inst.host + ' · ' + inst.session + ' · pane #' + pane.index + ' · lane ' + lane + ' · ' + (pane.state || 'idle')),
+      '',
+      'CEO duty: decide which teams to open, read all docs, review manager reports, run csup staff.',
+    ].join('\n');
+  } else {
+    pre.textContent = [
+      'Real CEO Codex session missing for ' + project.name,
+      '',
+      'This dashboard no longer fabricates a virtual CEO.',
+      'Restart this project with generated CEO enabled so a real CEO pane appears below.',
+    ].join('\n');
+  }
+  terminal.appendChild(pre);
+  card.appendChild(terminal);
+  return card;
+}
+
+
 </script>
 </body>
 </html>
@@ -7321,9 +8110,21 @@ def _cleanup_orphaned_streamers() -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=7777)
+    # On a LUNARC compute node the dashboard is only useful when reachable via
+    # SSH tunnel from the login node, so bind to all interfaces by default
+    # there. Stay localhost-only on dev machines where there is no need to
+    # accept connections from elsewhere.
+    _default_bind = "0.0.0.0" if _running_on_lunarc_compute_node() else "127.0.0.1"
+    ap.add_argument("--bind", default=_default_bind,
+                    help=f"IP address to bind (default: {_default_bind})")
     ap.add_argument("--lines", type=int, default=DEFAULT_TAIL)
     ap.add_argument("--refresh", type=float, default=DEFAULT_REFRESH)
+    ap.add_argument("--project-root", action="append", dest="project_roots", default=[],
+                    metavar="PATH", help="Extra project root to scan (may be given multiple times)")
     args = ap.parse_args()
+
+    for p in args.project_roots:
+        EXTRA_PROJECT_ROOTS.append(pathlib.Path(p))
 
     global REFRESH_LINES
     REFRESH_LINES = args.lines
@@ -7363,10 +8164,10 @@ def main():
     refresh_once(args.lines)
     threading.Thread(target=refresh_loop,
                      args=(args.refresh, args.lines), daemon=True).start()
-    print(f"csup-dashboard: http://localhost:{args.port}", file=sys.stderr)
+    print(f"csup-dashboard: http://{args.bind}:{args.port}", file=sys.stderr)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     socketserver.ThreadingTCPServer.daemon_threads = True
-    with socketserver.ThreadingTCPServer(("127.0.0.1", args.port), Handler) as srv:
+    with socketserver.ThreadingTCPServer((args.bind, args.port), Handler) as srv:
         try:
             srv.serve_forever()
         except KeyboardInterrupt:

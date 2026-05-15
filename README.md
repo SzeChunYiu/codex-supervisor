@@ -60,13 +60,15 @@ codex-supervisor start
 A new terminal window opens attached to the tmux session, with one tiled
 codex pane per prompt. Each pane runs the `codex` CLI; once it's ready,
 the supervisor auto-types the prompt and submits it. By default the
-supervisor also appends two generated fixed panes unless your prompt file
+supervisor also appends three generated fixed panes unless your prompt file
 already defines them:
 
+- `GM` — a real executive Codex session that sets direction, reviews managers,
+  and makes staffing/escalation decisions.
 - `DEBUG` — carefully debugs/optimizes one code slice per iteration.
-- `VALIDATOR` — validates worker results, refreshes
-  `docs/parallel-sessions/TEAM_PLAN.md`, and queues the next compact-safe
-  prompts.
+- `VALIDATOR` — acts as the default manager: validates worker results, refreshes
+  `docs/parallel-sessions/TEAM_PLAN.md`, reports to GM, and queues the next
+  compact-safe prompts.
 
 Default safety cap: at most 8 prompts/panes per supervisor session
 (`CODEX_SUPERVISOR_MAX_PANES=8`). Start fewer when the work or host resources
@@ -107,14 +109,26 @@ Detail lives in `.md` files under your repo:
   one project identity, no anonymous source copies, one writable lease per
   scope, Git-only source movement, and fail-closed conflict handling.
 - `docs/ai-factory.md` — **factory operating model**: one batch outcome,
-  validator-owned acceptance checklist, artifact ledger, lane leases, and
+  GM/manager-owned acceptance checklist, artifact ledger, lane leases, and
   blocker-driven queues so panes converge on the same outcome.
+- `docs/company-operating-model.md` — **company-style role model**: real GM
+  session, fixed management/quality roles, specified functional leads, dynamic workers,
+  specialist contractors, DRI rows, decision rights, and manager/escalation
+  paths.
+- `docs/gm-staffing.md` — **GM staffing/scaling gate**: add, reduce, hold, or move workers from queue demand and node resources.
+- `docs/version-management.md` — **batch PR train**: worker branches feed one
+  accepted `batch/<date>-<slug>` PR instead of creating small review-facing PRs.
 - `templates/TEAM_PLAN.md` — starter board to copy into each project as
   `docs/parallel-sessions/TEAM_PLAN.md`.
+- `templates/ROLE_CHARTER.md` — starter charter for each fixed, specified,
+  dynamic, or specialist pane role.
+- `templates/BATCH_VERSION_PLAN.md` — starter release-train board to copy into
+  each project as `docs/parallel-sessions/VERSION_BOARD.md`.
 - `docs/parallel-sessions/<lane>.md` — **per-lane spec** (branch
   prefix, writable targets, required reading, working rhythm, scope
   guardrails, stop condition).
-- `docs/parallel-sessions/debugger.md`,
+- `docs/parallel-sessions/general-manager.md`,
+  `docs/parallel-sessions/debugger.md`,
   `docs/parallel-sessions/validator-planner.md`, and
   `docs/parallel-sessions/dynamic-worker.md` — default fixed-role and worker
   pool contracts.
@@ -139,8 +153,8 @@ What goes in the **shared `.md`**:
 
 - Lanes table (pane → branch → worktree → focus).
 - Rules every session follows: re-read protocol; stay in lane; commit
-  message format; one PR per iteration; rebase before push; status
-  board entry; conflict policy; "when to stop and ask".
+  message format; worker branches feed the batch PR train; rebase before push;
+  status board entry; conflict policy; "when to stop and ask".
 - The current batch outcome and definition of accepted evidence, normally in
   `docs/parallel-sessions/TEAM_PLAN.md`.
 - For distributed projects, host/source-tree leases: canonical checkout vs.
@@ -167,10 +181,17 @@ For new queue-backed projects, prefer this shape:
 
 1. Keep the fixed `DEBUG` and `VALIDATOR` sessions enabled.
 2. Copy `templates/TEAM_PLAN.md` into the project and let VALIDATOR maintain
-   the batch outcome, acceptance checklist, and artifact ledger.
-3. Put generic follow-up tasks in `codex-tasks/open.txt`.
-4. Start N generated dynamic workers with `CODEX_SUPERVISOR_DYNAMIC_WORKERS=N`.
-5. Use `codex-tasks/<lane>.txt` only for specialized lanes with explicit leases.
+   the batch outcome, DRI-based acceptance checklist, role roster, and artifact
+   ledger.
+3. Copy `templates/BATCH_VERSION_PLAN.md` into the project as
+   `docs/parallel-sessions/VERSION_BOARD.md`; only VALIDATOR/RELEASE_LEAD opens
+   the normal review-facing PR for the batch branch.
+4. Add specified functional leads only when the work needs a durable role such
+   as `TECH_LEAD`, `RESEARCH_LEAD`, `OPS_LEAD`, `DATA_LEAD`,
+   `RELEASE_LEAD`, or `SECURITY_REVIEWER`.
+5. Put generic follow-up tasks in `codex-tasks/open.txt`.
+6. Start N generated dynamic workers with `CODEX_SUPERVISOR_DYNAMIC_WORKERS=N`.
+7. Use `codex-tasks/<lane>.txt` only for specialized lanes with explicit leases.
 
 Dynamic workers consume shared blocker queues first, then their own
 worker-specific queue, then shared open queues (`open`, `worker`, `workers`,
@@ -260,6 +281,10 @@ csup submit <project> <lane> "short task for that lane"
 csup govern --dry-run     # explain what would start
 csup govern --apply       # start right-sized lane subsets
 csup factory-audit <project>  # classify factory health before expanding work
+csup staff <project> --scenario=resume --dry-run
+csup staff <project> --scenario=resume --apply
+csup factory-run <project> --scenario=resume --dry-run
+csup factory-run <project> --scenario=resume --apply
 csup station <project> --host=lunarc --sessions=1 --workers=4 --apply
 csup status               # all configured projects/hosts
 ```
@@ -273,9 +298,19 @@ fit available resources.
 
 `factory-audit` is the management gate for the AI factory model. It reports
 `RED` when factory docs are missing, `docs/blocker-schema.md` is absent/invalid,
-or shared blockers exist, `YELLOW` when queued acceptance-gap work remains, and
-`GREEN` when the validator should either confirm acceptance or queue the next
-gap. Use it before starting more panes.
+`docs/parallel-sessions/VERSION_BOARD.md` is missing, the shared
+`blockers.txt` queue is missing, or shared blockers exist, `YELLOW` when queued
+acceptance-gap work remains, and `GREEN` when the validator should either
+confirm acceptance or queue the next gap. Use it before starting more panes.
+
+`factory-run` is the safer one-command entrypoint for AI sessions that need to
+resume a project without hand-sizing every station request. It counts queued
+`/goal` work, refuses to allocate when there is no queued work, maps scenarios
+to conservative budgets (`resume`, `balanced`, `full`, or `blockers`), and then
+delegates to `govern` for local hosts or `station` for SLURM hosts. It defaults
+to `--dry-run`; use `--apply` only after the plan shows the intended host,
+session count, worker count, and pane count. Use `--max-workers`, `--max-panes`,
+or `--sessions` to lower the budget, not to bypass station capacity checks.
 
 For LUNARC and other SLURM hosts, `csup station` is the standardized
 resource-allocation API for AI/operator sessions. Callers request a number of
@@ -283,7 +318,19 @@ supervisor sessions and dynamic workers; the station checks existing SLURM
 holder allocations, places the session on an allocation with enough free pane
 capacity, submits the next configured slot when current nodes are full, and
 prints `HOLD ... reason=slurm_queue` instead of falling back to the login node
-when the scheduler has not started the new node yet.
+when the scheduler has not started the new node yet. The default project policy
+is at most two computer nodes; maximize safe pane density within those nodes
+rather than adding a third allocation.
+
+Station starts are batched per running SLURM allocation: many supervisor
+sessions can be launched by one persistent `srun --overlap` step instead of one
+new job step per session. Tune `slurm_start_batch_size` (or
+`CSUP_STATION_START_BATCH_SIZE`) only when the generated launch command becomes
+too large; tune `slurm_start_stagger_secs` (or
+`CSUP_STATION_START_STAGGER_SECS`) to control serialized starts inside that
+single step. LUNARC hosts must be configured with `scheduler = "slurm"`; `csup`
+refuses non-SLURM LUNARC starts so Codex panes are never spawned on the login
+node.
 
 ---
 
@@ -308,7 +355,7 @@ always know which pane is which.
 | Step              | Mechanism                                                                 |
 | ----------------- | ------------------------------------------------------------------------- |
 | Launch            | `tmux new-session` + N-1 `tmux split-window`, then equal-grid layout.     |
-| Fixed roles       | Adds one `DEBUG` and one `VALIDATOR` pane by default unless the prompt file already defines equivalent lanes. |
+| Fixed roles       | Adds one `GM`, one `DEBUG`, and one `VALIDATOR` pane by default unless the prompt file already defines equivalent lanes. |
 | Wait for ready    | Polls `tmux capture-pane` for `Tip:` AND no `Starting MCP`, then settles 5s and re-verifies before sending. |
 | Send prompt       | `tmux send-keys` types the prompt + double Enter (codex's slash-command popup eats the first). |
 | Detect limit      | Polls each pane every 60s for `You've hit your usage limit`.              |
@@ -353,6 +400,8 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_ON_COMPLETE`       | `queue-redo` (`queue` / `queue-redo` / `redo` / `rest`) |
 | `CODEX_SUPERVISOR_CONTINUOUS_LANES`  | `*` (every lane re-sends `/goal` after GOAL_DONE — see `docs/never-waste-workers.md`. Set to a space-separated lane list to limit, or empty to disable) |
 | `CODEX_SUPERVISOR_RESPAWN_ON_GOAL`   | `1`                                                |
+| `CODEX_SUPERVISOR_GM`               | `1` (append one generated GM lane if missing) |
+| `CODEX_SUPERVISOR_GM_DOC`           | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/general-manager.md` |
 | `CODEX_SUPERVISOR_DEBUGGER`          | `1` (append one generated DEBUG lane if missing) |
 | `CODEX_SUPERVISOR_DEBUGGER_DOC`      | `/Users/billy/Desktop/projects/codex-supervisor/docs/parallel-sessions/debugger.md` |
 | `CODEX_SUPERVISOR_VALIDATOR`         | `1` (append one generated VALIDATOR lane if missing) |

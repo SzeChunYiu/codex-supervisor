@@ -27,7 +27,9 @@ import importlib.util
 import importlib.machinery
 import pathlib
 import socket
+import subprocess
 import sys
+from types import SimpleNamespace
 
 dashboard_path = pathlib.Path(sys.argv[1])
 home = pathlib.Path(sys.argv[2])
@@ -43,6 +45,13 @@ mod.EXTRA_PROJECT_ROOTS = []
 mod.DIRECT_PROJECT_FALLBACKS = {}
 mod.STATE_GLOB = home / ".codex-supervisor-*.state"
 socket.gethostname = lambda: "test-host"
+
+real_run = subprocess.run
+def fake_run(cmd, *args, **kwargs):
+    if cmd[:2] == ["tmux", "ls"] or cmd[:4] == ["tmux", "-L", "default", "ls"]:
+        return SimpleNamespace(returncode=0, stdout="example-batch\n", stderr="")
+    return real_run(cmd, *args, **kwargs)
+subprocess.run = fake_run
 
 projects = mod.list_projects()
 instances = [

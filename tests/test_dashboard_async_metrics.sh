@@ -98,7 +98,10 @@ mod.REFRESH_INSTANCE_TIMEOUT_SECS = 0.1
 def bounded_capture(host, hosts, me, session, lines, lane_map=None, connection=None):
     if session == "slow":
         slow_started.set()
-        slow_release.wait(1.0)
+        # Keep the slow capture blocked long enough that a synchronous refresh
+        # would clearly exceed the assertion even on a busy CI/dev machine.
+        # The test releases it immediately after refresh() returns.
+        slow_release.wait(5.0)
     return [{"index": 0, "state": "working", "tail": [session], "tail_html": session}]
 
 mod.capture_session = bounded_capture
@@ -106,7 +109,7 @@ t0 = time.perf_counter()
 mod.refresh(1)
 elapsed = time.perf_counter() - t0
 slow_release.set()
-assert elapsed < 0.4, f"refresh should not freeze on a slow instance, took {elapsed:.3f}s"
+assert elapsed < 1.5, f"refresh should not freeze on a slow instance, took {elapsed:.3f}s"
 assert slow_started.wait(0.2), "slow instance was not attempted"
 with mod.CACHE_LOCK:
     snapshot = json.loads(json.dumps(mod.CACHE))

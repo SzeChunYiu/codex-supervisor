@@ -8,6 +8,9 @@ trap 'rm -rf "$TMPDIR"' EXIT
 mkdir -p "$TMPDIR/bin"
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-L" ]]; then
+  shift 2
+fi
 case "$1" in
   has-session) exit 0 ;;
   list-panes)
@@ -95,7 +98,8 @@ PATH="$TMPDIR/bin:$PATH" \
     done
     [[ -n "$child_pid" && -n "$grandchild_pid" ]]
 
-    FAKE_PANE_PID="$root_pid" terminate_session_process_trees >/dev/null 2>&1
+    export FAKE_PANE_PID="$root_pid"
+    terminate_session_process_trees >/dev/null 2>&1
 
     session_done=0
     for _ in 1 2 3 4 5 6 7 8 9 10; do

@@ -45,3 +45,53 @@ assert "refresh_count: state.refresh_count" not in html, "root signature must no
 assert "system_history: state.system_history" not in html, "root signature must not force full overview rebuilds every poll"
 print("ok: dashboard polling has abort/recovery guards and graphics render incrementally")
 PY
+
+python3 - "$DASHBOARD" <<'PY'
+import importlib.machinery
+import importlib.util
+import pathlib
+import time
+import sys
+
+path = pathlib.Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader("csup_dashboard_stream_overlay", str(path))
+spec = importlib.util.spec_from_loader("csup_dashboard_stream_overlay", loader)
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+
+mod.known_hosts = lambda: {"ng-content-lunarc": {"ssh": "lunarc", "scheduler": "slurm"}}
+stream_key = mod.streaming_connection_key("lunarc", "3061936")
+with mod.CACHE_LOCK:
+    mod.CACHE["projects"] = [{
+        "name": "neural_grow",
+        "path": "/tmp/neural_grow",
+        "instances": [{
+            "host": "ng-content-lunarc",
+            "session": "ng-content-lunarc-station-1",
+            "connection": {"job_id": "3061936"},
+            "panes": [{"index": 1, "lane": "planner-content", "tail": ["old"], "tail_html": "old"}],
+            "error": "",
+        }],
+    }]
+with mod.STREAMING_CACHE_LOCK:
+    mod.STREAMING_CACHE[(stream_key, "ng-content-lunarc-station-1")] = {
+        "ts": time.time(),
+        "panes": [{
+            "index": 1,
+            "dead": False,
+            "cmd": "codex",
+            "width": 120,
+            "height": 40,
+            "title": "",
+            "ansi": "old\nnew live line",
+        }],
+    }
+
+state = mod.state_payload(compact=True, tail_lines=1)
+pane = state["projects"][0]["instances"][0]["panes"][0]
+assert pane["tail"] == ["new live line"], pane
+assert pane["lane"] == "planner-content", pane
+assert "tail_html" not in pane, pane
+print("ok: state payload overlays fresh streaming pane text between full refreshes")
+PY

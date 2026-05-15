@@ -47,6 +47,11 @@ cat > "$TMPDIR/home/Desktop/projects/proj-factory/docs/parallel-sessions/TEAM_PL
 
 ## AI Factory acceptance board
 DOC
+cat > "$TMPDIR/home/Desktop/projects/proj-factory/docs/parallel-sessions/VERSION_BOARD.md" <<'DOC'
+# Batch Version / PR Train Board
+
+Worker branch intake feeds batch/<date>-<slug>.
+DOC
 cat > "$TMPDIR/home/Desktop/projects/proj-factory/docs/blocker-schema.md" <<'DOC'
 # Factory blocker schema
 
@@ -74,6 +79,10 @@ if [[ "$audit" != *"FACTORY proj-factory/mac-mini status=RED blockers=1 open=1 l
 fi
 if [[ "$audit" != *"docs=ok"* ]]; then
   printf 'factory-audit should accept complete factory docs, got:\n%s\n' "$audit" >&2
+  exit 1
+fi
+if [[ "$audit" != *"blocker_queue=ok"* ]]; then
+  printf 'factory-audit should require a shared blocker queue, got:\n%s\n' "$audit" >&2
   exit 1
 fi
 if [[ "$audit" != *"ACTION proj-factory/mac-mini: resolve shared blockers before lane-local work"* ]]; then
@@ -106,7 +115,11 @@ if [[ "$missing" != *"FACTORY proj-missing/mac-mini status=RED blockers=0 open=0
   printf 'factory-audit should report missing-doc RED status, got:\n%s\n' "$missing" >&2
   exit 1
 fi
-if [[ "$missing" != *"docs=missing:shared,ai_factory,team_plan,blocker_schema"* ]]; then
+if [[ "$missing" != *"docs=missing:shared,ai_factory,team_plan,version_board,blocker_schema"* ]]; then
   printf 'factory-audit should list missing factory docs, got:\n%s\n' "$missing" >&2
+  exit 1
+fi
+if [[ "$missing" != *"blocker_queue=missing"* ]]; then
+  printf 'factory-audit should report a missing shared blocker queue, got:\n%s\n' "$missing" >&2
   exit 1
 fi

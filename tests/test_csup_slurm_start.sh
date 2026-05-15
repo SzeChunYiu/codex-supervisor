@@ -47,10 +47,10 @@ PATH="$TMPDIR/bin:$PATH" \
 
 cat "$TMPDIR/ssh.log" > "$TMPDIR/log.txt"
 grep -q "squeue .*mcaccel-sup" "$TMPDIR/log.txt"
-grep -q "nohup srun --jobid=.*555.*--overlap" "$TMPDIR/log.txt"
+grep -q "nohup setsid env -u LD_LIBRARY_PATH srun --jobid=.*555.*--overlap" "$TMPDIR/log.txt"
 grep -q "disown; echo started slurm_job=555" "$TMPDIR/log.txt"
 grep -q "source /shared/env.sh" "$TMPDIR/log.txt"
 grep -q "CODEX_SUPERVISOR_MAX_LOAD_PER_CPU=.*:-0" "$TMPDIR/log.txt"
 grep -q "CODEX_SUPERVISOR_PROMPTS=.*remote/proj/prompts.txt" "$TMPDIR/log.txt"
-grep -q "while tmux has-session -t.*proj-lunarc" "$TMPDIR/log.txt"
+grep -q "while tmux -L .*proj-lunarc.* has-session -t.*proj-lunarc" "$TMPDIR/log.txt"
 echo "ok: csup starts LUNARC hosts through a persistent SLURM srun step"

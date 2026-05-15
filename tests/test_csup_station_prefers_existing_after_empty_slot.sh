@@ -51,7 +51,7 @@ out="$(
   "$CSUP" station proj --host=lunarc --sessions=1 --workers=4 --apply 2>&1
 )"
 
-[[ "$out" == *"START proj/lunarc slot=2 job=222 node=cx02 session=proj-lunarc-station-1 workers=4 panes=6"* ]] || {
+[[ "$out" == *"START proj/lunarc slot=2 job=222 node=cx02 session=proj-lunarc-station-1 workers=4 panes=5"* ]] || {
   printf 'expected station to prefer existing slot 2 before submitting empty slot 1, got:\n%s\n' "$out" >&2
   exit 1
 }
