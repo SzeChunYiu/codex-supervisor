@@ -37,6 +37,7 @@ class ReadyStream:
                 "title": "codex",
                 "ansi": ansi,
             }],
+            "monitor": {"known": True, "running": True, "pids": [4242], "error": ""},
         }
 
 mod.host_runner = lambda host, hosts, me, timeout, retries=1, slurm_job_id="": (
@@ -63,5 +64,7 @@ assert pane["tail"] == ["new 4", "new 5"], pane
 assert pane["tail_line_count"] == 2, pane
 assert "old 1" not in pane["tail_html"], pane["tail_html"]
 assert "new 5" in pane["tail_html"], pane["tail_html"]
+monitor = mod.get_monitor_status("remote-slurm", "remote-session")
+assert monitor["running"] is True and monitor["pids"] == [4242], monitor
 print("ok: streaming cache renders requested tail lines and lane labels")
 PY

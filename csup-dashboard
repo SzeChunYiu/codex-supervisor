@@ -719,6 +719,33 @@ def ensure_wide(socket, session):
 
 def capture_all():
     out = []
+    try:
+        ps_out = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+    except Exception:
+        ps_out = ""
+
+    def monitor_for(session):
+        monitor = {"known": True, "running": False, "pids": [], "error": ""}
+        candidates = []
+        for raw in ps_out.splitlines():
+            line = raw.strip()
+            if not line or "codex-supervisor.sh" not in line or "--daemon" not in line or "--session" not in line:
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid_raw, ppid_raw, args = parts
+            if f"--session {session}" not in args and f"--session={session}" not in args:
+                continue
+            try:
+                candidates.append((int(pid_raw), int(ppid_raw)))
+            except ValueError:
+                continue
+        candidate_pids = {pid for pid, _ in candidates}
+        monitor["pids"] = [pid for pid, ppid in candidates if ppid not in candidate_pids]
+        monitor["running"] = bool(monitor["pids"])
+        return monitor
+
     for socket in list_sockets():
         r = subprocess.run(tmux_cmd(socket, "ls", "-F", "#{session_name}"), capture_output=True, text=True)
         if r.returncode != 0:
@@ -750,7 +777,7 @@ def capture_all():
                     "title": parts[5] if len(parts) > 5 else "",
                     "ansi": cap.stdout if cap.returncode == 0 else "",
                 })
-            out.append({"session": session, "panes": panes, "ts": time.time()})
+            out.append({"session": session, "panes": panes, "monitor": monitor_for(session), "ts": time.time()})
     return out
 
 def pane_hash(p):
@@ -956,6 +983,7 @@ class StreamingConnection:
                         if full:
                             STREAMING_CACHE[key] = {
                                 "panes": sess.get("panes", []),
+                                "monitor": sess.get("monitor") or {},
                                 "ts": float(sess.get("ts") or now),
                             }
                             broadcast = True
@@ -971,6 +999,7 @@ class StreamingConnection:
                             broadcast = True
                         STREAMING_CACHE[key] = {
                             "panes": sorted(cur.values(), key=lambda x: x.get("index", 0)),
+                            "monitor": sess.get("monitor") or existing.get("monitor") or {},
                             "ts": float(sess.get("ts") or now),
                         }
                 if broadcast:
@@ -2015,6 +2044,9 @@ def apply_streaming_cache_overlay(snapshot: dict, tail_lines: int) -> None:
                 if existing_lanes.get(idx):
                     pane["lane"] = existing_lanes[idx]
             inst["panes"] = panes
+            if cached.get("monitor"):
+                inst["monitor"] = cached.get("monitor")
+                set_monitor_status(host, session, cached.get("monitor") or empty_monitor_status())
             inst["stream_updated_at"] = float(cached.get("ts") or 0)
 
 
@@ -2246,6 +2278,7 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
             if stream and stream.is_ready():
                 cached = stream.get_session(session)
                 if cached:
+                    set_monitor_status(host, session, cached.get("monitor") or empty_monitor_status())
                     panes = [
                         render_captured_item_simple(item, tail_lines=tail_lines, lane_map=lane_map)
                         for item in cached["panes"]
@@ -2258,6 +2291,7 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
                                 "last_attempt_at": cached["ts"],
                                 "last_error": "",
                                 "value": clone_jsonable(panes),
+                                "monitor": cached.get("monitor") or {},
                                 "refreshing": False,
                             }
                     return panes
@@ -3254,6 +3288,8 @@ def refresh(lines: int):
                 ]
                 if not panes:
                     continue
+                if cached.get("monitor"):
+                    set_monitor_status(host, str(session), cached.get("monitor") or empty_monitor_status())
                 if len(panes) == 1 and re.search(r"(^|[-_])meta($|[-_])|ceo|executive", f"{host} {session}", re.IGNORECASE):
                     panes[0]["lane"] = "CEO"
                 elif len(panes) > 1:
