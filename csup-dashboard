@@ -40,6 +40,7 @@ MAX_REQUEST_PATH_CHARS = 8192
 MAX_QUERY_FIELDS = 20
 MAX_PANE_INDEX = 4096
 MAX_PANE_TARGET_NAME_CHARS = 128
+MAX_PROJECT_FILTER_CHARS = 128
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
 PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
@@ -8777,7 +8778,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(500, str(e)[:120])
                     return
             project_filter = q.get("project", [""])[0]
-            if project_filter and not re.fullmatch(r"[a-z0-9_.\-]+", project_filter):
+            if project_filter and (len(project_filter) > MAX_PROJECT_FILTER_CHARS or
+                                   not re.fullmatch(r"[a-z0-9_.\-]+", project_filter)):
                 self.send_error(400, "invalid project")
                 return
             compact = q.get("compact", ["0"])[0].lower() in {"1", "true", "yes", "on"}

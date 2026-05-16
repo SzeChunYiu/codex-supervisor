@@ -76,6 +76,13 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     except urllib.error.HTTPError as e:
         assert e.code == 400, e
 
+    long_project = "p" * (mod.MAX_PROJECT_FILTER_CHARS + 1)
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state.json?project={long_project}", timeout=2)
+        raise AssertionError("oversized dashboard project filter should be rejected")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, e
+
     conn = None
     old_sleep = mod.time.sleep
     try:
