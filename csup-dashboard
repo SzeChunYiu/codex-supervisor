@@ -38,6 +38,7 @@ from urllib.parse import parse_qs, urlparse
 
 MAX_REQUEST_PATH_CHARS = 8192
 MAX_QUERY_FIELDS = 20
+MAX_PANE_INDEX = 4096
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
 PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
@@ -8843,9 +8844,12 @@ class Handler(BaseHTTPRequestHandler):
                not re.fullmatch(r"[A-Za-z0-9_.\-]+", session or "") or \
                not re.fullmatch(r"\d+", idx):
                 self.send_error(400); return
+            pane_index = bounded_int(idx, -1, min_value=0, max_value=MAX_PANE_INDEX)
+            if pane_index < 0:
+                self.send_error(400); return
             hosts = known_hosts()
             me = this_host_name(hosts)
-            target = f"{session}:.{idx}"
+            target = f"{session}:.{pane_index}"
             try:
                 runner = host_runner(host, hosts, me, timeout=15, retries=1)
                 if runner is None:
