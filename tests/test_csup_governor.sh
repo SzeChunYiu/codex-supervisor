@@ -262,3 +262,20 @@ PATH="$TMPDIR/bin:$PATH" \
 
 grep -q '^/goal check the perf queue$' "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"
 grep -q "queued proj-a/perf" /tmp/csup-submit.out
+
+if HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" submit proj-a ../escape "bad lane" >/tmp/csup-submit-bad-lane.out 2>/tmp/csup-submit-bad-lane.err; then
+  echo "submit should reject path-traversal lane names" >&2
+  exit 1
+fi
+grep -q "submit: lane must be a safe filename token" /tmp/csup-submit-bad-lane.err || {
+  cat /tmp/csup-submit-bad-lane.err >&2
+  exit 1
+}
+[[ ! -e "$TMPDIR/home/Desktop/projects/proj-a/escape.txt" ]] || {
+  echo "invalid lane should not write outside codex-tasks" >&2
+  exit 1
+}
