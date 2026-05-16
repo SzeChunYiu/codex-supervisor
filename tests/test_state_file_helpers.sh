@@ -8,10 +8,12 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/root/run" "$TMPDIR/project/codex-tasks"
 printf '/goal state helper test\n' > "$TMPDIR/project/prompts.txt"
+LONG_STATE_VALUE="$(printf "%05000d" 0 | tr 0 x)"
 
 cat > "$TMPDIR/root/run/state-test.state" <<STATE
 FOOXBAR=wrong-regex-match
 FOO.BAR=literal-dot-match
+HUGE_VALUE=$LONG_STATE_VALUE
 PROMPTS_FILE=prompts.txt
 TASKS_DIR=$TMPDIR/project/codex-tasks
 PROJECT_ROOT=$TMPDIR/project
@@ -28,6 +30,10 @@ CODEX_SUPERVISOR_STATE_FILE="$TMPDIR/root/run/state-test.state" \
     literal_value="$(state_value "FOO.BAR")"
     if [[ "$literal_value" != "literal-dot-match" ]]; then
       printf "state_value should match literal keys, got: %s\n" "$literal_value" >&2
+      exit 1
+    fi
+    if [[ "$(state_value "HUGE_VALUE")" != "" ]]; then
+      echo "state_value should sanitize oversized values to empty" >&2
       exit 1
     fi
 
