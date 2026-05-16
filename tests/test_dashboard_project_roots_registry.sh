@@ -60,6 +60,25 @@ projects = mod.list_projects()
 assert len([p for p in projects if p["name"].startswith("proj-")]) == 2, projects
 mod.MAX_PROJECT_SCAN_ENTRIES = orig_max_project_scan
 
+root_cap_dir = home / "Desktop/root-cap"
+root_cap_dir.mkdir(parents=True)
+root_lines = []
+for i in range(5):
+    child = root_cap_dir / f"root-proj-{i}"
+    child.mkdir()
+    (child / ".codex-supervisor.toml").write_text(
+        f"[project]\nname = \"root-proj-{i}\"\n[hosts.local]\nssh = \"local\"\n"
+    )
+    root_lines.append(str(child))
+mod.PROJECT_SEARCH_DIRS = [home / "Desktop/projects-does-not-exist"]
+mod.PROJECT_ROOTS_FILE = home / ".config/csup/root-cap-roots.txt"
+mod.PROJECT_ROOTS_FILE.write_text("\n".join(root_lines) + "\n")
+mod.PROJECT_CACHE_FILE = home / ".config/csup/missing-cache.json"
+mod.MAX_PROJECT_SCAN_ENTRIES = 2
+projects = mod.list_projects()
+assert len([p for p in projects if p["name"].startswith("root-proj-")]) == 2, projects
+mod.MAX_PROJECT_SCAN_ENTRIES = orig_max_project_scan
+
 # If direct project config access is unavailable too, the cache still carries
 # the backstage host structure from a prior trusted csup discovery pass.
 mod.PROJECT_ROOTS_FILE = home / ".config/csup/missing-roots.txt"
@@ -70,6 +89,16 @@ mod.PROJECT_CACHE_FILE.write_text(__import__("json").dumps([{
 }]))
 projects = mod.list_projects()
 assert any(p["name"] == "cached-proj" and p["hosts"].get("local", {}).get("session") == "cached" for p in projects), projects
+
+mod.PROJECT_CACHE_FILE.write_text(__import__("json").dumps([{
+    "path": str(home / f"Desktop/cache-cap-{i}"),
+    "config": {"project": {"name": f"cache-cap-{i}"}, "hosts": {"local": {"ssh": "local"}}},
+} for i in range(5)]))
+mod.MAX_PROJECT_SCAN_ENTRIES = 2
+projects = mod.list_projects()
+assert len([p for p in projects if p["name"].startswith("cache-cap-")]) == 2, projects
+mod.MAX_PROJECT_SCAN_ENTRIES = orig_max_project_scan
+
 mod.PROJECT_SEARCH_DIRS = [home / "Desktop/projects-does-not-exist"]
 mod.PROJECT_ROOTS_FILE = home / ".config/csup/oversized-roots.txt"
 mod.PROJECT_ROOTS_FILE.write_text("#" * 1_000_001)

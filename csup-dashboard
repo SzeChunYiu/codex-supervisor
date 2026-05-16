@@ -1481,6 +1481,8 @@ def list_projects() -> list[dict]:
     roots_text = read_text_bounded(PROJECT_ROOTS_FILE, max_bytes=1_000_000, label="project roots read")
     if roots_text is not None:
         for raw in roots_text.splitlines():
+            if len(candidates) >= MAX_PROJECT_SCAN_ENTRIES:
+                break
             raw = raw.strip()
             if not raw or raw.startswith("#"):
                 continue
@@ -1536,7 +1538,9 @@ def list_projects() -> list[dict]:
     except json.JSONDecodeError:
         cached_projects = []
     if isinstance(cached_projects, list):
-        for rec in cached_projects:
+        for idx, rec in enumerate(cached_projects):
+            if idx >= MAX_PROJECT_SCAN_ENTRIES:
+                break
             if not isinstance(rec, dict):
                 continue
             path_raw = str(rec.get("path") or "")
