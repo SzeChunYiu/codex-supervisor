@@ -794,9 +794,13 @@ capacity_fields() {
   load_room=$(python3 - "$cpus" "$load" "$load_limit" <<'PY'
 import math, sys
 try:
-    cpus = max(1, int(float(sys.argv[1])))
-    load = max(0.0, float(sys.argv[2]))
+    cpus_raw = float(sys.argv[1])
+    load_raw = float(sys.argv[2])
     limit = float(sys.argv[3])
+    if not all(math.isfinite(v) for v in (cpus_raw, load_raw, limit)) or limit < 0:
+        raise ValueError("non-finite capacity input")
+    cpus = max(1, int(cpus_raw))
+    load = max(0.0, load_raw)
 except Exception:
     print(0)
     raise SystemExit(0)
