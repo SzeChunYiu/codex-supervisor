@@ -1713,11 +1713,26 @@ queue_token_lc_in_list() {
   return 1
 }
 
+bounded_run_file_env() {
+  local name="$1" default="$2" raw root
+  raw="${!name:-}"
+  [[ ${#raw} -le 4096 ]] || raw=""
+  [[ -n "$raw" ]] || { printf '%s\n' "$default"; return; }
+  [[ "$raw" != *..* && "$raw" != *$'\n'* && "$raw" != *$'\r'* ]] || { printf '%s\n' "$default"; return; }
+  [[ "$raw" == /* ]] || raw="$PWD/$raw"
+  root="$SUPERVISOR_ROOT"
+  [[ "$root" == /* ]] || root="$PWD/$root"
+  case "$raw" in
+    "$root"/run/*) printf '%s\n' "$raw" ;;
+    *) printf '%s\n' "$default" ;;
+  esac
+}
+
 # Per-session state file remembers the prompts file path the supervisor was
 # started with, so subsequent `status` / `send` / `restart` etc. don't have
 # to be invoked from the project dir or with the env var set.
-STATE_FILE="${CODEX_SUPERVISOR_STATE_FILE:-$SUPERVISOR_ROOT/run/${SESSION}.state}"
-DAEMON_PID_FILE="${CODEX_SUPERVISOR_DAEMON_PID_FILE:-$SUPERVISOR_ROOT/run/${SESSION}.daemon.pid}"
+STATE_FILE="$(bounded_run_file_env CODEX_SUPERVISOR_STATE_FILE "$SUPERVISOR_ROOT/run/${SESSION}.state")"
+DAEMON_PID_FILE="$(bounded_run_file_env CODEX_SUPERVISOR_DAEMON_PID_FILE "$SUPERVISOR_ROOT/run/${SESSION}.daemon.pid")"
 
 refresh_session_paths() {
   if [[ -z "$SUPERVISOR_CODEX_HOME_EXPLICIT" ]]; then

@@ -66,4 +66,20 @@ CODEX_SUPERVISOR_STATE_FILE="$TMPDIR/root/run/state-test.state" \
     fi
   ' _ "$SCRIPT" "$TMPDIR"
 
+unsafe_runtime_paths="$(
+  CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_SUPERVISOR_ROOT="$TMPDIR/root" \
+  CODEX_SUPERVISOR_SESSION=state-test \
+  CODEX_SUPERVISOR_STATE_FILE="$TMPDIR/outside.state" \
+  CODEX_SUPERVISOR_DAEMON_PID_FILE="$TMPDIR/outside.pid" \
+    bash -c 'source "$1"; printf "%s\n%s\n" "$STATE_FILE" "$DAEMON_PID_FILE"' \
+    _ "$SCRIPT"
+)"
+expected_runtime_paths="$TMPDIR/root/run/state-test.state
+$TMPDIR/root/run/state-test.daemon.pid"
+if [[ "$unsafe_runtime_paths" != "$expected_runtime_paths" ]]; then
+  printf 'unsafe explicit runtime files should fall back under supervisor run dir, got:\n%s\n' "$unsafe_runtime_paths" >&2
+  exit 1
+fi
+
 echo "ok: state file helpers use literal keys and resolve persisted paths"
