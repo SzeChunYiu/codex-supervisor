@@ -33,7 +33,6 @@ import pathlib
 import socket
 import subprocess
 import sys
-from types import SimpleNamespace
 
 dashboard_path = pathlib.Path(sys.argv[1])
 home = pathlib.Path(sys.argv[2])
@@ -50,12 +49,14 @@ mod.DIRECT_PROJECT_FALLBACKS = {}
 mod.STATE_GLOB = home / ".codex-supervisor-*.state"
 socket.gethostname = lambda: "test-host"
 
-real_run = subprocess.run
-def fake_run(cmd, *args, **kwargs):
+orig_run_stable = mod.run_stable
+def fake_run_stable(cmd, *args, **kwargs):
+    assert kwargs.get("timeout") == 2.0, kwargs
+    assert kwargs.get("retries") == 0, kwargs
     if cmd[:2] == ["tmux", "ls"] or cmd[:4] == ["tmux", "-L", "default", "ls"]:
-        return SimpleNamespace(returncode=0, stdout="example-batch\n", stderr="")
-    return real_run(cmd, *args, **kwargs)
-subprocess.run = fake_run
+        return subprocess.CompletedProcess(cmd, 0, "example-batch\n", "")
+    return orig_run_stable(cmd, *args, **kwargs)
+mod.run_stable = fake_run_stable
 
 # State discovery must not read an unbounded number of stale/corrupt state files.
 for i in range(5):
