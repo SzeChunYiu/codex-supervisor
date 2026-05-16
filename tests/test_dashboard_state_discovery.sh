@@ -51,6 +51,8 @@ socket.gethostname = lambda: "test-host"
 
 orig_run_stable = mod.run_stable
 def fake_run_stable(cmd, *args, **kwargs):
+    if cmd and cmd[0] == "ssh":
+        return subprocess.CompletedProcess(cmd, 1, "", "remote unavailable")
     assert kwargs.get("timeout") == 2.0, kwargs
     assert kwargs.get("retries") == 0, kwargs
     if cmd[:2] == ["tmux", "ls"] or cmd[:4] == ["tmux", "-L", "default", "ls"]:
