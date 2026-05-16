@@ -571,7 +571,7 @@ slurm_ensure_allocation() {
   esac
   { info "no active SLURM allocation for '$host'; submitting holder job $(slurm_job_name "$host")"; } >&2
   slurm_submit_holder "$host" >/dev/null || return 1
-  wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120)
+  wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120 3600)
   waited=0
   while (( waited < wait_secs )); do
     sleep 5
@@ -842,23 +842,23 @@ capacity_fields() {
   cpus=$(cpu_count)
   load=$(load1)
   running=$(running_local_panes)
-  free_ram=$(nonnegative_int_or_default "$free_ram" 0)
-  free_disk=$(nonnegative_int_or_default "$free_disk" 0)
-  cpus=$(positive_int_or_default "$cpus" 1)
-  load=$(nonnegative_decimal_or_default "$load" 0)
-  running=$(nonnegative_int_or_default "$running" 0)
-  max_total=$(positive_int_or_default "${CSUP_GOVERNOR_MAX_TOTAL_PANES:-}" 8)
-  ram_per=$(positive_int_or_default "${CSUP_GOVERNOR_RAM_MB_PER_PANE:-}" 700)
-  disk_per=$(positive_int_or_default "${CSUP_GOVERNOR_DISK_MB_PER_PANE:-}" 1024)
-  reserve_ram=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_RAM_MB:-}" 2048)
-  reserve_disk=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_DISK_GB:-}" 10)
+  free_ram=$(nonnegative_int_or_default "$free_ram" 0 1000000000)
+  free_disk=$(nonnegative_int_or_default "$free_disk" 0 1000000)
+  cpus=$(positive_int_or_default "$cpus" 1 1024)
+  load=$(nonnegative_decimal_or_default "$load" 0 1000000)
+  running=$(nonnegative_int_or_default "$running" 0 100000)
+  max_total=$(positive_int_or_default "${CSUP_GOVERNOR_MAX_TOTAL_PANES:-}" 8 512)
+  ram_per=$(positive_int_or_default "${CSUP_GOVERNOR_RAM_MB_PER_PANE:-}" 700 1000000)
+  disk_per=$(positive_int_or_default "${CSUP_GOVERNOR_DISK_MB_PER_PANE:-}" 1024 1000000)
+  reserve_ram=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_RAM_MB:-}" 2048 1000000000)
+  reserve_disk=$(nonnegative_int_or_default "${CSUP_GOVERNOR_MIN_FREE_DISK_GB:-}" 10 1000000)
 
   ram_room=$(( (free_ram - reserve_ram) / ram_per ))
   (( ram_room < 0 )) && ram_room=0
   disk_room=$(( (free_disk - reserve_disk) * 1024 / disk_per ))
   (( disk_room < 0 )) && disk_room=0
   local load_limit
-  load_limit=$(nonnegative_decimal_or_default "${CSUP_GOVERNOR_MAX_LOAD_PER_CPU:-}" 1.25)
+  load_limit=$(nonnegative_decimal_or_default "${CSUP_GOVERNOR_MAX_LOAD_PER_CPU:-}" 1.25 100)
   load_room=$(python3 - "$cpus" "$load" "$load_limit" <<'PY'
 import math, sys
 try:
@@ -924,9 +924,23 @@ capacity_panes() {
   echo 0
 }
 
+unsigned_int_gt() {
+  local a="${1:-0}" b="${2:-0}"
+  a="$(printf '%s' "$a" | sed 's/^0*//')"; a="${a:-0}"
+  b="$(printf '%s' "$b" | sed 's/^0*//')"; b="${b:-0}"
+  if (( ${#a} > ${#b} )); then
+    return 0
+  fi
+  if (( ${#a} < ${#b} )); then
+    return 1
+  fi
+  [[ "$a" > "$b" ]]
+}
+
 positive_int_or_default() {
-  local value="$1" default="$2"
-  if [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
+  local value="$1" default="$2" max="${3:-}" norm
+  norm="$(printf '%s' "$value" | sed 's/^0*//')"; norm="${norm:-0}"
+  if [[ "$value" =~ ^[0-9]+$ ]] && ! unsigned_int_gt "$value" "${max:-$value}" && [[ "$norm" != "0" ]]; then
     printf '%s' "$value"
   else
     printf '%s' "$default"
@@ -934,8 +948,8 @@ positive_int_or_default() {
 }
 
 nonnegative_int_or_default() {
-  local value="$1" default="$2"
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
+  local value="$1" default="$2" max="${3:-}"
+  if [[ "$value" =~ ^[0-9]+$ ]] && ! unsigned_int_gt "$value" "${max:-$value}"; then
     printf '%s' "$value"
   else
     printf '%s' "$default"
@@ -943,8 +957,16 @@ nonnegative_int_or_default() {
 }
 
 nonnegative_decimal_or_default() {
-  local value="$1" default="$2"
-  if [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  local value="$1" default="$2" max="${3:-}"
+  if [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && { [[ -z "$max" ]] || python3 - "$value" "$max" <<'PY'
+import decimal
+import sys
+try:
+    raise SystemExit(0 if decimal.Decimal(sys.argv[1]) <= decimal.Decimal(sys.argv[2]) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+  }; then
     printf '%s' "$value"
   else
     printf '%s' "$default"
@@ -954,12 +976,13 @@ nonnegative_decimal_or_default() {
 slurm_slot_capacity_panes() {
   local host="$1" max cpus
   max=$(host_field "$host" "slurm_max_panes")
-  if [[ "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]]; then
+  max=$(positive_int_or_default "$max" 0 256)
+  if [[ "$max" != "0" ]]; then
     printf '%s' "$max"
     return
   fi
   cpus=$(host_field "$host" "slurm_cpus")
-  cpus=$(positive_int_or_default "$cpus" 8)
+  cpus=$(positive_int_or_default "$cpus" 8 1024)
   # Keep one CPU's worth of headroom and cap by the historical stable
   # supervisor density unless host config explicitly overrides it.
   (( cpus > 1 )) && cpus=$((cpus - 1))
@@ -972,7 +995,7 @@ project_node_cap() {
   local host="$1" cap
   cap="${CSUP_PROJECT_MAX_NODES:-}"
   [[ -z "$cap" ]] && cap=$(host_field "$host" "project_max_nodes")
-  cap=$(positive_int_or_default "$cap" 2)
+  cap=$(positive_int_or_default "$cap" 2 2)
   # Hard project policy: at most two computer nodes. The env/config knob can
   # lower the cap for smaller projects, but cannot raise it above two.
   (( cap > 2 )) && cap=2
@@ -982,7 +1005,7 @@ project_node_cap() {
 slurm_slots_for_host() {
   local host="$1" slots cap
   slots=$(host_field "$host" "slurm_slots")
-  slots=$(positive_int_or_default "$slots" 1)
+  slots=$(positive_int_or_default "$slots" 1 100)
   cap=$(project_node_cap "$host")
   # Global policy: a single project may use at most two computer nodes.
   # slurm_slots is capacity discovery, not permission to exceed the
@@ -996,14 +1019,14 @@ slurm_start_batch_size() {
   local host="$1" batch
   batch="${CSUP_STATION_START_BATCH_SIZE:-}"
   [[ -z "$batch" ]] && batch=$(host_field "$host" "slurm_start_batch_size")
-  positive_int_or_default "$batch" 32
+  positive_int_or_default "$batch" 32 256
 }
 
 slurm_start_stagger_secs() {
   local host="$1" stagger
   stagger="${CSUP_STATION_START_STAGGER_SECS:-}"
   [[ -z "$stagger" ]] && stagger=$(host_field "$host" "slurm_start_stagger_secs")
-  nonnegative_int_or_default "$stagger" 2
+  nonnegative_int_or_default "$stagger" 2 300
 }
 
 slurm_remote_pane_count() {
@@ -1680,7 +1703,7 @@ cmd_govern() {
       queued_total=0
       dynamic_total=$(dynamic_queue_goal_count "$queue_abs")
       queued_total="$dynamic_total"
-      fixed_panes=$(positive_int_or_default "${CSUP_GOVERNOR_FIXED_PANES:-}" 2) # generated MANAGER + REVIEWER; CEO runs as its own session.
+      fixed_panes=$(positive_int_or_default "${CSUP_GOVERNOR_FIXED_PANES:-}" 2 64) # generated MANAGER + REVIEWER; CEO runs as its own session.
       lane_budget=$(( remaining - fixed_panes ))
       if (( lane_budget < 1 )); then
         if (( json )); then
@@ -2294,7 +2317,7 @@ cmd_station() {
       if [[ "$mode" == "apply" ]]; then
         printf 'SUBMIT %s/%s slot=%s job_name=%s requested_panes=%s\n' "$project" "$h" "$slot" "$job_name" "$requested_panes"
         slurm_submit_holder_named "$h" "$job_name" >/dev/null || { printf 'HOLD %s/%s slot=%s job_name=%s sessions_waiting=%s reason=submit_failed\n' "$project" "$h" "$slot" "$job_name" "$remaining"; return 0; }
-        wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120)
+        wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120 3600)
         waited=0
         info=""
         while (( waited < wait_secs )); do

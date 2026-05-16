@@ -84,6 +84,56 @@ malformed_inputs="$(
   exit 1
 }
 
+huge_env_inputs="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_GOVERNOR_FREE_RAM_MB=999999 \
+  CSUP_GOVERNOR_FREE_DISK_GB=999999 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=999999 \
+  CSUP_GOVERNOR_RUNNING_PANES=0 \
+  CSUP_GOVERNOR_MAX_TOTAL_PANES=999999 \
+  CSUP_GOVERNOR_RAM_MB_PER_PANE=1 \
+  CSUP_GOVERNOR_DISK_MB_PER_PANE=1 \
+  CSUP_GOVERNOR_MIN_FREE_RAM_MB=0 \
+  CSUP_GOVERNOR_MIN_FREE_DISK_GB=0 \
+  CSUP_GOVERNOR_MAX_LOAD_PER_CPU=999999 \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" capacity
+)"
+
+[[ "$huge_env_inputs" == *"available=1"* && "$huge_env_inputs" == *"bottleneck=load"* ]] || {
+  printf 'capacity should clamp oversized governor env caps to safe defaults, got:\n%s\n' "$huge_env_inputs" >&2
+  exit 1
+}
+[[ "$huge_env_inputs" == *"max_total=8"* && "$huge_env_inputs" == *"max_load_per_cpu=1.25"* ]] || {
+  printf 'capacity should report sanitized governor caps, got:\n%s\n' "$huge_env_inputs" >&2
+  exit 1
+}
+
+overflow_sized_inputs="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_GOVERNOR_FREE_RAM_MB=999999999999999999999999 \
+  CSUP_GOVERNOR_FREE_DISK_GB=999999999999999999999999 \
+  CSUP_GOVERNOR_LOAD1=999999999999999999999999 \
+  CSUP_GOVERNOR_CPU_COUNT=999999999999999999999999 \
+  CSUP_GOVERNOR_RUNNING_PANES=999999999999999999999999 \
+  CSUP_GOVERNOR_MAX_TOTAL_PANES=999999999999999999999999 \
+  CSUP_GOVERNOR_RAM_MB_PER_PANE=999999999999999999999999 \
+  CSUP_GOVERNOR_DISK_MB_PER_PANE=999999999999999999999999 \
+  CSUP_GOVERNOR_MIN_FREE_RAM_MB=999999999999999999999999 \
+  CSUP_GOVERNOR_MIN_FREE_DISK_GB=999999999999999999999999 \
+  CSUP_GOVERNOR_MAX_LOAD_PER_CPU=999999999999999999999999 \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" capacity
+)"
+
+[[ "$overflow_sized_inputs" == *"max_total=8"* && "$overflow_sized_inputs" == *"running=0"* ]] || {
+  printf 'capacity should avoid arithmetic overflow from huge numeric env values, got:\n%s\n' "$overflow_sized_inputs" >&2
+  exit 1
+}
+
 json_out="$(
   HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
