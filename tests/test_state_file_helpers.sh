@@ -31,6 +31,20 @@ CODEX_SUPERVISOR_STATE_FILE="$TMPDIR/root/run/state-test.state" \
       exit 1
     fi
 
+    long_path="$(printf "%05000d" 0 | tr 0 x)"
+    [[ "$(CODEX_SUPERVISOR_PROMPTS="$long_path" safe_optional_path_env CODEX_SUPERVISOR_PROMPTS)" == "" ]] || {
+      echo "oversized prompts env path should sanitize to empty" >&2
+      exit 1
+    }
+    [[ "$(CODEX_SUPERVISOR_TASKS_DIR="$long_path" safe_optional_path_env CODEX_SUPERVISOR_TASKS_DIR)" == "" ]] || {
+      echo "oversized tasks env path should sanitize to empty" >&2
+      exit 1
+    }
+    [[ "$(CODEX_SUPERVISOR_PROMPTS="relative/prompts.txt" safe_optional_path_env CODEX_SUPERVISOR_PROMPTS)" == "relative/prompts.txt" ]] || {
+      echo "normal relative prompts env path should be preserved" >&2
+      exit 1
+    }
+
     PROMPTS_FILE=""
     resolve_prompts_file
     if [[ "$PROMPTS_FILE" != "$2/project/prompts.txt" ]]; then
