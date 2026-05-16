@@ -2923,11 +2923,12 @@ resolve_tasks_dir() {
 pop_next_task_file() {
   local file="$1"
   [[ -f "$file" ]] || return 1
-  # Find first non-blank, non-comment line
+  # Find first valid queued goal line; ignore blank/comment/malformed lines.
   local task line_no=0 found=0
   while IFS= read -r line; do
     line_no=$((line_no + 1))
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^/goal([[:space:]]|$) ]] || continue
     task="$line"
     found=1
     break
