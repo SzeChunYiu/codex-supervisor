@@ -8655,10 +8655,10 @@ def _cleanup_orphaned_streamers() -> None:
                 continue
             targets_done.add(cmd_target)
             try:
-                subprocess.run(
+                run_stable(
                     ["ssh", *SSH_BASE_OPTS, *SSH_CONTROL_OPTS, cmd_target,
                      'pkill -u "$(whoami)" -f "srun.*overlap.*python3" 2>/dev/null; true'],
-                    timeout=8, capture_output=True,
+                    timeout=8, retries=0,
                 )
                 print(f"csup-dashboard: orphaned streamers cleaned on {cmd_target}",
                       file=sys.stderr)
