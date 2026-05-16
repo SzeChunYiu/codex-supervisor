@@ -1796,7 +1796,7 @@ write_state_file() {
 state_value() {
   local key="$1"
   [[ -f "$STATE_FILE" ]] || return 0
-  awk -F= -v key="$key" '$1 == key {print substr($0, length(key) + 2); exit}' "$STATE_FILE" 2>/dev/null
+  awk -F= -v key="$key" '$1 == key {v = substr($0, length(key) + 2); if (length(v) <= 4096) print v; exit}' "$STATE_FILE" 2>/dev/null
 }
 
 apply_prompt_runtime_state() {
