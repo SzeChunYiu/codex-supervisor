@@ -1077,7 +1077,12 @@ import sys
 import urllib.request
 
 MAX_HTTP_BYTES = 1_000_000
-MAX_SOURCE_HASH_BYTES = int(os.environ.get("CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES", "50000000"))
+try:
+    MAX_SOURCE_HASH_BYTES = int(os.environ.get("CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES", "50000000"))
+    if MAX_SOURCE_HASH_BYTES < 1024:
+        MAX_SOURCE_HASH_BYTES = 50000000
+except (TypeError, ValueError, OverflowError):
+    MAX_SOURCE_HASH_BYTES = 50000000
 
 def read_json_response(response):
     raw = response.read(MAX_HTTP_BYTES + 1)
