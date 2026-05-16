@@ -125,13 +125,19 @@ PY
 shell_capture_timeout() {
   local timeout="$1" cmd="$2"
   python3 - "$timeout" "$cmd" <<'PY'
-import math, os, signal, subprocess, sys
+import math, os, select, signal, subprocess, sys, time
 try:
     timeout = float(sys.argv[1])
     if not math.isfinite(timeout) or timeout <= 0:
         timeout = 8.0
 except (TypeError, ValueError):
     timeout = 8.0
+try:
+    max_bytes = int(os.environ.get("CSUP_SHELL_CAPTURE_MAX_BYTES", "1000000"))
+    if max_bytes < 1024:
+        max_bytes = 1000000
+except (TypeError, ValueError, OverflowError):
+    max_bytes = 1000000
 cmd = sys.argv[2]
 try:
     p = subprocess.Popen(
@@ -139,29 +145,61 @@ try:
         shell=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stderr=subprocess.DEVNULL,
+        text=False,
         start_new_session=True,
     )
-    try:
-        stdout, _ = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    chunks = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    failed = False
+    assert p.stdout is not None
+    fd = p.stdout.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            failed = True
+            break
+        readable, _, _ = select.select([fd], [], [], min(0.1, remaining))
+        if readable:
+            chunk = os.read(fd, 65536)
+            if chunk:
+                total += len(chunk)
+                if total > max_bytes:
+                    failed = True
+                    break
+                chunks.append(chunk)
+        if p.poll() is not None:
+            while True:
+                readable, _, _ = select.select([fd], [], [], 0)
+                if not readable:
+                    break
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    failed = True
+                    break
+                chunks.append(chunk)
+            break
+    if failed:
         try:
             os.killpg(p.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
-            stdout, _ = p.communicate(timeout=1)
+            p.wait(timeout=1)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(p.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, _ = p.communicate()
+            p.wait()
         sys.exit(124)
 except Exception:
     sys.exit(124)
-sys.stdout.write(stdout)
+sys.stdout.write(b"".join(chunks).decode("utf-8", "replace"))
 sys.exit(p.returncode)
 PY
 }

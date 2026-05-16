@@ -17,6 +17,22 @@ assert "if not math.isfinite(timeout) or timeout <= 0:" in text, "timeout helper
 assert "if not math.isfinite(sample_secs) or sample_secs < 0:" in text, "steward sample seconds must guard malformed numeric input"
 assert "allow_nan=False" in text, "JSON emitters must not serialize non-finite numeric tokens"
 
+shell_capture_match = re.search(r"shell_capture_timeout\(\) \{.*?python3 - \"\$timeout\" \"\$cmd\" <<'PY'\n(.*?)\nPY", text, re.S)
+assert shell_capture_match, "could not locate shell_capture_timeout Python snippet"
+shell_capture_snippet = shell_capture_match.group(1)
+small = subprocess.run(
+    [sys.executable, "-c", shell_capture_snippet, "2", f"{sys.executable} -c 'print(42)'"] ,
+    text=True, capture_output=True, timeout=5,
+)
+assert small.returncode == 0 and small.stdout.strip() == "42", (small.returncode, small.stdout, small.stderr)
+huge_cmd = f"{sys.executable} -c 'import sys; sys.stdout.write(\"x\" * 4096)'"
+huge = subprocess.run(
+    [sys.executable, "-c", shell_capture_snippet, "2", huge_cmd],
+    env={**os.environ, "CSUP_SHELL_CAPTURE_MAX_BYTES": "1024"},
+    text=True, capture_output=True, timeout=5,
+)
+assert huge.returncode == 124 and huge.stdout == "", (huge.returncode, len(huge.stdout), huge.stderr)
+
 capacity_match = re.search(r"capacity_fields\(\) \{.*?load_room=\$\(python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S)
 assert capacity_match, "could not locate local capacity load-room Python snippet"
 capacity_snippet = capacity_match.group(1)
