@@ -129,7 +129,8 @@ def env_int(name: str, default: int, *, min_value: int | None = None,
     return value
 
 
-def env_float(name: str, default: float, *, min_value: float | None = None) -> float:
+def env_float(name: str, default: float, *, min_value: float | None = None,
+              max_value: float | None = None) -> float:
     raw = os.environ.get(name)
     try:
         value = float(str(raw if raw is not None else default))
@@ -138,6 +139,8 @@ def env_float(name: str, default: float, *, min_value: float | None = None) -> f
     if not math.isfinite(value):
         return default
     if min_value is not None and value < min_value:
+        return default
+    if max_value is not None and value > max_value:
         return default
     return value
 
@@ -183,7 +186,7 @@ def cache_age(now: float, value: object) -> float:
     return max(0.0, now - cache_timestamp(value))
 
 
-REMOTE_DISK_TIMEOUT = env_float("CSUP_DASHBOARD_REMOTE_DISK_TIMEOUT_SECS", 4.0, min_value=0.1)
+REMOTE_DISK_TIMEOUT = env_float("CSUP_DASHBOARD_REMOTE_DISK_TIMEOUT_SECS", 4.0, min_value=0.1, max_value=60.0)
 DEFAULT_CODEX_SESSIONS_DIR = pathlib.Path.home() / ".codex/sessions"
 CODEX_SESSIONS_DIR = pathlib.Path(os.environ.get("CSUP_DASHBOARD_CODEX_SESSIONS_DIR", DEFAULT_CODEX_SESSIONS_DIR))
 EXTRA_CODEX_SESSIONS_DIRS = os.environ.get("CSUP_DASHBOARD_CODEX_SESSIONS_DIRS", "")
@@ -195,7 +198,7 @@ TOKEN_SCAN_MAX_FILES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_FILES", 300, min_v
 TOKEN_SCAN_MTIME_DAYS = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MTIME_DAYS", 14, min_value=0, max_value=3650)
 TOKEN_SCAN_MAX_BYTES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_BYTES", 262144, min_value=1, max_value=10_000_000)
 TOKEN_SCAN_MAX_WALK_ENTRIES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_WALK_ENTRIES", 2000, min_value=1, max_value=100_000)
-TOKEN_SCAN_CACHE_SECS = env_float("CSUP_DASHBOARD_TOKEN_SCAN_CACHE_SECS", 10.0, min_value=0.0)
+TOKEN_SCAN_CACHE_SECS = env_float("CSUP_DASHBOARD_TOKEN_SCAN_CACHE_SECS", 10.0, min_value=0.0, max_value=3600.0)
 TOKEN_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_MAX_EVENTS", 72, min_value=1, max_value=10_000)
 TOKEN_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_EVENTS_PER_FILE", 8, min_value=1, max_value=1000)
 TOOL_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOOL_HISTORY_MAX_EVENTS", 144, min_value=1, max_value=10_000)
@@ -239,35 +242,35 @@ BRAILLE_SPINNER_CHARS = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 TOKEN_USAGE_CACHE: dict = {"key": None, "updated_at": 0, "value": None}
 TOOL_CALL_USAGE_CACHE: dict = {"key": None, "updated_at": 0, "value": None}
 HOST_PROBE_CACHE: dict = {}
-HOST_PROBE_CACHE_SECS = env_float("CSUP_DASHBOARD_HOST_PROBE_CACHE_SECS", 10.0, min_value=0.0)
-HOST_PROBE_DEFER_MAX_STALE_SECS = env_float("CSUP_DASHBOARD_HOST_PROBE_DEFER_MAX_STALE_SECS", 120.0, min_value=0.0)
+HOST_PROBE_CACHE_SECS = env_float("CSUP_DASHBOARD_HOST_PROBE_CACHE_SECS", 10.0, min_value=0.0, max_value=3600.0)
+HOST_PROBE_DEFER_MAX_STALE_SECS = env_float("CSUP_DASHBOARD_HOST_PROBE_DEFER_MAX_STALE_SECS", 120.0, min_value=0.0, max_value=3600.0)
 HOST_PROBE_ASYNC = env_bool("CSUP_DASHBOARD_HOST_PROBE_ASYNC", True)
 INSTANCE_CAPTURE_CACHE: dict = {}
 INSTANCE_MONITOR_CACHE: dict = {}
 PROMPT_LANE_CACHE: dict = {}
 PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
-REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0)
+REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0, max_value=60.0)
 MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024, max_value=20_000_000)
 MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024, max_value=10_000_000)
 MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024, max_value=10_000_000)
 MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024, max_value=200_000_000)
 MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1, max_value=4096)
-REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
+REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0, max_value=3600.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
 # card from the UI even though the work is still running — that's the
 # "dashboard flickering" most users perceive as instability. Default 90s gives
 # the supervisor enough time to recover and the dashboard's next probe to
 # succeed without the user seeing the gap.
-REMOTE_CAPTURE_STICKY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_STICKY_SECS", 90.0, min_value=0.0)
+REMOTE_CAPTURE_STICKY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_STICKY_SECS", 90.0, min_value=0.0, max_value=3600.0)
 REMOTE_INITIAL_CAPTURE_ASYNC = env_bool("CSUP_DASHBOARD_REMOTE_INITIAL_CAPTURE_ASYNC", True)
-PROMPT_LANE_CACHE_SECS = env_float("CSUP_DASHBOARD_PROMPT_LANE_CACHE_SECS", 60.0, min_value=0.0)
+PROMPT_LANE_CACHE_SECS = env_float("CSUP_DASHBOARD_PROMPT_LANE_CACHE_SECS", 60.0, min_value=0.0, max_value=3600.0)
 STATE_CAPTURE_MIN_LINES = env_int("CSUP_DASHBOARD_STATE_CAPTURE_MIN_LINES", 80, min_value=1, max_value=1000)
 INCLUDE_PROMPTLESS_INSTANCES = env_bool("CSUP_DASHBOARD_INCLUDE_PROMPTLESS", False)
 MONITORLESS_ROLES = {"ci-runners", "ci-runner", "service", "services"}
 SYSTEM_HEALTH_CACHE: dict = {"key": None, "updated_at": 0, "value": None}
-SYSTEM_HEALTH_CACHE_SECS = env_float("CSUP_DASHBOARD_SYSTEM_HEALTH_CACHE_SECS", 15.0, min_value=0.0)
-REFRESH_INSTANCE_TIMEOUT_SECS = env_float("CSUP_DASHBOARD_REFRESH_INSTANCE_TIMEOUT_SECS", 3.0, min_value=0.1)
+SYSTEM_HEALTH_CACHE_SECS = env_float("CSUP_DASHBOARD_SYSTEM_HEALTH_CACHE_SECS", 15.0, min_value=0.0, max_value=3600.0)
+REFRESH_INSTANCE_TIMEOUT_SECS = env_float("CSUP_DASHBOARD_REFRESH_INSTANCE_TIMEOUT_SECS", 3.0, min_value=0.1, max_value=60.0)
 ASYNC_METRIC_IN_FLIGHT: set[str] = set()
 ASYNC_METRIC_START_DELAY_SECS = 0.02
 CSUP_STREAMING = env_bool("CSUP_DASHBOARD_STREAMING", True)
@@ -426,7 +429,7 @@ def toml_read_text(text: str) -> dict:
 # {"ts": float, "hosts": dict}.
 REMOTE_PROJECT_TOML_CACHE: dict[tuple[str, str], dict] = {}
 REMOTE_PROJECT_TOML_CACHE_LOCK = threading.Lock()
-REMOTE_PROJECT_TOML_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_TOML_CACHE_SECS", 60.0, min_value=0.0)
+REMOTE_PROJECT_TOML_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_TOML_CACHE_SECS", 60.0, min_value=0.0, max_value=3600.0)
 
 
 def merge_remote_project_hosts(local_hosts: dict) -> dict:
@@ -879,12 +882,14 @@ _STREAMER_SCRIPT = r'''
 #   * Pane removal/addition is detected and signalled via "drop" / inclusion.
 import json, math, subprocess, sys, time, os, hashlib, select
 
-def env_float(name, default, min_value=None):
+def env_float(name, default, min_value=None, max_value=None):
     try:
         value = float(os.environ.get(name, default))
     except (TypeError, ValueError, OverflowError):
         value = default
     if not math.isfinite(value) or (min_value is not None and value < min_value):
+        return default
+    if max_value is not None and value > max_value:
         return default
     return value
 
@@ -910,15 +915,15 @@ def safe_int(value, default=0, min_value=0, max_value=None):
         return default
     return parsed
 
-POLL_FAST = env_float("CSUP_STREAMER_POLL_FAST", 0.1, 0.01)
-POLL_IDLE = env_float("CSUP_STREAMER_POLL_IDLE", 1.5, 0.01)
-IDLE_AFTER_SECS = env_float("CSUP_STREAMER_IDLE_AFTER", 3.0, 0.0)
-HEARTBEAT_SECS = env_float("CSUP_STREAMER_HEARTBEAT", 5.0, 0.1)
+POLL_FAST = env_float("CSUP_STREAMER_POLL_FAST", 0.1, 0.01, 60.0)
+POLL_IDLE = env_float("CSUP_STREAMER_POLL_IDLE", 1.5, 0.01, 60.0)
+IDLE_AFTER_SECS = env_float("CSUP_STREAMER_IDLE_AFTER", 3.0, 0.0, 3600.0)
+HEARTBEAT_SECS = env_float("CSUP_STREAMER_HEARTBEAT", 5.0, 0.1, 3600.0)
 CAP_LINES = env_int("CSUP_STREAMER_LINES", 200, 1, 1000)
 TARGET_W = env_int("CSUP_STREAMER_WIDTH", 160, 20, 1000)
 TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5, 300)
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1, 4096)
-CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05)
+CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05, 60.0)
 MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024, 10_000_000)
 
 def _read_process_limited(proc, *, timeout, max_bytes):
@@ -1419,7 +1424,7 @@ class StreamingConnection:
 
 
 MAX_STREAMING_CONNS_PER_TARGET = 8
-TMUX_DISCOVERY_TIMEOUT_SECS = env_float("CSUP_DASHBOARD_TMUX_DISCOVERY_TIMEOUT_SECS", 12.0, min_value=0.1)
+TMUX_DISCOVERY_TIMEOUT_SECS = env_float("CSUP_DASHBOARD_TMUX_DISCOVERY_TIMEOUT_SECS", 12.0, min_value=0.1, max_value=60.0)
 
 
 def _get_or_create_streaming_conn(ssh_target: str, job_id: str) -> "StreamingConnection | None":
@@ -2164,7 +2169,7 @@ def host_runner(host: str, hosts: dict, me: str | None, *,
             inner = " ".join(shlex.quote(str(c)) for c in cmd)
             if env_cmd:
                 inner = f"{env_cmd}; {inner}"
-            srun_timeout = int(env_float("CSUP_DASHBOARD_SRUN_TIMEOUT_SECS", float(timeout), min_value=1.0))
+            srun_timeout = int(env_float("CSUP_DASHBOARD_SRUN_TIMEOUT_SECS", float(timeout), min_value=1.0, max_value=3600.0))
             remote_cmd = f"timeout {srun_timeout}s srun --jobid={shlex.quote(jobid)} --overlap bash -lc {shlex.quote(inner)}"
             return run_ssh_stable(ssh_target, ["ssh", *SSH_BASE_OPTS, ssh_command_target(ssh_target), remote_cmd],
                                   timeout=max(timeout, srun_timeout + 2), retries=retries)
@@ -2942,18 +2947,20 @@ def safe_int(value, default=0, min_value=0, max_value=None):
     if max_value is not None and parsed > max_value:
         return default
     return parsed
-def safe_float(value, default=0.0, min_value=0.0):
+def safe_float(value, default=0.0, min_value=0.0, max_value=None):
     try:
         parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return default
     if not math.isfinite(parsed) or parsed < min_value:
         return default
+    if max_value is not None and parsed > max_value:
+        return default
     return parsed
 lines = safe_int(sys.argv[2], 1, 1)
 max_capture_panes = safe_int(sys.argv[4] if len(sys.argv) > 4 else 512, 512, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1, 4096)
-cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05)
+cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05, 60.0)
 max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024, 10_000_000)
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
