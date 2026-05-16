@@ -246,6 +246,7 @@ PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
 REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0)
 MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024)
 MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
+MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -797,6 +798,28 @@ def streaming_connection_key(ssh_target: str, job_id: str) -> tuple[str, str]:
     return ssh_target_lock_key(ssh_target), str(job_id)
 
 
+def iter_bounded_stream_lines(stream, max_chars: int):
+    """Yield text lines without allowing readline() to buffer unbounded input.
+
+    TextIO iteration calls readline() without a size limit.  The dashboard
+    streamer is a long-lived SSH subprocess, so a wedged or malicious remote
+    could otherwise send one newline-free stdout/stderr record and force the
+    dashboard to buffer it all before we can reject it.  Read max_chars + 1 at
+    a time and discard the rest of oversized records in bounded chunks.
+    """
+    limit = max(1, int(max_chars))
+    while True:
+        raw = stream.readline(limit + 1)
+        if raw == "":
+            return
+        if len(raw) <= limit:
+            yield raw, False
+            continue
+        while raw and not raw.endswith("\n"):
+            raw = stream.readline(limit + 1)
+        yield "", True
+
+
 def run_ssh_stable(ssh_target: str, cmd: list[str], *, timeout: float, retries: int = 1) -> subprocess.CompletedProcess:
     # OpenSSH ControlMaster sockets can refuse concurrent multiplexed session
     # opens. LUNARC is especially sensitive because several host aliases share
@@ -1160,7 +1183,10 @@ class StreamingConnection:
 
     def _stderr_loop(self, stream) -> None:
         try:
-            for raw in stream:
+            for raw, oversized in iter_bounded_stream_lines(stream, MAX_STREAM_LINE_CHARS):
+                if oversized:
+                    self._last_error = "stream stderr line too large"
+                    continue
                 line = str(raw or "").strip()
                 if not line:
                     continue
@@ -1173,7 +1199,10 @@ class StreamingConnection:
         if proc is None:
             return
         try:
-            for raw in proc.stdout:  # type: ignore[union-attr]
+            for raw, oversized in iter_bounded_stream_lines(proc.stdout, MAX_STREAM_LINE_CHARS):  # type: ignore[arg-type]
+                if oversized:
+                    self._last_error = "stream payload line too large"
+                    continue
                 line = raw.strip()
                 if not line:
                     continue
