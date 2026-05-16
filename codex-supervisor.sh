@@ -61,6 +61,7 @@
 #   CODEX_SUPERVISOR_LIMIT           usage-limit substring (default: "You've hit your usage limit")
 #   CODEX_SUPERVISOR_HITS            consecutive limit polls before respawn (default: 3)
 #   CODEX_SUPERVISOR_RESPAWN_COOLDOWN  per-pane respawn cooldown secs (default: 300)
+#   CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN  hard "try again at" cooldown secs (default: 3600)
 #   CODEX_SUPERVISOR_CAPTURE_LINES   tail size for capture-pane scans (default: 80)
 #   CODEX_SUPERVISOR_LOG             log file path (default: ~/codex-supervisor.log)
 #   CODEX_SUPERVISOR_OPEN            1 = auto-open terminal, 0 = print attach hint (default: 1)
@@ -160,6 +161,7 @@ LIMIT_PATTERN="You've hit your usage limit"
 [[ -n "${CODEX_SUPERVISOR_LIMIT:-}" ]] && LIMIT_PATTERN="$CODEX_SUPERVISOR_LIMIT"
 LIMIT_HITS_BEFORE_KILL="${CODEX_SUPERVISOR_HITS:-3}"
 RESPAWN_COOLDOWN_SECS="${CODEX_SUPERVISOR_RESPAWN_COOLDOWN:-300}"
+HARD_LIMIT_COOLDOWN_SECS="${CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN:-3600}"
 CAPTURE_TAIL_LINES="${CODEX_SUPERVISOR_CAPTURE_LINES:-80}"
 LOG_FILE="${CODEX_SUPERVISOR_LOG:-$SUPERVISOR_ROOT/logs/${SESSION}.log}"
 LOG_FILE_EXPLICIT="${CODEX_SUPERVISOR_LOG+x}"
@@ -2263,7 +2265,7 @@ check_pane() {
     since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
     local fast_cooldown=$RESPAWN_COOLDOWN_SECS
     if capture_has_ci "$cap" "try again at"; then
-      fast_cooldown=60
+      fast_cooldown=$HARD_LIMIT_COOLDOWN_SECS
     fi
     if (( since_last < fast_cooldown )); then
       log "[pane $i ${LANE_LABELS[$i]}] compacting/compact-task state but cooldown active (${since_last}s/${fast_cooldown}s)"
@@ -2277,11 +2279,11 @@ check_pane() {
   if capture_has "$cap" "$LIMIT_PATTERN"; then
     LIMIT_STREAK[$i]=$(( ${LIMIT_STREAK[$i]:-0} + 1 ))
     # Codex prints "try again at <date> <time>" on hard limits. When we see
-    # this we use a much longer cooldown (1h) since the limit is account-
+    # this we use a much longer cooldown (default 1h) since the limit is account-
     # wide and respawning won't help — it'll just hit the same wall.
     local cooldown=$RESPAWN_COOLDOWN_SECS
     if capture_has_ci "$cap" "try again at"; then
-      cooldown=60
+      cooldown=$HARD_LIMIT_COOLDOWN_SECS
     fi
     log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL} (cooldown ${cooldown}s)"
     if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then

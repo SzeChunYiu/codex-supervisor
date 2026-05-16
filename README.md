@@ -400,6 +400,7 @@ Everything is overridable via env or CLI without editing the script:
 | `CODEX_SUPERVISOR_LIMIT`             | `You've hit your usage limit`                      |
 | `CODEX_SUPERVISOR_HITS`              | `3`                                                |
 | `CODEX_SUPERVISOR_RESPAWN_COOLDOWN`  | `300`                                              |
+| `CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN` | `3600` for hard `try again at` limits             |
 | `CODEX_SUPERVISOR_CAPTURE_LINES`     | `80`                                               |
 | `CODEX_SUPERVISOR_LOG`               | `$CODEX_SUPERVISOR_ROOT/logs/<session>.log`        |
 | `CODEX_SUPERVISOR_OPEN`              | `1`                                                |
