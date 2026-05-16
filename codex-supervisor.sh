@@ -351,6 +351,7 @@ safe_root_env_path() {
     return 0
   fi
   case "$raw" in
+    /) printf '%s\n' "$default" ;;
     /*) printf '%s\n' "$raw" ;;
     *) printf '%s\n' "$default" ;;
   esac
