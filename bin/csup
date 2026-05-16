@@ -1413,6 +1413,7 @@ USAGE
       "$free_ram_mb" "$reserve_ram_mb" "$ram_mb_per_pane" "$free_disk_gb" \
       "$reserve_disk_gb" "$disk_mb_per_pane" "$cpus" "$load" "$max_load_per_cpu" <<'PY'
 import json
+import math
 import sys
 
 keys = [
@@ -1438,12 +1439,13 @@ for key, raw in zip(keys, sys.argv[1:]):
             obj[key] = raw
     elif key in float_keys:
         try:
-            obj[key] = float(raw)
+            value = float(raw)
+            obj[key] = value if math.isfinite(value) else raw
         except (TypeError, ValueError):
             obj[key] = raw
     else:
         obj[key] = raw
-print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+print(json.dumps(obj, sort_keys=True, separators=(",", ":"), allow_nan=False))
 PY
     return 0
   fi
@@ -1474,7 +1476,7 @@ for item in sys.argv[1:]:
             obj[key] = raw
     else:
         obj[key] = raw
-print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+print(json.dumps(obj, sort_keys=True, separators=(",", ":"), allow_nan=False))
 PY
 }
 

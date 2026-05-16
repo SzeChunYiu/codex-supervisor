@@ -15,6 +15,7 @@ text = pathlib.Path(sys.argv[1]).read_text()
 
 assert "if not math.isfinite(timeout) or timeout <= 0:" in text, "timeout helpers must guard malformed numeric input"
 assert "if not math.isfinite(sample_secs) or sample_secs < 0:" in text, "steward sample seconds must guard malformed numeric input"
+assert "allow_nan=False" in text, "JSON emitters must not serialize non-finite numeric tokens"
 
 capacity_match = re.search(r"capacity_fields\(\) \{.*?load_room=\$\(python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S)
 assert capacity_match, "could not locate local capacity load-room Python snippet"
