@@ -142,6 +142,10 @@ assert mod.TMUX_DISCOVERY_TIMEOUT_SECS == 12.0
 assert mod.MAX_TMUX_SOCKET_SCAN == 256
 assert mod.MAX_TMUX_TMPDIR_CHARS == 4096
 assert mod.tmux_sock_dir({"TMUX_TMPDIR": "x" * (mod.MAX_TMUX_TMPDIR_CHARS + 1)}) == f"/tmp/tmux-{__import__('os').getuid()}"
+assert mod.station_project_filter("a,b") == {"a", "b"}
+assert mod.station_project_filter("x" * (mod.MAX_STATION_PROJECT_FILTER_CHARS + 1)) == set()
+assert mod.station_project_filter("ok," + ("x" * (mod.MAX_PROJECT_FILTER_CHARS + 1))) == {"ok"}
+assert len(mod.station_project_filter(",".join(f"p{i}" for i in range(mod.MAX_STATION_PROJECT_FILTER_ITEMS + 10)))) == mod.MAX_STATION_PROJECT_FILTER_ITEMS
 assert mod.MAX_PROJECT_SCAN_ENTRIES == 500
 assert mod.MAX_STATE_FILES == 200
 assert mod.TOKEN_SCAN_MAX_FILES == 300

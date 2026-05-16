@@ -41,6 +41,8 @@ MAX_QUERY_FIELDS = 20
 MAX_PANE_INDEX = 4096
 MAX_PANE_TARGET_NAME_CHARS = 128
 MAX_PROJECT_FILTER_CHARS = 128
+MAX_STATION_PROJECT_FILTER_CHARS = 4096
+MAX_STATION_PROJECT_FILTER_ITEMS = 256
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
 PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
@@ -1930,6 +1932,21 @@ def station_candidate_sessions(base: str) -> list[str]:
     return [base] + [f"{base}-station-{idx}" for idx in range(1, max_station_guess + 1)]
 
 
+def station_project_filter(raw: str | None) -> set[str]:
+    raw = (raw or "").strip()
+    if len(raw) > MAX_STATION_PROJECT_FILTER_CHARS:
+        return set()
+    out: set[str] = set()
+    for part in raw.split(","):
+        item = part.strip()
+        if not item or len(item) > MAX_PROJECT_FILTER_CHARS:
+            continue
+        out.add(item)
+        if len(out) >= MAX_STATION_PROJECT_FILTER_ITEMS:
+            break
+    return out
+
+
 def add_live_station_instances(project_instances_by_name: dict[str, list[dict]],
                                discovered_projects: list[dict],
                                hosts: dict,
@@ -1943,8 +1960,7 @@ def add_live_station_instances(project_instances_by_name: dict[str, list[dict]],
     sessions, not stale base-session captures from earlier allocations.
     """
     tmux_cache: dict[tuple[str, str], list[str]] = {}
-    allowed_raw = os.environ.get("CSUP_DASHBOARD_STATION_PROJECTS", "").strip()
-    allowed_projects = {part.strip() for part in allowed_raw.split(",") if part.strip()}
+    allowed_projects = station_project_filter(os.environ.get("CSUP_DASHBOARD_STATION_PROJECTS", ""))
     for proj in discovered_projects:
         project_name = proj.get("name", "")
         if allowed_projects and project_name not in allowed_projects:
