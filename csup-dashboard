@@ -1757,7 +1757,8 @@ def parse_lanes_from_lines(raw_lines: list[str]) -> dict[int, str]:
             # Match: "PANE <n>, lane <name>"
             m = re.search(r"PANE\s+(\d+),\s*lane\s+([A-Za-z0-9_-]+)", s)
             if m:
-                lanes[int(m.group(1))] = m.group(2)
+                pane_idx = bounded_int(m.group(1), idx, min_value=0, max_value=9999)
+                lanes[pane_idx] = m.group(2)
             else:
                 lanes[idx] = f"pane{idx}"
             idx += 1
