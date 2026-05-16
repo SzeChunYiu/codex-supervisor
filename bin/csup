@@ -1014,7 +1014,7 @@ slurm_remote_pane_count() {
   # default tmux socket can report zero panes while many station sessions are
   # alive. Count panes across all user tmux sockets on the compute node so
   # station capacity decisions do not overpack and churn sessions.
-  pane_count_cmd='__count=0; __dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"; if [ -d "$__dir" ]; then for __sock in "$__dir"/*; do [ -S "$__sock" ] || continue; __n=$(tmux -S "$__sock" list-panes -a 2>/dev/null | wc -l | tr -d " "); case "$__n" in ""|*[!0-9]*) __n=0;; esac; __count=$((__count + __n)); done; printf "%s\n" "$__count"; else tmux list-panes -a 2>/dev/null | wc -l | tr -d " "; fi'
+  pane_count_cmd='__count=0; __seen=0; __max="${CSUP_MAX_TMUX_SOCKET_SCAN:-256}"; case "$__max" in ""|*[!0-9]*) __max=256;; esac; __dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"; if [ -d "$__dir" ]; then for __sock in "$__dir"/*; do [ "$__seen" -ge "$__max" ] && break; __seen=$((__seen + 1)); [ -S "$__sock" ] || continue; __n=$(tmux -S "$__sock" list-panes -a 2>/dev/null | wc -l | tr -d " "); case "$__n" in ""|*[!0-9]*) __n=0;; esac; __count=$((__count + __n)); done; printf "%s\n" "$__count"; else tmux list-panes -a 2>/dev/null | wc -l | tr -d " "; fi'
   count=$(ssh_capture_timeout "$ssh_target" "env -u LD_LIBRARY_PATH srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$env_cmd; $pane_count_cmd")" 2>/dev/null || true)
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   printf '%s' "$count"
