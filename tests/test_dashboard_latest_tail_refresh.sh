@@ -24,6 +24,7 @@ spec.loader.exec_module(mod)
 calls = []
 block_background = {"enabled": False}
 fail_capture = {"enabled": False}
+malformed_pane_listing = {"enabled": False}
 background_started = threading.Event()
 background_release = threading.Event()
 ansi = "\n".join(f"line {i}" for i in range(1, 11)) + "\n"
@@ -60,7 +61,16 @@ def fake_host_runner(host, hosts, me, timeout, retries=1, slurm_job_id=""):
                 },
             ]
             return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+        if cmd[:2] == ["tmux", "list-sessions"]:
+            return subprocess.CompletedProcess(cmd, 0, "demo-session\n", "")
         if cmd[:2] == ["tmux", "list-panes"]:
+            if malformed_pane_listing["enabled"]:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    "bad|0|codex|wide|tall|BROKEN\n2|0|codex|120|10|GOOD\n",
+                    "",
+                )
             return subprocess.CompletedProcess(
                 cmd,
                 0,
@@ -103,6 +113,21 @@ assert "Open latest tail" in html, "pane action should describe tail-only output
 assert "pre.innerHTML = paneTailHtml(pane)" in html, "pane updates should overwrite the visible output"
 assert '"-2000"' not in source, "on-demand pane endpoint should not fetch full scrollback by default"
 assert "ansi_lines[-pane_lines:]" in source, "on-demand pane endpoint should return latest tail only"
+assert "lines = int(sys.argv[2])" not in source, "remote capture snippet should sanitize line counts"
+
+malformed_pane_listing["enabled"] = True
+local = mod.capture_session(
+    "local-host",
+    {"local-host": {}},
+    "local-host",
+    "demo-session",
+    "bad",
+    {2: "GOOD"},
+)
+malformed_pane_listing["enabled"] = False
+assert local is not None and len(local) == 1, local
+assert local[0]["index"] == 2 and local[0]["lane"] == "GOOD", local
+calls.clear()
 
 cached = mod.capture_session(
     "remote-host",
@@ -113,7 +138,7 @@ cached = mod.capture_session(
     {0: "FAST", 1: "TAIL"},
 )
 assert cached == panes, cached
-assert len(calls) == 1, "fresh remote panes should be reused briefly instead of blocking every UI refresh"
+assert len(calls) == 0, "fresh remote panes should be reused briefly instead of blocking every UI refresh"
 
 for entry in mod.INSTANCE_CAPTURE_CACHE.values():
     entry["updated_at"] = time.time() - 10

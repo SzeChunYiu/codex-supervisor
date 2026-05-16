@@ -2644,8 +2644,13 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
         script = r'''
 import json, subprocess, sys, os, glob, stat
 session = sys.argv[1]
-lines = int(sys.argv[2])
-lines = max(1, lines)
+def safe_int(value, default=0, min_value=0):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= min_value else default
+lines = safe_int(sys.argv[2], 1, 1)
 # With per-session tmux sockets, the supervisor uses `tmux -L <session_name>`.
 # Find which socket hosts this session: try a socket named exactly after the
 # session first (the supervisor's default), then default socket, then any
@@ -2688,16 +2693,18 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
     parts = row.split("\t")
     if len(parts) < 3:
         continue
-    idx = int(parts[0])
-    height = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-    cap_lines = max(lines, int(sys.argv[3]))
+    idx = safe_int(parts[0], -1, 0)
+    if idx < 0:
+        continue
+    height = safe_int(parts[4], 0, 0) if len(parts) > 4 else 0
+    cap_lines = max(lines, safe_int(sys.argv[3], lines, 1))
     c = subprocess.run(tx("capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"), capture_output=True, text=True)
     out.append({
         "index": idx,
         "ordinal": ordinal,
         "dead": parts[1] == "1",
         "cmd": parts[2],
-        "width": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
+        "width": safe_int(parts[3], 0, 0) if len(parts) > 3 else 0,
         "height": height,
         "title": parts[5] if len(parts) > 5 else "",
         "ansi": c.stdout if c.returncode == 0 else "",
@@ -2801,13 +2808,16 @@ print(json.dumps({"panes": out, "monitor": monitor}))
     for line in r.stdout.strip().splitlines():
         parts = line.split("|")
         if len(parts) >= 3:
+            idx = bounded_int(parts[0], -1, min_value=0)
+            if idx < 0:
+                continue
             panes_meta.append({
-                "index": int(parts[0]),
+                "index": idx,
                 "ordinal": len(panes_meta),
                 "dead": parts[1] == "1",
                 "cmd": parts[2],
-                "width": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
-                "height": int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
+                "width": bounded_int(parts[3], 0, min_value=0) if len(parts) > 3 else 0,
+                "height": bounded_int(parts[4], 0, min_value=0) if len(parts) > 4 else 0,
                 "title": parts[5] if len(parts) > 5 else "",
             })
 
