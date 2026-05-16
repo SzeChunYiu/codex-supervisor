@@ -216,12 +216,14 @@ assert "def read_json_response" in script_text, "dashboard health JSON reads sho
 assert 'hashlib.sha256(open(expected_cmd, "rb").read())' not in script_text, "dashboard source hash must stream file chunks"
 assert "def file_sha256_prefix" in script_text, "dashboard source hash helper should stream chunks"
 assert "CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES" in script_text, "dashboard source hash should have a safety cap"
+assert "MAX_SOURCE_HASH_BYTES < 1024 or MAX_SOURCE_HASH_BYTES > 200000000" in script_text, "dashboard source hash cap env must be upper-bounded"
 assert "dashboard source file too large to hash" in script_text, "oversized dashboard source hashes should fail closed"
 
 dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2", extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "bad"}), "invalid hash cap env should sanitize to the safe default"
+assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2", extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "999999999999"}), "oversized hash cap env should sanitize to the safe default"
 large_base = {"status": "ok", "panes": 1, "refresh_interval_secs": 0.5, "source": {"path": str(large_source), "sha256": large_info["sha256"]}}
 assert not dashboard_ok(large_base, cmd=large_source, extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "1024"}), "oversized dashboard source hash should fail closed"
 oversized_body = json.dumps({**base, "refresh_interval_secs": 0.2}).encode() + (b" " * 1_000_001)
