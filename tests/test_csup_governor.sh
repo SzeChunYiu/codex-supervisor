@@ -263,6 +263,18 @@ PATH="$TMPDIR/bin:$PATH" \
 grep -q '^/goal check the perf queue$' "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"
 grep -q "queued proj-a/perf" /tmp/csup-submit.out
 
+HOME="$TMPDIR/home" \
+CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" submit proj-a perf "/goalbad should be normalized" >/tmp/csup-submit-goalbad.out
+
+grep -q '^/goal /goalbad should be normalized$' "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt" || {
+  echo "submit should prefix malformed /goal-like text instead of queuing invalid prompt syntax" >&2
+  cat "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt" >&2
+  exit 1
+}
+
 if HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
   CSUP_SUPERVISOR="$TMPDIR/supervisor" \

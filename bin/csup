@@ -1480,7 +1480,7 @@ PY
   esac
   mkdir -p "$tasks_abs"
   local text="$*"
-  [[ "$text" == /goal* ]] || text="/goal $text"
+  [[ "$text" =~ ^/goal([[:space:]]|$) ]] || text="/goal $text"
   printf '%s\n' "$text" >> "$tasks_abs/$lane.txt"
   printf 'queued %s/%s: %s\n' "$project" "$lane" "$text"
 }
