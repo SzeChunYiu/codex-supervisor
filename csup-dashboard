@@ -189,6 +189,7 @@ SUPERVISOR_CODEX_HOME_ROOTS = [
 TOKEN_SCAN_MAX_FILES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_FILES", 300, min_value=1)
 TOKEN_SCAN_MTIME_DAYS = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MTIME_DAYS", 14, min_value=0)
 TOKEN_SCAN_MAX_BYTES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_BYTES", 262144, min_value=1)
+TOKEN_SCAN_MAX_WALK_ENTRIES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_WALK_ENTRIES", 2000, min_value=1)
 TOKEN_SCAN_CACHE_SECS = env_float("CSUP_DASHBOARD_TOKEN_SCAN_CACHE_SECS", 10.0, min_value=0.0)
 TOKEN_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_MAX_EVENTS", 72, min_value=1)
 TOKEN_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_EVENTS_PER_FILE", 8, min_value=1)
@@ -3784,31 +3785,51 @@ def codex_session_dirs() -> list[pathlib.Path]:
         if not root.exists():
             continue
         try:
-            candidates = sorted(root.glob("*/sessions"))
+            for idx, worker_home in enumerate(root.iterdir()):
+                if idx >= TOKEN_SCAN_MAX_WALK_ENTRIES:
+                    break
+                add(worker_home / "sessions")
         except OSError:
             continue
-        for path in candidates:
-            add(path)
     return dirs
+
+
+def iter_jsonl_files_bounded(session_dir: pathlib.Path, max_entries: int):
+    """Yield JSONL session files without walking unbounded directory trees."""
+    entries_seen = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(session_dir):
+            dirnames.sort()
+            filenames.sort()
+            kept_dirs: list[str] = []
+            for dirname in dirnames:
+                entries_seen += 1
+                if entries_seen > max_entries:
+                    break
+                kept_dirs.append(dirname)
+            dirnames[:] = kept_dirs
+            for filename in filenames:
+                entries_seen += 1
+                if entries_seen > max_entries:
+                    return
+                if filename.endswith(".jsonl"):
+                    yield pathlib.Path(dirpath) / filename
+    except OSError as e:
+        print(f"token scan skipped: {session_dir}: {e}", file=sys.stderr)
 
 
 def recent_codex_session_files(now: float) -> list[pathlib.Path]:
     cutoff = now - (max(0, TOKEN_SCAN_MTIME_DAYS) * 86400)
     files: list[tuple[float, pathlib.Path]] = []
     for session_dir in codex_session_dirs():
-        try:
-            iterator = session_dir.rglob("*.jsonl")
-            for path in iterator:
-                try:
-                    st = path.stat()
-                except OSError:
-                    continue
-                if TOKEN_SCAN_MTIME_DAYS > 0 and st.st_mtime < cutoff:
-                    continue
-                files.append((st.st_mtime, path))
-        except OSError as e:
-            print(f"token scan skipped: {session_dir}: {e}", file=sys.stderr)
-            continue
+        for path in iter_jsonl_files_bounded(session_dir, TOKEN_SCAN_MAX_WALK_ENTRIES):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if TOKEN_SCAN_MTIME_DAYS > 0 and st.st_mtime < cutoff:
+                continue
+            files.append((st.st_mtime, path))
     files.sort(key=lambda item: item[0], reverse=True)
     return [path for _, path in files[:max(0, TOKEN_SCAN_MAX_FILES)]]
 
@@ -3878,7 +3899,7 @@ def latest_token_count_for_file(path: pathlib.Path) -> dict | None:
 
 def token_usage_cache_key() -> tuple:
     return (tuple(str(path) for path in codex_session_dirs()), TOKEN_SCAN_MAX_FILES,
-            TOKEN_SCAN_MTIME_DAYS, TOKEN_SCAN_MAX_BYTES)
+            TOKEN_SCAN_MTIME_DAYS, TOKEN_SCAN_MAX_BYTES, TOKEN_SCAN_MAX_WALK_ENTRIES)
 
 
 def collect_token_usage(now: float | None = None, *, force: bool = False) -> dict:
@@ -4041,7 +4062,8 @@ def tool_call_events_for_file(path: pathlib.Path, max_events: int | None = None)
 
 def tool_call_usage_cache_key() -> tuple:
     return (tuple(str(path) for path in codex_session_dirs()), TOKEN_SCAN_MAX_FILES, TOKEN_SCAN_MTIME_DAYS,
-            TOKEN_SCAN_MAX_BYTES, TOOL_HISTORY_MAX_EVENTS, TOOL_HISTORY_EVENTS_PER_FILE)
+            TOKEN_SCAN_MAX_BYTES, TOKEN_SCAN_MAX_WALK_ENTRIES, TOOL_HISTORY_MAX_EVENTS,
+            TOOL_HISTORY_EVENTS_PER_FILE)
 
 
 def collect_tool_call_usage(now: float | None = None, *, force: bool = False) -> dict:
