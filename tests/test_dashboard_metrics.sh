@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import time
 
@@ -210,6 +211,7 @@ def fake_remote_disk(host, hosts, me, connection=None):
         "job_id": (connection or {}).get("job_id", ""),
     }
 
+orig_collect_remote_disk_health = mod.collect_remote_disk_health
 mod.collect_remote_disk_health = fake_remote_disk
 storage = mod.collect_storage_health(
     {"laptop": {"ssh": "laptop"}, "lunarc": {"ssh": "lunarc", "scheduler": "slurm"}},
@@ -227,6 +229,19 @@ grouped = mod.collect_system_health(
     {"laptop": {"reachable": True, "latency_ms": 3}},
 )
 assert grouped["storage"]["remote_count"] >= 1, grouped
+
+mod.collect_remote_disk_health = orig_collect_remote_disk_health
+orig_host_runner = mod.host_runner
+orig_max_remote_json = mod.MAX_REMOTE_JSON_CHARS
+mod.MAX_REMOTE_JSON_CHARS = 16
+def huge_disk_runner(cmd):
+    return subprocess.CompletedProcess(cmd, 0, "{" + "x" * 32, "")
+mod.host_runner = lambda *args, **kwargs: huge_disk_runner
+oversized_disk = mod.collect_remote_disk_health("laptop", {"laptop": {"ssh": "laptop"}}, "mac-mini")
+assert oversized_disk["reachable"] is False, oversized_disk
+assert oversized_disk["error"] == "disk probe returned oversized JSON", oversized_disk
+mod.host_runner = orig_host_runner
+mod.MAX_REMOTE_JSON_CHARS = orig_max_remote_json
 
 assert "Computer health" in html, "dashboard should show computer health"
 assert "systemHealthCard" in html, "dashboard should group CPU/RAM/disk into one card"

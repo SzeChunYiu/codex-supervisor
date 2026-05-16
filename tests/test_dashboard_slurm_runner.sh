@@ -98,5 +98,23 @@ runner = mod.host_runner("lunarc", hosts, me="mac-mini", slurm_job_id="3041294")
 with cf.ThreadPoolExecutor(max_workers=3) as ex:
     list(ex.map(lambda _: runner(["tmux", "list-panes", "-t", "demo"]), range(3)))
 assert active["max"] == 1, f"LUNARC SSH+srun calls should be serialized per ssh target, saw {active['max']}"
+
+orig_host_runner = mod.host_runner
+orig_streaming = mod.CSUP_STREAMING
+orig_max_remote_json = mod.MAX_REMOTE_JSON_CHARS
+mod.CSUP_STREAMING = False
+mod.MAX_REMOTE_JSON_CHARS = 8
+def oversized_runner(*args, **kwargs):
+    def run(cmd):
+        return subprocess.CompletedProcess(cmd, 0, "[" + ("x" * 32), "")
+    return run
+mod.host_runner = oversized_runner
+mod.INSTANCE_CAPTURE_CACHE.clear()
+assert mod.capture_session("remote", {"remote": {"ssh": "remote"}}, "local", "demo", 5, _bypass_cache=True) is None
+cache_values = list(mod.INSTANCE_CAPTURE_CACHE.values())
+assert cache_values and cache_values[-1].get("last_error") == "remote capture JSON too large", cache_values
+mod.host_runner = orig_host_runner
+mod.CSUP_STREAMING = orig_streaming
+mod.MAX_REMOTE_JSON_CHARS = orig_max_remote_json
 print("ok: dashboard wraps LUNARC captures with ssh+srun active allocation and cached job id")
 PY

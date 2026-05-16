@@ -243,6 +243,7 @@ INSTANCE_MONITOR_CACHE: dict = {}
 PROMPT_LANE_CACHE: dict = {}
 PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
 REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0)
+MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -2856,8 +2857,22 @@ print(json.dumps({"panes": out, "monitor": monitor}))
                     cached["refreshing"] = False
                     INSTANCE_CAPTURE_CACHE[cache_key] = cached
             return None
+        remote_text = r.stdout or "[]"
+        if len(remote_text) > MAX_REMOTE_JSON_CHARS:
+            if REMOTE_CAPTURE_CACHE_SECS > 0:
+                with INSTANCE_CAPTURE_CACHE_LOCK:
+                    now = time.time()
+                    cached = INSTANCE_CAPTURE_CACHE.get(cache_key) or {}
+                    if cached.get("value") is None:
+                        cached["updated_at"] = now
+                        cached["value"] = None
+                    cached["last_attempt_at"] = now
+                    cached["last_error"] = "remote capture JSON too large"
+                    cached["refreshing"] = False
+                    INSTANCE_CAPTURE_CACHE[cache_key] = cached
+            return None
         try:
-            remote_payload = json.loads(r.stdout or "[]")
+            remote_payload = json.loads(remote_text)
         except json.JSONDecodeError:
             if REMOTE_CAPTURE_CACHE_SECS > 0:
                 with INSTANCE_CAPTURE_CACHE_LOCK:
@@ -3154,8 +3169,15 @@ def collect_remote_disk_health(host: str, hosts: dict, me: str | None,
             "path": "", "total_bytes": 0, "used_bytes": 0, "free_bytes": 0,
             "used_percent": None, "reachable": False, "error": msg[:160],
         }
+    disk_text = r.stdout or "{}"
+    if len(disk_text) > MAX_REMOTE_JSON_CHARS:
+        return {
+            "host": host, "aliases": [host], "role": "slurm" if host_is_slurm(host, hosts) else "ssh",
+            "path": "", "total_bytes": 0, "used_bytes": 0, "free_bytes": 0,
+            "used_percent": None, "reachable": False, "error": "disk probe returned oversized JSON",
+        }
     try:
-        disk = json.loads(r.stdout or "{}")
+        disk = json.loads(disk_text)
     except json.JSONDecodeError:
         return {
             "host": host, "aliases": [host], "role": "slurm" if host_is_slurm(host, hosts) else "ssh",
