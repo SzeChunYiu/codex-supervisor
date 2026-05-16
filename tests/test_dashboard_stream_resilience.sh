@@ -50,7 +50,6 @@ python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
 import pathlib
-import time
 import sys
 
 path = pathlib.Path(sys.argv[1])
@@ -76,7 +75,7 @@ with mod.CACHE_LOCK:
     }]
 with mod.STREAMING_CACHE_LOCK:
     mod.STREAMING_CACHE[(stream_key, "ng-content-lunarc-station-1")] = {
-        "ts": time.time(),
+        "ts": "not-a-time",
         "panes": [{
             "index": 1,
             "dead": False,
@@ -85,13 +84,28 @@ with mod.STREAMING_CACHE_LOCK:
             "height": 40,
             "title": "",
             "ansi": "old\nnew live line",
+        }, {
+            "index": "bad",
+            "dead": False,
+            "cmd": "codex",
+            "width": "wide",
+            "height": "tall",
+            "title": "",
+            "ansi": "malformed live line",
         }],
     }
 
 state = mod.state_payload(compact=True, tail_lines=1)
-pane = state["projects"][0]["instances"][0]["panes"][0]
+panes = state["projects"][0]["instances"][0]["panes"]
+pane = panes[0]
 assert pane["tail"] == ["new live line"], pane
 assert pane["lane"] == "planner-content", pane
 assert "tail_html" not in pane, pane
+assert panes[1]["index"] == 0, panes[1]
+assert panes[1]["width"] == 0 and panes[1]["height"] == 0, panes[1]
+assert state["projects"][0]["instances"][0]["stream_updated_at"] == 0.0, state["projects"][0]["instances"][0]
+assert mod.capture_cache_key("h", "s", "bad", {"bad": "lane"}) == ("h", "s", mod.DEFAULT_TAIL, ((-1, "lane"),))
+assert mod.render_captured_item_simple({"index": "bad", "ansi": "a\nb"}, tail_lines="bad")["tail"] == ["a", "b"]
+assert mod.capture_cache_problem("h", "s", "bad") == {}
 print("ok: state payload overlays fresh streaming pane text between full refreshes")
 PY

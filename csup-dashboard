@@ -2056,8 +2056,8 @@ def host_reachable(host: str, hosts: dict, me: str | None) -> bool:
 
 def capture_cache_key(host: str, session: str, lines: int,
                       lane_map: dict[int, str] | None) -> tuple:
-    lanes = tuple(sorted((int(k), str(v)) for k, v in (lane_map or {}).items()))
-    return host, session, int(lines), lanes
+    lanes = tuple(sorted((bounded_int(k, -1, min_value=0), str(v)) for k, v in (lane_map or {}).items()))
+    return host, session, bounded_int(lines, DEFAULT_TAIL, min_value=1), lanes
 
 
 def monitor_cache_key(host: str, session: str) -> tuple:
@@ -2072,8 +2072,8 @@ def pane_title_indicates_activity(title: str | None) -> bool:
 def lane_label_for_capture(item: dict, lane_map: dict[int, str] | None = None) -> str:
     known_lanes = set((lane_map or {}).values())
     pane_title = item.get("title") or ""
-    idx_val = int(item.get("index") if item.get("index") is not None else 0)
-    ordinal_val = int(item.get("ordinal") if item.get("ordinal") is not None else -1)
+    idx_val = bounded_int(item.get("index"), 0, min_value=0)
+    ordinal_val = bounded_int(item.get("ordinal"), -1, min_value=0)
     if pane_title and pane_title != (item.get("cmd") or ""):
         if str(pane_title).strip().upper() in {"CEO", "MANAGER"}:
             return str(pane_title).strip().upper()
@@ -2192,7 +2192,7 @@ def pane_issue_reasons(inst: dict, pane: dict) -> list[str]:
 
 
 def compact_state_panes(snapshot: dict, tail_lines: int) -> None:
-    keep = max(1, min(50, int(tail_lines or 6)))
+    keep = bounded_int(tail_lines, 6, min_value=1, max_value=50)
     for project in snapshot.get("projects", []) or []:
         for inst in project.get("instances", []) or []:
             for pane in inst.get("panes", []) or []:
@@ -2219,7 +2219,7 @@ def apply_streaming_cache_overlay(snapshot: dict, tail_lines: int) -> None:
         hosts = known_hosts()
     except Exception:
         hosts = {}
-    keep_lines = max(1, int(tail_lines or DEFAULT_TAIL))
+    keep_lines = bounded_int(tail_lines, DEFAULT_TAIL, min_value=1, max_value=200)
     for project in snapshot.get("projects", []) or []:
         for inst in project.get("instances", []) or []:
             host = str(inst.get("host", "") or "")
@@ -2238,19 +2238,20 @@ def apply_streaming_cache_overlay(snapshot: dict, tail_lines: int) -> None:
             raw_panes = cached.get("panes") or []
             if not raw_panes:
                 continue
-            existing_lanes = {
-                int(pane.get("index")): str(pane.get("lane") or "")
-                for pane in (inst.get("panes") or [])
-                if pane.get("index") is not None
-            }
+            existing_lanes = {}
+            for pane in (inst.get("panes") or []):
+                if pane.get("index") is None:
+                    continue
+                idx = bounded_int(pane.get("index"), -1, min_value=0)
+                if idx >= 0:
+                    existing_lanes[idx] = str(pane.get("lane") or "")
             panes = [
                 render_captured_item_simple(item, tail_lines=keep_lines)
                 for item in raw_panes
             ]
             for pane in panes:
-                try:
-                    idx = int(pane.get("index"))
-                except (TypeError, ValueError):
+                idx = bounded_int(pane.get("index"), -1, min_value=0)
+                if idx < 0:
                     continue
                 if existing_lanes.get(idx):
                     pane["lane"] = existing_lanes[idx]
@@ -2258,7 +2259,7 @@ def apply_streaming_cache_overlay(snapshot: dict, tail_lines: int) -> None:
             if cached.get("monitor"):
                 inst["monitor"] = cached.get("monitor")
                 set_monitor_status(host, session, cached.get("monitor") or empty_monitor_status())
-            inst["stream_updated_at"] = float(cached.get("ts") or 0)
+            inst["stream_updated_at"] = bounded_float(cached.get("ts"), 0.0, min_value=0.0)
 
 
 def state_payload(project_filter: str = "", *, compact: bool = False,
@@ -2380,7 +2381,8 @@ def capture_cache_value_with_status(cached: dict, now: float) -> list[dict] | No
 
 def capture_cache_problem(host: str, session: str, lines: int,
                           lane_map: dict[int, str] | None = None) -> dict:
-    cache_key = capture_cache_key(host, session, max(1, int(lines or DEFAULT_TAIL)), lane_map)
+    cache_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
+    cache_key = capture_cache_key(host, session, cache_lines, lane_map)
     with INSTANCE_CAPTURE_CACHE_LOCK:
         cached = clone_jsonable(INSTANCE_CAPTURE_CACHE.get(cache_key) or {})
     if not cached:
@@ -2397,7 +2399,8 @@ def capture_cache_problem(host: str, session: str, lines: int,
 def capture_cached_panes_with_error(host: str, session: str, lines: int,
                                     lane_map: dict[int, str] | None,
                                     error: str) -> list[dict] | None:
-    cache_key = capture_cache_key(host, session, max(1, int(lines or DEFAULT_TAIL)), lane_map)
+    cache_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
+    cache_key = capture_cache_key(host, session, cache_lines, lane_map)
     now = time.time()
     with INSTANCE_CAPTURE_CACHE_LOCK:
         cached = clone_jsonable(INSTANCE_CAPTURE_CACHE.get(cache_key) or {})
@@ -2409,7 +2412,8 @@ def capture_cached_panes_with_error(host: str, session: str, lines: int,
 
 def capture_cached_panes(host: str, session: str, lines: int,
                          lane_map: dict[int, str] | None) -> list[dict] | None:
-    cache_key = capture_cache_key(host, session, max(1, int(lines or DEFAULT_TAIL)), lane_map)
+    cache_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
+    cache_key = capture_cache_key(host, session, cache_lines, lane_map)
     now = time.time()
     with INSTANCE_CAPTURE_CACHE_LOCK:
         cached = clone_jsonable(INSTANCE_CAPTURE_CACHE.get(cache_key) or {})
@@ -2421,6 +2425,7 @@ def capture_cached_panes(host: str, session: str, lines: int,
 def render_captured_item_simple(item: dict, tail_lines: int = DEFAULT_TAIL,
                                 lane_map: dict[int, str] | None = None) -> dict:
     """Standalone version of the render_captured_item closure inside capture_session."""
+    tail_lines = bounded_int(tail_lines, DEFAULT_TAIL, min_value=1, max_value=200)
     ansi_text = item.get("ansi", "")
     ansi_lines = ansi_text.splitlines()
     tail_ansi = ansi_lines[-tail_lines:] if ansi_lines else []
@@ -2446,15 +2451,15 @@ def render_captured_item_simple(item: dict, tail_lines: int = DEFAULT_TAIL,
     else:
         state = "idle"
     m = re.search(r"(gpt-[\d.]+\s+[a-z]+(?:\s+[a-z]+)?)", re.sub(r"\s+", " ", full_text.lower()))
-    idx_val = int(item.get("index") if item.get("index") is not None else 0)
+    idx_val = bounded_int(item.get("index"), 0, min_value=0)
     return {
         "index": idx_val,
         "dead": bool(item.get("dead")),
         "state": state,
         "model": m.group(1) if m else "",
         "lane": lane_label_for_capture(item, lane_map),
-        "width": int(item.get("width") or 0),
-        "height": int(item.get("height") or 0),
+        "width": bounded_int(item.get("width"), 0, min_value=0),
+        "height": bounded_int(item.get("height"), 0, min_value=0),
         "tail": tail,
         "tail_html": ansi_to_html("\n".join(tail_ansi)),
         "tail_line_count": len(tail),
@@ -2469,7 +2474,7 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
                          slurm_job_id=str((connection or {}).get("job_id") or ""))
     if runner is None:
         return None
-    tail_lines = max(1, int(lines or DEFAULT_TAIL))
+    tail_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
     cache_key = capture_cache_key(host, session, tail_lines, lane_map)
 
     # ── Streaming fast path ──────────────────────────────────────────────────
@@ -2600,15 +2605,15 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
         # variable spacing; collapse runs of whitespace before matching.
         m = re.search(r"(gpt-[\d.]+\s+[a-z]+(?:\s+[a-z]+)?)",
                       re.sub(r"\s+", " ", full_text.lower()))
-        idx_val = int(item.get("index") if item.get("index") is not None else 0)
+        idx_val = bounded_int(item.get("index"), 0, min_value=0)
         return {
             "index": idx_val,
             "dead": bool(item.get("dead")),
             "state": state,
             "model": m.group(1) if m else "",
             "lane": lane_label_for_capture(item, lane_map),
-            "width": int(item.get("width") or 0),
-            "height": int(item.get("height") or 0),
+            "width": bounded_int(item.get("width"), 0, min_value=0),
+            "height": bounded_int(item.get("height"), 0, min_value=0),
             "tail": tail,
             "tail_html": ansi_to_html("\n".join(tail_ansi)),
             "tail_line_count": len(tail),
@@ -3497,8 +3502,9 @@ def refresh(lines: int):
                 inst_key = (host, str(session))
                 if inst_key in present:
                     continue
+                capture_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
                 panes = [
-                    render_captured_item_simple(item, tail_lines=max(1, int(lines or DEFAULT_TAIL)), lane_map=lane_map)
+                    render_captured_item_simple(item, tail_lines=capture_lines, lane_map=lane_map)
                     for item in (cached.get("panes") or [])
                 ]
                 if not panes:
