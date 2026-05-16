@@ -192,12 +192,22 @@ ssh_cmd_prefix() {
 }
 
 ssh_exec() {
-  local target="$1" remote_cmd="$2"
+  local target="$1" remote_cmd="$2" actual
+  actual=$(ssh_command_target "$target")
   # Never let ssh consume a caller's stdin. Many csup commands iterate over
   # process-substitution streams of hosts; an ssh command that inherits stdin
   # can drain the remaining host list and make status/start/stop silently skip
   # configured projects.
-  eval "$(ssh_cmd_prefix "$target") $(shell_quote "$remote_cmd")" </dev/null
+  ssh \
+    -o ConnectTimeout=3 \
+    -o BatchMode=yes \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=1 \
+    -o ControlMaster=auto \
+    -o "ControlPath=$HOME/.ssh/sockets/%r@%h-%p" \
+    "$actual" \
+    "$remote_cmd" \
+    </dev/null
 }
 
 ssh_capture_timeout() {

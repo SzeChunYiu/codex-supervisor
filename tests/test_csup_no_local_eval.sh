@@ -8,10 +8,10 @@ TMPDIR="$(cd "$TMPDIR" && pwd -P)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # Keep local execution paths argument-safe. Remote command strings still cross an
-# SSH shell boundary, but local status and LUNARC-compute SLURM paths must not
+# SSH shell boundary, but local status, direct SSH, and LUNARC-compute SLURM paths must not
 # re-enter the shell through eval.
-if grep -Eq 'eval "\$(sbatch_cmd|run_cmd)"|cd "\$d" && eval' "$CSUP"; then
-  grep -En 'eval "\$(sbatch_cmd|run_cmd)"|cd "\$d" && eval' "$CSUP" >&2 || true
+if grep -Eq 'eval "\$(sbatch_cmd|run_cmd)"|cd "\$d" && eval|eval "\$\(ssh_cmd_prefix' "$CSUP"; then
+  grep -En 'eval "\$(sbatch_cmd|run_cmd)"|cd "\$d" && eval|eval "\$\(ssh_cmd_prefix' "$CSUP" >&2 || true
   printf 'local csup execution paths must avoid eval\n' >&2
   exit 1
 fi
@@ -63,4 +63,4 @@ out="$(
 [[ "$out" == *"ceo=0 manager=1 reviewer=0 debugger=0 validator=0"* ]] || { printf 'manager role env was not preserved:\n%s\n' "$out" >&2; exit 1; }
 [[ "$out" == *"args=status"* ]] || { printf 'supervisor status arg missing:\n%s\n' "$out" >&2; exit 1; }
 
-echo "ok: csup local status and compute-node paths avoid eval"
+echo "ok: csup local status, SSH, and compute-node paths avoid eval"
