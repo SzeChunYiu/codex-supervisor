@@ -82,6 +82,34 @@ if [[ "$paste_count" != "1" ]]; then
   exit 1
 fi
 
+ready_log="$TMPDIR/ready.log"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_READY_TIMEOUT=bad \
+CODEX_SUPERVISOR_READY_SETTLE=bad \
+READY_LOG="$ready_log" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(READY)
+  PROMPTS=("/goal ready lane")
+  PANE_IDX=(0)
+  sleep() { printf "sleep=%s\n" "$1" >> "$READY_LOG"; }
+  pane_target() { echo "demo:0.1"; }
+  capture_tail() { printf "Tip: ready\n"; }
+  send_prompt_to_pane() { printf "sent=%s\n" "$2" >> "$READY_LOG"; return 0; }
+  wait_ready_and_send 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" >/dev/null
+
+grep -q '^sleep=5$' "$ready_log" || {
+  echo "invalid READY_SETTLE should sanitize to the default before sleep" >&2
+  cat "$ready_log" >&2
+  exit 1
+}
+grep -q '^sent=/goal ready lane$' "$ready_log" || {
+  echo "invalid READY_TIMEOUT should not stop ready prompt delivery" >&2
+  cat "$ready_log" >&2
+  exit 1
+}
+
 stale_log="$TMPDIR/tmux-stale.log"
 if CODEX_SUPERVISOR_TEST_SOURCE=1 \
 TMUX_LOG="$stale_log" \

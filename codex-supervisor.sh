@@ -1863,7 +1863,9 @@ ITERATION_STARTED=()  # epoch seconds when current iteration started (after goal
 
 # Bounded pane snapshot -- single capture-pane call, last N lines only.
 capture_tail() {
-  tmux capture-pane -t "$1" -p -S "-$CAPTURE_TAIL_LINES" 2>/dev/null
+  local tail_lines
+  tail_lines=$(positive_int_or_default "$CAPTURE_TAIL_LINES" 80)
+  tmux capture-pane -t "$1" -p -S "-$tail_lines" 2>/dev/null
 }
 
 pane_target() { printf '%s:0.%d' "$SESSION" "${PANE_IDX[$1]}"; }
@@ -2199,13 +2201,16 @@ send_prompt_to_pane() {
 # Wait for a pane to become ready, then send its prompt.
 wait_ready_and_send() {
   local i=$1 prompt=$2 target s cap
+  local ready_timeout ready_settle
   target=$(pane_target "$i")
-  for ((s=2; s<=READY_TIMEOUT; s+=2)); do
+  ready_timeout=$(positive_int_or_default "$READY_TIMEOUT" 600)
+  ready_settle=$(nonnegative_int_or_default "$READY_SETTLE_SECS" 5)
+  for ((s=2; s<=ready_timeout; s+=2)); do
     cap=$(capture_tail "$target")
     if capture_has "$cap" "$READY_PATTERN" \
        && ! capture_has "$cap" "$NOT_READY_PATTERN"; then
-      log "[pane $i ${LANE_LABELS[$i]}] ready candidate after ${s}s, settling for ${READY_SETTLE_SECS}s..."
-      sleep "$READY_SETTLE_SECS"
+      log "[pane $i ${LANE_LABELS[$i]}] ready candidate after ${s}s, settling for ${ready_settle}s..."
+      sleep "$ready_settle"
       cap=$(capture_tail "$target")
       if ! capture_has "$cap" "$READY_PATTERN" \
          || capture_has "$cap" "$NOT_READY_PATTERN"; then
@@ -2228,7 +2233,7 @@ wait_ready_and_send() {
     fi
     sleep 2
   done
-  log "[pane $i ${LANE_LABELS[$i]}] ERROR: ready timeout (${READY_TIMEOUT}s)"
+  log "[pane $i ${LANE_LABELS[$i]}] ERROR: ready timeout (${ready_timeout}s)"
   return 1
 }
 
