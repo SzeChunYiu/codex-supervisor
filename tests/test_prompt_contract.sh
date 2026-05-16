@@ -94,6 +94,28 @@ if ! grep -q "line 4" /tmp/codex-supervisor-load.err; then
   exit 1
 fi
 
+if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cmd_start --prompts' _ "$SCRIPT" \
+  >/tmp/codex-supervisor-start-arg.out 2>/tmp/codex-supervisor-start-arg.err; then
+  echo "start --prompts should reject a missing file argument" >&2
+  exit 1
+fi
+if ! grep -q "start: --prompts requires a file" /tmp/codex-supervisor-start-arg.err; then
+  echo "missing --prompts argument error should be explicit" >&2
+  cat /tmp/codex-supervisor-start-arg.err >&2
+  exit 1
+fi
+
+if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cmd_start --session --no-attach' _ "$SCRIPT" \
+  >/tmp/codex-supervisor-start-session-arg.out 2>/tmp/codex-supervisor-start-session-arg.err; then
+  echo "start --session should reject a missing name argument" >&2
+  exit 1
+fi
+if ! grep -q "start: --session requires a name" /tmp/codex-supervisor-start-session-arg.err; then
+  echo "missing --session argument error should be explicit" >&2
+  cat /tmp/codex-supervisor-start-session-arg.err >&2
+  exit 1
+fi
+
 CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c \
   'source "$1"; [[ "$MAX_ITERATION_SECS" == "2700" ]]' \
   _ "$SCRIPT"

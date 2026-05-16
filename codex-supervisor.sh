@@ -3536,8 +3536,14 @@ cmd_start() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-attach) attach_after=0; shift ;;
-      --prompts)   PROMPTS_FILE="$2"; shift 2 ;;
-      --session)   SESSION="$2"; shift 2 ;;
+      --prompts)
+        [[ $# -ge 2 && "$2" != --* ]] || { err "start: --prompts requires a file"; return 1; }
+        PROMPTS_FILE="$2"; shift 2
+        ;;
+      --session)
+        [[ $# -ge 2 && "$2" != --* ]] || { err "start: --session requires a name"; return 1; }
+        SESSION="$2"; shift 2
+        ;;
       --daemon)    daemon_mode=1; shift ;;   # internal: do the actual work
       --reattach)  reattach_mode=1; shift ;; # internal: daemon adopts existing tmux panes
       *) err "start: unknown arg $1"; return 1 ;;
