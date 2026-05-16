@@ -94,6 +94,22 @@ if ! grep -q "line 4" /tmp/codex-supervisor-load.err; then
   exit 1
 fi
 
+cat > "$TMPDIR/unsafe-lane-prompts.txt" <<'PROMPTS'
+/goal [../escape] Read docs/parallel-sessions.md, then do one safe task.
+PROMPTS
+
+if CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_PROMPTS="$TMPDIR/unsafe-lane-prompts.txt" \
+  bash -c 'source "$1"; load_prompts' _ "$SCRIPT" \
+  >/tmp/codex-supervisor-unsafe-lane.out 2>/tmp/codex-supervisor-unsafe-lane.err; then
+  echo "load_prompts should reject unsafe bracket lane labels" >&2
+  exit 1
+fi
+if ! grep -q "lane label must be a safe filename token" /tmp/codex-supervisor-unsafe-lane.err; then
+  echo "unsafe lane-label error should explain the filename-token contract" >&2
+  cat /tmp/codex-supervisor-unsafe-lane.err >&2
+  exit 1
+fi
+
 if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cmd_start --prompts' _ "$SCRIPT" \
   >/tmp/codex-supervisor-start-arg.out 2>/tmp/codex-supervisor-start-arg.err; then
   echo "start --prompts should reject a missing file argument" >&2

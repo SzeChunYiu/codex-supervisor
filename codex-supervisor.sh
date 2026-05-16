@@ -1680,6 +1680,11 @@ validate_prompt_line() {
   fi
 }
 
+safe_lane_token() {
+  local label="$1"
+  [[ "$label" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$label" != *..* ]]
+}
+
 # Per-session state file remembers the prompts file path the supervisor was
 # started with, so subsequent `status` / `send` / `restart` etc. don't have
 # to be invoked from the project dir or with the env var set.
@@ -2079,6 +2084,10 @@ load_prompts() {
     elif [[ "$line" =~ [Ll][Aa][Nn][Ee][[:space:]]+([A-Za-z0-9_-]+) ]]; then label="${BASH_REMATCH[1]}"
     elif [[ "$line" =~ \[([^]]+)\] ]]; then label="${BASH_REMATCH[1]}"
     else label="pane$((${#LANE_LABELS[@]}))"
+    fi
+    if ! safe_lane_token "$label"; then
+      err "$PROMPTS_FILE line $line_no: lane label must be a safe filename token"
+      exit 1
     fi
     if ! lane_filter_matches "$label"; then
       continue
@@ -4152,7 +4161,7 @@ cmd_queue() {
     [[ -e "$f" ]] || continue
     base=$(basename "$f")
     lane="${base%.txt}"
-    [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]] || continue
+    safe_lane_token "$lane" || continue
     count=$(grep -cE '^/goal([[:space:]]|$)' "$f" 2>/dev/null); count=${count:-0}
     next=$(grep -E '^/goal([[:space:]]|$)' "$f" 2>/dev/null | head -1 | head -c 80)
     printf '%-15s %5d  %s\n' "$base" "$count" "${next:-(empty)}"
