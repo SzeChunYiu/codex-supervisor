@@ -323,17 +323,28 @@ def async_metric_names() -> list[str]:
         return sorted(ASYNC_METRIC_IN_FLIGHT)
 
 
+def read_text_bounded(path: pathlib.Path, *, max_bytes: int, label: str) -> str | None:
+    """Read small control-plane files without letting a corrupt cache dominate startup."""
+    try:
+        if not path.exists():
+            return None
+        if max_bytes > 0 and path.stat().st_size > max_bytes:
+            print(f"{label} skipped: {path}: file too large", file=sys.stderr)
+            return None
+        return path.read_text()
+    except OSError as e:
+        print(f"{label} skipped: {path}: {e}", file=sys.stderr)
+        return None
+
+
 def toml_read(path: pathlib.Path) -> dict:
     """Parse the limited subset csup uses: section.subsection + key='value'."""
     data: dict = {}
     cur = data
-    try:
-        if not path.exists():
-            return data
-        raw_lines = path.read_text().splitlines()
-    except OSError as e:
-        print(f"toml read skipped: {path}: {e}", file=sys.stderr)
+    raw_text = read_text_bounded(path, max_bytes=1_000_000, label="toml read")
+    if raw_text is None:
         return data
+    raw_lines = raw_text.splitlines()
     for raw in raw_lines:
         s = raw.strip()
         if not s or s.startswith("#"):
@@ -1284,14 +1295,13 @@ def list_projects() -> list[dict]:
     # paths still works.  A small root registry outside Desktop lets the
     # dashboard recover the real backstage project list instead of displaying
     # zero projects after a restart.
-    try:
-        for raw in PROJECT_ROOTS_FILE.read_text().splitlines():
+    roots_text = read_text_bounded(PROJECT_ROOTS_FILE, max_bytes=1_000_000, label="project roots read")
+    if roots_text is not None:
+        for raw in roots_text.splitlines():
             raw = raw.strip()
             if not raw or raw.startswith("#"):
                 continue
             candidates.append(pathlib.Path(raw).expanduser())
-    except OSError:
-        pass
     for child in candidates:
         fallback = DIRECT_PROJECT_FALLBACKS.get(str(child), {})
         try:
@@ -1337,9 +1347,10 @@ def list_projects() -> list[dict]:
         })
         by_root[str(child)] = out[-1]
         by_root[child_key] = out[-1]
+    cache_text = read_text_bounded(PROJECT_CACHE_FILE, max_bytes=2_000_000, label="project cache read")
     try:
-        cached_projects = json.loads(PROJECT_CACHE_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
+        cached_projects = json.loads(cache_text or "[]")
+    except json.JSONDecodeError:
         cached_projects = []
     if isinstance(cached_projects, list):
         for rec in cached_projects:
