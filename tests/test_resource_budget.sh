@@ -91,6 +91,27 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   ensure_start_resource_budget
 ' _ "$SCRIPT"
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  PROMPTS=(a)
+  free_ram_mb() { echo 4096; }
+  free_gb_on_runtime_root() { echo 100; }
+  MIN_FREE_RAM_MB=bad
+  RAM_MB_PER_PANE=bad
+  MIN_FREE_GB=bad
+  DISK_MB_PER_PANE=bad
+  MAX_LOAD_PER_CPU=0
+  ensure_start_resource_budget
+' _ "$SCRIPT"
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  free_gb_on_cwd() { echo 100; }
+  MIN_FREE_GB=bad
+  WARN_FREE_GB=bad
+  ensure_disk_space
+' _ "$SCRIPT"
+
 stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; effective_start_stagger_secs 2' _ "$SCRIPT")"
 [[ "$stagger" == "0" ]] || { echo "2 panes should not stagger by default" >&2; exit 1; }
 
