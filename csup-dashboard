@@ -2805,7 +2805,7 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
 
     if host != me:
         script = r'''
-import json, subprocess, sys, os, glob, stat
+import json, subprocess, sys, os, glob, stat, math
 session = sys.argv[1]
 def safe_int(value, default=0, min_value=0):
     try:
@@ -2813,8 +2813,28 @@ def safe_int(value, default=0, min_value=0):
     except (TypeError, ValueError, OverflowError):
         return default
     return parsed if parsed >= min_value else default
+def safe_float(value, default=0.0, min_value=0.0):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(parsed) or parsed < min_value:
+        return default
+    return parsed
 lines = safe_int(sys.argv[2], 1, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1)
+cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05)
+max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024)
+def run_capture(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=cmd_timeout_secs)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(cmd, 124, e.stdout or "", "command timed out")
+    stdout = r.stdout or ""
+    stderr = r.stderr or ""
+    if len(stdout.encode("utf-8", "replace")) + len(stderr.encode("utf-8", "replace")) > max_cmd_output_bytes:
+        return subprocess.CompletedProcess(cmd, 124, "", "output limit exceeded")
+    return r
 # With per-session tmux sockets, the supervisor uses `tmux -L <session_name>`.
 # Find which socket hosts this session: try a socket named exactly after the
 # session first (the supervisor's default), then default socket, then any
@@ -2838,7 +2858,7 @@ def find_socket(session_name):
         pass
     for sock in candidates:
         cmd = ["tmux"] + (["-L", sock] if sock != "default" else []) + ["list-sessions", "-F", "#{session_name}"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = run_capture(cmd)
         if r.returncode == 0 and session_name in (r.stdout or "").splitlines():
             return sock
     return None
@@ -2851,7 +2871,7 @@ def tx(*args):
         return ["tmux", *args]
     return ["tmux", "-L", socket, *args]
 fmt = "#{pane_index}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_title}"
-r = subprocess.run(tx("list-panes", "-t", session, "-F", fmt), capture_output=True, text=True)
+r = run_capture(tx("list-panes", "-t", session, "-F", fmt))
 if r.returncode != 0:
     raise SystemExit(r.returncode)
 out = []
@@ -2864,7 +2884,7 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
         continue
     height = safe_int(parts[4], 0, 0) if len(parts) > 4 else 0
     cap_lines = max(lines, safe_int(sys.argv[3], lines, 1))
-    c = subprocess.run(tx("capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"), capture_output=True, text=True)
+    c = run_capture(tx("capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"))
     out.append({
         "index": idx,
         "ordinal": ordinal,
@@ -2877,7 +2897,7 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
     })
 monitor = {"known": True, "running": False, "pids": [], "error": ""}
 try:
-    ps = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True)
+    ps = run_capture(["ps", "-axo", "pid=,ppid=,args="])
     if ps.returncode == 0:
         candidates = []
         for raw in (ps.stdout or "").splitlines():
