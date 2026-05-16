@@ -10,6 +10,25 @@ grep -q 'MAX_DASHBOARD_STATE_BYTES + 1' "$CSUP" || { echo "csup steward dashboar
 grep -q 'CSUP_STEWARD_MAX_SAMPLE_SECS' "$CSUP" || { echo "csup steward sample window must be capped" >&2; exit 1; }
 grep -q 'CSUP_STEWARD_MAX_ROWS' "$CSUP" || { echo "csup steward row count must be capped" >&2; exit 1; }
 
+set +e
+unsafe_url_out="$($CSUP steward demo --sample-secs=0 --dashboard-url="file:///tmp/csup-dashboard-state" 2>&1)"
+unsafe_url_status=$?
+remote_url_out="$($CSUP steward demo --sample-secs=0 --dashboard-url="http://192.0.2.1:7777" 2>&1)"
+remote_url_status=$?
+set -e
+(( unsafe_url_status != 0 )) || { printf 'file dashboard URL should fail closed:
+%s
+' "$unsafe_url_out" >&2; exit 1; }
+(( remote_url_status != 0 )) || { printf 'non-local dashboard URL should fail closed:
+%s
+' "$remote_url_out" >&2; exit 1; }
+[[ "$unsafe_url_out" == *"localhost http(s)"* ]] || { printf 'missing file URL rejection detail:
+%s
+' "$unsafe_url_out" >&2; exit 1; }
+[[ "$remote_url_out" == *"localhost http(s)"* ]] || { printf 'missing remote URL rejection detail:
+%s
+' "$remote_url_out" >&2; exit 1; }
+
 cat > "$TMPDIR/state.json" <<'JSON'
 {
   "projects": [
