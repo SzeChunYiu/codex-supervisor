@@ -1599,7 +1599,10 @@ cmd_govern() {
       --apply) mode="apply" ;;
       --json) json=1 ;;
       --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
-      --project=*) target_project="${1#--project=}" ;;
+      --project=*)
+        target_project="${1#--project=}"
+        [[ -n "$target_project" ]] || { err "govern: --project requires a name"; return 2; }
+        ;;
       --host=*)
         target_host="${1#--host=}"
         [[ -n "$target_host" ]] || { err "govern: --host requires a name"; return 2; }
@@ -1784,7 +1787,10 @@ cmd_factory_audit() {
   local target_project=""
   while (( $# > 0 )); do
     case "$1" in
-      --project=*) target_project="${1#--project=}" ;;
+      --project=*)
+        target_project="${1#--project=}"
+        [[ -n "$target_project" ]] || { err "factory-audit: --project requires a name"; return 2; }
+        ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) target_project="$1" ;;
     esac
@@ -2415,7 +2421,10 @@ cmd_steward() {
   local target_project="" sample_secs="${CSUP_STEWARD_SAMPLE_SECS:-15}" dashboard_url="${CSUP_DASHBOARD_URL:-http://127.0.0.1:7777}"
   while (( $# > 0 )); do
     case "$1" in
-      --project=*) target_project="${1#--project=}" ;;
+      --project=*)
+        target_project="${1#--project=}"
+        [[ -n "$target_project" ]] || { err "steward: --project requires a name"; return 2; }
+        ;;
       --sample-secs=*) sample_secs="${1#--sample-secs=}" ;;
       --dashboard-url=*) dashboard_url="${1#--dashboard-url=}" ;;
       --*) err "unknown flag: $1"; return 2 ;;
