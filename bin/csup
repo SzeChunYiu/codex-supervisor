@@ -1884,7 +1884,10 @@ cmd_factory_run() {
         target_host="${1#--host=}"
         [[ -n "$target_host" ]] || { err "factory-run: --host requires a name"; return 2; }
         ;;
-      --scenario=*) scenario="${1#--scenario=}" ;;
+      --scenario=*)
+        scenario="${1#--scenario=}"
+        require_option_value factory-run --scenario "$scenario" || return 2
+        ;;
       --sessions=*)
         sessions_override="${1#--sessions=}"
         require_option_value factory-run --sessions "$sessions_override" || return 2
@@ -2108,7 +2111,10 @@ cmd_staff() {
         target_host="${1#--host=}"
         [[ -n "$target_host" ]] || { err "staff: --host requires a name"; return 2; }
         ;;
-      --scenario=*) scenario="${1#--scenario=}" ;;
+      --scenario=*)
+        scenario="${1#--scenario=}"
+        require_option_value staff --scenario "$scenario" || return 2
+        ;;
       --sessions=*)
         sessions_override="${1#--sessions=}"
         require_option_value staff --sessions "$sessions_override" || return 2
