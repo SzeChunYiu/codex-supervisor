@@ -78,6 +78,8 @@ CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS=0 \
 
     PRUNE_WORKTREE_AGE_HOURS=-1
     cmd_cleanup
+    PRUNE_WORKTREE_AGE_HOURS=bad
+    cmd_cleanup
     assert_missing "$2/projects/current-proj/.next"
     assert_missing "$2/projects/current-proj/app with spaces/.next"
     assert_exists "$2/projects/other-proj/.next"

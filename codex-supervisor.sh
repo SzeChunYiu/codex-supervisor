@@ -514,6 +514,15 @@ nonnegative_int_or_default() {
   fi
 }
 
+signed_int_or_default() {
+  local raw="${1:-}" default="${2:-0}"
+  if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
 tmux_window_x() { positive_int_or_default "$TMUX_WINDOW_X" 240; }
 tmux_window_y() { positive_int_or_default "$TMUX_WINDOW_Y" 70; }
 
@@ -3078,14 +3087,16 @@ cmd_cleanup() {
   #    main checkout.
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git worktree prune 2>/dev/null
-    if (( PRUNE_WORKTREE_AGE_HOURS >= 0 )); then
+    local prune_worktree_age_hours
+    prune_worktree_age_hours=$(signed_int_or_default "$PRUNE_WORKTREE_AGE_HOURS" 1)
+    if (( prune_worktree_age_hours >= 0 )); then
       local main_dir; main_dir=$(git rev-parse --show-toplevel)
       git worktree list --porcelain 2>/dev/null \
         | awk '/^worktree /{print substr($0,10)}' \
         | while read -r wt; do
             [[ -z "$wt" || "$wt" == "$main_dir" ]] && continue
             # find -mmin: minutes since modified. PRUNE_WORKTREE_AGE_HOURS*60
-            local age_min=$((PRUNE_WORKTREE_AGE_HOURS * 60))
+            local age_min=$((prune_worktree_age_hours * 60))
             if find "$wt" -maxdepth 0 -mmin +"$age_min" 2>/dev/null | grep -q .; then
               log "cleanup: removing stale worktree $wt"
               git worktree remove --force "$wt" 2>/dev/null \
