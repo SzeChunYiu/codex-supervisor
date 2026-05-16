@@ -43,6 +43,29 @@ grep -q "not enough CPU/load headroom" /tmp/codex-supervisor-cpu.err
 
 if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   source "$1"
+  PROMPTS=(a b)
+  free_ram_mb() { echo 16000; }
+  free_gb_on_cwd() { echo 100; }
+  free_gb_on_runtime_root() { echo 100; }
+  cpu_count() { echo 2; }
+  load1() { echo 2.7; }
+  MAX_LOAD_PER_CPU=999999
+  MIN_FREE_RAM_MB=512
+  RAM_MB_PER_PANE=600
+  MIN_FREE_GB=5
+  DISK_MB_PER_PANE=0
+  ensure_start_resource_budget
+' _ "$SCRIPT" >/tmp/codex-supervisor-cpu-huge.out 2>/tmp/codex-supervisor-cpu-huge.err; then
+  echo "oversized CPU/load guard should sanitize to default and reject over-cap starts" >&2
+  exit 1
+fi
+grep -q "not enough CPU/load headroom" /tmp/codex-supervisor-cpu-huge.err
+
+load_limit="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; nonnegative_decimal_or_default 999999 1.25 100' _ "$SCRIPT")"
+[[ "$load_limit" == "1.25" ]] || { echo "oversized decimal env should fail closed to default, got $load_limit" >&2; exit 1; }
+
+if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
   PROMPTS=(a b c d)
   free_ram_mb() { echo 2000; }
   free_gb_on_cwd() { echo 100; }
