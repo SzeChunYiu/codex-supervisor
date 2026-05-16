@@ -9,12 +9,24 @@ trap 'rm -rf "$TMPDIR"' EXIT
 grep -q 'MAX_DASHBOARD_STATE_BYTES + 1' "$CSUP" || { echo "csup steward dashboard reads must detect oversized payloads" >&2; exit 1; }
 grep -q 'CSUP_STEWARD_MAX_SAMPLE_SECS' "$CSUP" || { echo "csup steward sample window must be capped" >&2; exit 1; }
 grep -q 'CSUP_STEWARD_MAX_ROWS' "$CSUP" || { echo "csup steward row count must be capped" >&2; exit 1; }
+grep -q 'MAX_DASHBOARD_URL_CHARS' "$CSUP" || { echo "csup steward dashboard URL length must be capped" >&2; exit 1; }
+grep -q 'MAX_STEWARD_PROJECT_FILTER_CHARS' "$CSUP" || { echo "csup steward project filter length must be capped" >&2; exit 1; }
 
 set +e
 unsafe_url_out="$($CSUP steward demo --sample-secs=0 --dashboard-url="file:///tmp/csup-dashboard-state" 2>&1)"
 unsafe_url_status=$?
 remote_url_out="$($CSUP steward demo --sample-secs=0 --dashboard-url="http://192.0.2.1:7777" 2>&1)"
 remote_url_status=$?
+long_project_out="$($CSUP steward "$(python3 - <<'PY'
+print('p' * 129)
+PY
+)" --sample-secs=0 --dashboard-url="http://127.0.0.1:7777" 2>&1)"
+long_project_status=$?
+long_url_out="$($CSUP steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:7777/$(python3 - <<'PY'
+print('u' * 2050)
+PY
+)" 2>&1)"
+long_url_status=$?
 set -e
 (( unsafe_url_status != 0 )) || { printf 'file dashboard URL should fail closed:
 %s
@@ -22,12 +34,24 @@ set -e
 (( remote_url_status != 0 )) || { printf 'non-local dashboard URL should fail closed:
 %s
 ' "$remote_url_out" >&2; exit 1; }
+(( long_project_status != 0 )) || { printf 'overlong project filter should fail closed:
+%s
+' "$long_project_out" >&2; exit 1; }
+(( long_url_status != 0 )) || { printf 'overlong dashboard URL should fail closed:
+%s
+' "$long_url_out" >&2; exit 1; }
 [[ "$unsafe_url_out" == *"localhost http(s)"* ]] || { printf 'missing file URL rejection detail:
 %s
 ' "$unsafe_url_out" >&2; exit 1; }
 [[ "$remote_url_out" == *"localhost http(s)"* ]] || { printf 'missing remote URL rejection detail:
 %s
 ' "$remote_url_out" >&2; exit 1; }
+[[ "$long_project_out" == *"project filter too long"* ]] || { printf 'missing project length rejection detail:
+%s
+' "$long_project_out" >&2; exit 1; }
+[[ "$long_url_out" == *"dashboard URL too long"* ]] || { printf 'missing URL length rejection detail:
+%s
+' "$long_url_out" >&2; exit 1; }
 
 cat > "$TMPDIR/state.json" <<'JSON'
 {
