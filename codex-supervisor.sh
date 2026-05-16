@@ -4147,10 +4147,12 @@ cmd_queue() {
   fi
   printf '%s%-15s %5s  %s%s\n' "$C_BOLD" 'QUEUE FILE' 'COUNT' 'NEXT TASK PREVIEW' "$C_RESET"
   printf '%s%-15s %5s  %s%s\n' "$C_DIM"  '----------' '-----' '-----------------' "$C_RESET"
-  local f base count next
+  local f base lane count next
   for f in "$TASKS_DIR"/*.txt; do
     [[ -e "$f" ]] || continue
     base=$(basename "$f")
+    lane="${base%.txt}"
+    [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]] || continue
     count=$(grep -cE '^/goal([[:space:]]|$)' "$f" 2>/dev/null); count=${count:-0}
     next=$(grep -E '^/goal([[:space:]]|$)' "$f" 2>/dev/null | head -1 | head -c 80)
     printf '%-15s %5d  %s\n' "$base" "$count" "${next:-(empty)}"

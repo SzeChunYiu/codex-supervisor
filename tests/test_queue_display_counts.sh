@@ -15,6 +15,9 @@ cat > "$TMPDIR/codex-tasks/bugs.txt" <<'TASKS'
 not a goal
 /goal valid bug task
 TASKS
+cat > "$TMPDIR/codex-tasks/bad,lane.txt" <<'TASKS'
+/goal unsafe filename task should not render
+TASKS
 
 out="$(
   CODEX_SUPERVISOR_TEST_SOURCE=1 \
@@ -33,6 +36,10 @@ grep -Eq '^bugs[.]txt[[:space:]]+1[[:space:]]+/goal valid bug task$' <<<"$out" |
 }
 [[ "$out" != *"/goalbad"* ]] || {
   printf 'queue preview should not select malformed /goal-like lines, got:\n%s\n' "$out" >&2
+  exit 1
+}
+[[ "$out" != *"bad,lane.txt"* && "$out" != *"unsafe filename"* ]] || {
+  printf 'queue output should ignore unsafe queue filenames, got:\n%s\n' "$out" >&2
   exit 1
 }
 
