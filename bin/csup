@@ -2394,6 +2394,12 @@ try:
 except (TypeError, ValueError):
     max_sample_secs = 300.0
 sample_secs = min(sample_secs, max_sample_secs)
+try:
+    max_rows = int(os.environ.get("CSUP_STEWARD_MAX_ROWS", "5000"))
+    if max_rows < 1:
+        max_rows = 5000
+except (TypeError, ValueError, OverflowError):
+    max_rows = 5000
 
 def project_slug(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name or "project").lower()).strip("-") or "project"
@@ -2415,6 +2421,8 @@ def flatten(state):
             continue
         for inst in project.get("instances", []) or []:
             for pane in inst.get("panes", []) or []:
+                if len(rows) >= max_rows:
+                    return rows
                 key = (
                     str(project.get("name", "")),
                     str(inst.get("host", "")),
