@@ -1736,6 +1736,21 @@ bounded_log_file_env() {
   bounded_root_subdir_file_env "$1" "$2" logs
 }
 
+safe_file_path_env() {
+  local name="$1" default="$2" raw
+  raw="${!name:-}"
+  [[ ${#raw} -le 4096 ]] || raw=""
+  [[ -n "$raw" ]] || { printf '%s\n' "$default"; return; }
+  [[ "$raw" != *..* && "$raw" != *$'\n'* && "$raw" != *$'\r'* ]] || { printf '%s\n' "$default"; return; }
+  [[ "$raw" == /* ]] || raw="$PWD/$raw"
+  printf '%s\n' "$raw"
+}
+
+# CODEX_SUPERVISOR_LOG is intentionally user-overridable for test harnesses
+# and local diagnostics, but inherited traversal/oversized values should not
+# redirect log append/rotation to surprising paths.
+LOG_FILE="$(safe_file_path_env CODEX_SUPERVISOR_LOG "$SUPERVISOR_ROOT/logs/${SESSION}.log")"
+
 # Dashboard pid/log files are internal runtime artifacts. Keep explicit
 # environment overrides scoped to the supervisor runtime tree so inherited
 # values cannot redirect dashboard startup writes to arbitrary files.
