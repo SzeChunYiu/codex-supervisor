@@ -55,6 +55,17 @@ cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/bad,lane.txt" <<'TASKS'
 /goal unsafe lane task eight
 /goal unsafe lane task nine
 TASKS
+cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/noise.txt" <<'TASKS'
+/goalbad invalid queue line one
+/goalbad invalid queue line two
+/goalbad invalid queue line three
+/goalbad invalid queue line four
+/goalbad invalid queue line five
+/goalbad invalid queue line six
+/goalbad invalid queue line seven
+/goalbad invalid queue line eight
+/goalbad invalid queue line nine
+TASKS
 : > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"
 
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
