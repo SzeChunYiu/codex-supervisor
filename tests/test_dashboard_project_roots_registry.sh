@@ -59,6 +59,10 @@ mod.PROJECT_CACHE_FILE = home / ".config/csup/oversized-cache.json"
 mod.PROJECT_CACHE_FILE.write_text("[" + (" " * 2_000_001) + "]")
 projects = mod.list_projects()
 assert projects == [], projects
+assert mod.read_text_bounded(mod.PROJECT_ROOTS_FILE, max_bytes=1_000_000, label="project roots read") is None
+small = home / ".config/csup/small.txt"
+small.write_bytes("ok\xff".encode("latin1"))
+assert mod.read_text_bounded(small, max_bytes=10, label="small read") == "ok�"
 
 mod.PROJECT_ROOTS_FILE = home / ".config/csup/missing-roots.txt"
 mod.PROJECT_CACHE_FILE = home / ".config/csup/project-cache.json"
