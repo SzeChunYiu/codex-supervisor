@@ -73,6 +73,15 @@ large_source.write_bytes((b"0123456789abcdef" * 200000) + b"tail")
 large_info = mod.dashboard_source_info(large_source)
 assert large_info["size_bytes"] == large_source.stat().st_size, large_info
 assert large_info["sha256"] == hashlib.sha256(large_source.read_bytes()).hexdigest()[:16], large_info
+capped_large_info = mod.dashboard_source_info(large_source)
+old_hash_cap = mod.MAX_SOURCE_HASH_BYTES
+try:
+    mod.MAX_SOURCE_HASH_BYTES = 1024
+    capped_large_info = mod.dashboard_source_info(large_source)
+finally:
+    mod.MAX_SOURCE_HASH_BYTES = old_hash_cap
+assert capped_large_info["sha256"] == "", capped_large_info
+assert "too large to hash" in capped_large_info.get("error", ""), capped_large_info
 assert health.get("status") == "degraded", health
 assert health.get("state_counts", {}).get("working") == 1, health
 assert health.get("state_counts", {}).get("idle") == 1, health
