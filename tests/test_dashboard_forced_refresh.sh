@@ -73,6 +73,17 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     except urllib.error.HTTPError as e:
         assert e.code == 400, e
 
+    conn = None
+    old_sleep = mod.time.sleep
+    try:
+        mod.time.sleep = lambda _seconds: old_sleep(0.01)
+        conn = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/events", timeout=2)
+        assert conn.headers.get("Access-Control-Allow-Origin") is None, conn.headers
+    finally:
+        if conn is not None:
+            conn.close()
+        mod.time.sleep = old_sleep
+
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/api/paneevil?host=local&session=s&index=0", timeout=2)
         raise AssertionError("near-miss pane API route should not enter pane handler")
