@@ -558,8 +558,22 @@ bool_int_or_default() {
 }
 
 signed_int_or_default() {
-  local raw="${1:-}" default="${2:-0}"
-  if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
+  local raw="${1:-}" default="${2:-0}" min="${3:-}" max="${4:-}"
+  if [[ "$raw" =~ ^-?[0-9]+$ ]] && { [[ -z "$min$max" ]] || python3 - "$raw" "${min:-}" "${max:-}" <<'PY'
+import sys
+try:
+    value = int(sys.argv[1])
+    min_raw = sys.argv[2]
+    max_raw = sys.argv[3]
+    if min_raw and value < int(min_raw):
+        raise SystemExit(1)
+    if max_raw and value > int(max_raw):
+        raise SystemExit(1)
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+PY
+  }; then
     printf '%s\n' "$raw"
   else
     printf '%s\n' "$default"
@@ -3351,7 +3365,7 @@ cmd_cleanup() {
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git worktree prune 2>/dev/null
     local prune_worktree_age_hours
-    prune_worktree_age_hours=$(signed_int_or_default "$PRUNE_WORKTREE_AGE_HOURS" 1)
+    prune_worktree_age_hours=$(signed_int_or_default "$PRUNE_WORKTREE_AGE_HOURS" 1 -1 8760)
     if (( prune_worktree_age_hours >= 0 )); then
       local main_dir; main_dir=$(git rev-parse --show-toplevel)
       git worktree list --porcelain 2>/dev/null \

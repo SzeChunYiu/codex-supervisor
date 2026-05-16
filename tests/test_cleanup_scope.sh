@@ -151,6 +151,18 @@ with path.open("wb") as f:
 PY
     PRUNE_WORKTREE_AGE_HOURS=-1
     cmd_cleanup
+    PRUNE_WORKTREE_AGE_HOURS=999999
+    [[ $(signed_int_or_default "$PRUNE_WORKTREE_AGE_HOURS" 1 -1 8760) == 1 ]] || {
+      echo "oversized prune age should fail closed to default" >&2
+      exit 1
+    }
+    cmd_cleanup
+    PRUNE_WORKTREE_AGE_HOURS=-999999
+    [[ $(signed_int_or_default "$PRUNE_WORKTREE_AGE_HOURS" 1 -1 8760) == 1 ]] || {
+      echo "overly negative prune age should fail closed to default" >&2
+      exit 1
+    }
+    cmd_cleanup
     PRUNE_WORKTREE_AGE_HOURS=bad
     cmd_cleanup
     log_size="$(python3 - "$LOG_FILE" <<'"'"'PY'"'"'
