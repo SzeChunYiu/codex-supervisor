@@ -279,3 +279,31 @@ grep -q "submit: lane must be a safe filename token" /tmp/csup-submit-bad-lane.e
   echo "invalid lane should not write outside codex-tasks" >&2
   exit 1
 }
+
+mkdir -p "$TMPDIR/home/Desktop/projects/proj-b"
+cat > "$TMPDIR/home/Desktop/projects/proj-b/.codex-supervisor.toml" <<'TOML'
+schema_version = 1
+[project]
+name = "proj-b"
+[hosts."mac-mini"]
+prompts = "codex-prompts.txt"
+tasks_dir = "../outside"
+session = "proj-b-main"
+TOML
+
+if HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" submit proj-b perf "bad tasks dir" >/tmp/csup-submit-bad-tasks.out 2>/tmp/csup-submit-bad-tasks.err; then
+  echo "submit should reject tasks_dir paths outside the project" >&2
+  exit 1
+fi
+grep -q "submit: tasks_dir must resolve inside the project" /tmp/csup-submit-bad-tasks.err || {
+  cat /tmp/csup-submit-bad-tasks.err >&2
+  exit 1
+}
+[[ ! -e "$TMPDIR/home/Desktop/projects/outside/perf.txt" ]] || {
+  echo "invalid tasks_dir should not write outside the project" >&2
+  exit 1
+}
