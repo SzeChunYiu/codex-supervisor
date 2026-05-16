@@ -96,11 +96,13 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   PROMPTS=(a)
   free_ram_mb() { echo 4096; }
   free_gb_on_runtime_root() { echo 100; }
+  cpu_count() { echo 4; }
+  load1() { echo 0.1; }
   MIN_FREE_RAM_MB=bad
   RAM_MB_PER_PANE=bad
   MIN_FREE_GB=bad
   DISK_MB_PER_PANE=bad
-  MAX_LOAD_PER_CPU=0
+  MAX_LOAD_PER_CPU=bad
   ensure_start_resource_budget
 ' _ "$SCRIPT"
 
