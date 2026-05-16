@@ -8,7 +8,7 @@
 #   csup start <project> [--host=<name>] [--fallback]
 #   csup submit <project> <lane> <goal text...>
 #   csup capacity [--json]
-#   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+#   csup govern [--dry-run|--apply] [--json] [--project=<name>] [--host=<name>]
 #   csup factory-audit [--project=<name>|<project>]
 #   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
 #   csup staff <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply] [--allow-stop]
@@ -1412,15 +1412,39 @@ PY
     "$free_ram_mb" "$reserve_ram_mb" "$ram_mb_per_pane" "$free_disk_gb" "$reserve_disk_gb" "$disk_mb_per_pane" "$cpus" "$load" "$max_load_per_cpu"
 }
 
+json_emit() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+int_keys = {
+    "capacity", "total_room", "ram_room", "disk_room", "load_room",
+    "dynamic_workers", "generated_only", "panes", "queued",
+}
+obj = {}
+for item in sys.argv[1:]:
+    key, _, raw = item.partition("=")
+    if key in int_keys:
+        try:
+            obj[key] = int(raw)
+        except ValueError:
+            obj[key] = raw
+    else:
+        obj[key] = raw
+print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 # ---------------------------------------------------------------------------
 # Subcommand: govern
 # ---------------------------------------------------------------------------
 cmd_govern() {
-  local mode="dry-run" target_project="" target_host=""
+  local mode="dry-run" target_project="" target_host="" json=0
   while (( $# > 0 )); do
     case "$1" in
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
+      --json) json=1 ;;
       --project=*) target_project="${1#--project=}" ;;
       --host=*) target_host="${1#--host=}" ;;
       --*) err "unknown flag: $1"; return 2 ;;
@@ -1428,6 +1452,10 @@ cmd_govern() {
     esac
     shift
   done
+  if (( json )) && [[ "$mode" == "apply" ]]; then
+    err "govern --json is only supported with --dry-run"
+    return 2
+  fi
 
   local me; me=$(this_host)
   local capacity=0 bottleneck="unknown" total_room=0 ram_room=0 disk_room=0 load_room=0 cap_k cap_v
@@ -1442,9 +1470,17 @@ cmd_govern() {
     esac
   done < <(capacity_fields)
   local remaining="$capacity"
-  printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck"
+  if (( json )); then
+    json_emit event=summary mode="$mode" host="$me" runtime="$RUNTIME_ROOT" capacity="$capacity" bottleneck="$bottleneck" total_room="$total_room" ram_room="$ram_room" disk_room="$disk_room" load_room="$load_room"
+  else
+    printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck"
+  fi
   if (( remaining <= 0 )); then
-    printf 'SKIP all: no local capacity (bottleneck=%s total_room=%s ram_room=%s disk_room=%s load_room=%s)\n' "$bottleneck" "$total_room" "$ram_room" "$disk_room" "$load_room"
+    if (( json )); then
+      json_emit event=skip scope=all reason=no_local_capacity bottleneck="$bottleneck" total_room="$total_room" ram_room="$ram_room" disk_room="$disk_room" load_room="$load_room"
+    else
+      printf 'SKIP all: no local capacity (bottleneck=%s total_room=%s ram_room=%s disk_room=%s load_room=%s)\n' "$bottleneck" "$total_room" "$ram_room" "$disk_room" "$load_room"
+    fi
     return 0
   fi
 
@@ -1466,19 +1502,41 @@ cmd_govern() {
     while read -r h; do
       [[ -n "$h" ]] || continue
       [[ -n "$target_host" && "$h" != "$target_host" ]] && continue
-      [[ "$h" == "$me" ]] || { printf 'SKIP %s/%s: non-local host for this governor pass\n' "$p" "$h"; continue; }
+      if [[ "$h" != "$me" ]]; then
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" reason=non_local_host
+        else
+          printf 'SKIP %s/%s: non-local host for this governor pass\n' "$p" "$h"
+        fi
+        continue
+      fi
 
       prompts=$(toml_get "$cfg" "hosts.$h" "prompts")
       tasks_dir=$(toml_get "$cfg" "hosts.$h" "tasks_dir")
       session=$(toml_get "$cfg" "hosts.$h" "session")
       [[ -z "$session" ]] && session="${p}-${h}"
-      [[ -z "$prompts" ]] && { printf 'SKIP %s/%s: missing prompts config\n' "$p" "$h"; continue; }
+      if [[ -z "$prompts" ]]; then
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" session="$session" reason=missing_prompts_config
+        else
+          printf 'SKIP %s/%s: missing prompts config\n' "$p" "$h"
+        fi
+        continue
+      fi
       if session_running_local "$session"; then
-        printf 'SKIP %s/%s session=%s: already running\n' "$p" "$h" "$session"
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" session="$session" reason=already_running
+        else
+          printf 'SKIP %s/%s session=%s: already running\n' "$p" "$h" "$session"
+        fi
         continue
       fi
       if [[ -z "$tasks_dir" ]]; then
-        printf 'SKIP %s/%s session=%s: no tasks_dir configured\n' "$p" "$h" "$session"
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" session="$session" reason=no_tasks_dir
+        else
+          printf 'SKIP %s/%s session=%s: no tasks_dir configured\n' "$p" "$h" "$session"
+        fi
         continue
       fi
       queue_abs="$project_dir/$tasks_dir"
@@ -1489,7 +1547,14 @@ cmd_govern() {
       queued_total="$dynamic_total"
       fixed_panes="${CSUP_GOVERNOR_FIXED_PANES:-2}" # generated MANAGER + REVIEWER; CEO runs as its own session.
       lane_budget=$(( remaining - fixed_panes ))
-      (( lane_budget < 1 )) && { printf 'SKIP %s/%s session=%s: capacity reserved for fixed roles only\n' "$p" "$h" "$session"; continue; }
+      if (( lane_budget < 1 )); then
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" session="$session" reason=fixed_roles_reserved
+        else
+          printf 'SKIP %s/%s session=%s: capacity reserved for fixed roles only\n' "$p" "$h" "$session"
+        fi
+        continue
+      fi
       while read -r qline; do
         [[ -n "$qline" ]] || continue
         count="${qline%% *}"
@@ -1506,7 +1571,11 @@ cmd_govern() {
       fi
 
       if (( ${#selected_lanes[@]} == 0 && dynamic_workers == 0 )); then
-        printf 'SKIP %s/%s session=%s: no queued /goal tasks\n' "$p" "$h" "$session"
+        if (( json )); then
+          json_emit event=skip project="$p" host="$h" session="$session" reason=no_queued_goal_tasks
+        else
+          printf 'SKIP %s/%s session=%s: no queued /goal tasks\n' "$p" "$h" "$session"
+        fi
         continue
       fi
 
@@ -1515,7 +1584,11 @@ cmd_govern() {
       generated_only=0
       [[ -z "$lanes_csv" ]] && generated_only=1
       max_panes=$(( ${#selected_lanes[@]} + dynamic_workers + fixed_panes ))
-      printf 'START %s/%s session=%s lanes=%s dynamic_workers=%s panes=%s queued=%s\n' "$p" "$h" "$session" "${lanes_csv:-generated-only}" "$dynamic_workers" "$max_panes" "$queued_total"
+      if (( json )); then
+        json_emit event=start project="$p" host="$h" session="$session" lanes="${lanes_csv:-generated-only}" dynamic_workers="$dynamic_workers" panes="$max_panes" queued="$queued_total" generated_only="$generated_only"
+      else
+        printf 'START %s/%s session=%s lanes=%s dynamic_workers=%s panes=%s queued=%s\n' "$p" "$h" "$session" "${lanes_csv:-generated-only}" "$dynamic_workers" "$max_panes" "$queued_total"
+      fi
       if [[ "$mode" == "apply" ]]; then
         run_local_start "$project_dir" "$session" "$prompts" "$tasks_dir" "$lanes_csv" "$max_panes" "$dynamic_workers" "$generated_only" "team"
       fi
@@ -2579,7 +2652,7 @@ csup — codex-supervisor cross-host launcher
   csup start <project> [--host=<name>] [--fallback]
   csup submit <project> <lane> <goal text...>
   csup capacity [--json]
-  csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
+  csup govern [--dry-run|--apply] [--json] [--project=<name>] [--host=<name>]
   csup factory-audit [--project=<name>|<project>]
   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
   csup gm-start <project> [--host=<name>] [--dry-run|--apply]
@@ -2592,6 +2665,7 @@ csup — codex-supervisor cross-host launcher
   csup ls            list projects with .codex-supervisor.toml
   csup hosts         list known hosts and reachability
   csup capacity      report local safe pane headroom and limiting resource
+  csup govern --json emit dry-run plan as newline-delimited JSON events
 USAGE
     ;;
   *) err "unknown subcommand: $sub"; exit 2 ;;

@@ -280,6 +280,7 @@ trees only, and one writable lease per branch/worktree/path.
 csup submit <project> <lane> "short task for that lane"
 csup capacity            # show local safe pane headroom + bottleneck
 csup govern --dry-run     # explain what would start
+csup govern --dry-run --json  # machine-readable start/skip plan
 csup govern --apply       # start right-sized lane subsets
 csup factory-audit <project>  # classify factory health before expanding work
 csup staff <project> --scenario=resume --dry-run
@@ -302,7 +303,8 @@ local pane count plus the limiting factor (`session_cap`, `ram`, `disk`, or
 `load`) and the per-resource room used by `govern`, so operators can add the
 largest safe worker batch without guessing. Use `csup capacity --json` when a
 dashboard, scheduler, or script needs the same headroom calculation without
-parsing human text.
+parsing human text. Use `csup govern --dry-run --json` when automation needs
+the right-sized start/skip plan as newline-delimited JSON events.
 
 `factory-audit` is the management gate for the AI factory model. It reports
 `RED` when factory docs are missing, `docs/blocker-schema.md` is absent/invalid,

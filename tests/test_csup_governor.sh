@@ -95,6 +95,47 @@ if [[ "$dry_run" != *"capacity=8 pane(s) bottleneck=session_cap"* ]]; then
   exit 1
 fi
 
+json_dry_run="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  CSUP_GOVERNOR_FREE_RAM_MB=16000 \
+  CSUP_GOVERNOR_FREE_DISK_GB=100 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=10 \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --dry-run --json
+)"
+
+python3 - "$json_dry_run" <<'PY'
+import json
+import sys
+
+events = [json.loads(line) for line in sys.argv[1].splitlines() if line.strip()]
+assert events[0]["event"] == "summary", events
+assert events[0]["capacity"] == 8, events
+assert events[0]["bottleneck"] == "session_cap", events
+start = next(event for event in events if event["event"] == "start")
+assert start["project"] == "proj-a", start
+assert start["host"] == "mac-mini", start
+assert start["session"] == "proj-a-main", start
+assert start["lanes"] == "worker-a,bugs", start
+assert start["dynamic_workers"] == 2, start
+assert start["panes"] == 6, start
+assert start["queued"] == 5, start
+assert start["generated_only"] == 0, start
+PY
+
+if HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --apply --json >/tmp/csup-governor-json-apply.out 2>/tmp/csup-governor-json-apply.err; then
+  echo "govern --apply --json should fail instead of mixing JSON with launcher output" >&2
+  exit 1
+fi
+grep -q "govern --json is only supported with --dry-run" /tmp/csup-governor-json-apply.err
+
 CSUP_CAPTURE_FILE="$TMPDIR/capture.txt" \
 HOME="$TMPDIR/home" \
 CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
