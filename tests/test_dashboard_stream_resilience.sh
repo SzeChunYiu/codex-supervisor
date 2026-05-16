@@ -61,6 +61,8 @@ spec.loader.exec_module(mod)
 
 mod.known_hosts = lambda: {"ng-content-lunarc": {"ssh": "lunarc", "scheduler": "slurm"}}
 stream_key = mod.streaming_connection_key("lunarc", "3061936")
+orig_max_capture_panes = mod.MAX_CAPTURE_PANES
+mod.MAX_CAPTURE_PANES = 2
 with mod.CACHE_LOCK:
     mod.CACHE["projects"] = [{
         "name": "neural_grow",
@@ -92,11 +94,21 @@ with mod.STREAMING_CACHE_LOCK:
             "height": "tall",
             "title": "",
             "ansi": "malformed live line",
+        }, {
+            "index": 2,
+            "dead": False,
+            "cmd": "codex",
+            "width": 120,
+            "height": 40,
+            "title": "",
+            "ansi": "extra live line",
         }],
     }
 
 state = mod.state_payload(compact=True, tail_lines=1)
 panes = state["projects"][0]["instances"][0]["panes"]
+mod.MAX_CAPTURE_PANES = orig_max_capture_panes
+assert len(panes) == 2, panes
 pane = panes[0]
 assert pane["tail"] == ["new live line"], pane
 assert pane["lane"] == "planner-content", pane

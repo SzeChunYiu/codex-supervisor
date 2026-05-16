@@ -125,6 +125,7 @@ assert active["max"] == 1, f"LUNARC SSH+srun calls should be serialized per ssh 
 orig_host_runner = mod.host_runner
 orig_streaming = mod.CSUP_STREAMING
 orig_max_remote_json = mod.MAX_REMOTE_JSON_CHARS
+orig_max_capture_panes = mod.MAX_CAPTURE_PANES
 mod.CSUP_STREAMING = False
 mod.MAX_REMOTE_JSON_CHARS = 8
 def oversized_runner(*args, **kwargs):
@@ -139,5 +140,21 @@ assert cache_values and cache_values[-1].get("last_error") == "remote capture JS
 mod.host_runner = orig_host_runner
 mod.CSUP_STREAMING = orig_streaming
 mod.MAX_REMOTE_JSON_CHARS = orig_max_remote_json
+
+mod.CSUP_STREAMING = False
+mod.MAX_CAPTURE_PANES = 2
+def many_panes_runner(*args, **kwargs):
+    def run(cmd):
+        return subprocess.CompletedProcess(cmd, 0, '{"panes": [' + ",".join(
+            '{"index": %d, "ansi": "pane%d"}' % (i, i) for i in range(5)
+        ) + ']}', "")
+    return run
+mod.host_runner = many_panes_runner
+mod.INSTANCE_CAPTURE_CACHE.clear()
+panes = mod.capture_session("remote", {"remote": {"ssh": "remote"}}, "local", "demo", 5, _bypass_cache=True)
+assert [p["index"] for p in panes] == [0, 1], panes
+mod.host_runner = orig_host_runner
+mod.CSUP_STREAMING = orig_streaming
+mod.MAX_CAPTURE_PANES = orig_max_capture_panes
 print("ok: dashboard wraps LUNARC captures with ssh+srun active allocation and cached job id")
 PY

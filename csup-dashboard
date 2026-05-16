@@ -248,6 +248,7 @@ MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_00
 MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
 MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024)
 MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024)
+MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -827,6 +828,19 @@ def iter_bounded_stream_lines(stream, max_chars: int):
         yield "", True
 
 
+def bounded_pane_dicts(value: object, limit: int | None = None) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    limit = bounded_int(limit if limit is not None else MAX_CAPTURE_PANES, 1, min_value=1)
+    out: list[dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def run_ssh_stable(ssh_target: str, cmd: list[str], *, timeout: float, retries: int = 1) -> subprocess.CompletedProcess:
     # OpenSSH ControlMaster sockets can refuse concurrent multiplexed session
     # opens. LUNARC is especially sensitive because several host aliases share
@@ -1282,7 +1296,8 @@ class StreamingConnection:
                 full = bool(data.get("full"))
                 broadcast = False
                 with STREAMING_CACHE_LOCK:
-                    for sess in data.get("sessions", []) if isinstance(data.get("sessions", []), list) else []:
+                    sessions = data.get("sessions", []) if isinstance(data.get("sessions", []), list) else []
+                    for sess in sessions[:MAX_CAPTURE_PANES]:
                         if not isinstance(sess, dict):
                             continue
                         sess_name = sess.get("session", "")
@@ -1295,7 +1310,7 @@ class StreamingConnection:
                         existing = STREAMING_CACHE.get(key) or {"panes": [], "ts": 0.0}
                         if full:
                             STREAMING_CACHE[key] = {
-                                "panes": sess.get("panes", []) if isinstance(sess.get("panes", []), list) else [],
+                                "panes": bounded_pane_dicts(sess.get("panes", [])),
                                 "monitor": sess.get("monitor") or {},
                                 "ts": cache_timestamp(sess.get("ts"), now),
                             }
@@ -1309,7 +1324,7 @@ class StreamingConnection:
                             if isinstance(p, dict)
                         }
                         cur.pop(-1, None)
-                        for p in sess.get("panes", []) if isinstance(sess.get("panes", []), list) else []:
+                        for p in bounded_pane_dicts(sess.get("panes", [])):
                             if not isinstance(p, dict):
                                 continue
                             idx = bounded_int(p.get("index"), -1, min_value=0)
@@ -1321,7 +1336,7 @@ class StreamingConnection:
                             cur.pop(bounded_int(idx, -1, min_value=0), None)
                             broadcast = True
                         STREAMING_CACHE[key] = {
-                            "panes": sorted(cur.values(), key=lambda x: bounded_int(x.get("index"), 0, min_value=0)),
+                            "panes": sorted(cur.values(), key=lambda x: bounded_int(x.get("index"), 0, min_value=0))[:MAX_CAPTURE_PANES],
                             "monitor": sess.get("monitor") or existing.get("monitor") or {},
                             "ts": cache_timestamp(sess.get("ts"), now),
                         }
@@ -2519,7 +2534,7 @@ def apply_streaming_cache_overlay(snapshot: dict, tail_lines: int) -> None:
             stream_key = streaming_connection_key(ssh_target, job_id)
             with STREAMING_CACHE_LOCK:
                 cached = clone_jsonable(STREAMING_CACHE.get((stream_key, session)) or {})
-            raw_panes = cached.get("panes") or []
+            raw_panes = bounded_pane_dicts(cached.get("panes") or [])
             if not raw_panes:
                 continue
             existing_lanes = {}
@@ -3133,10 +3148,10 @@ print(json.dumps({"panes": out, "monitor": monitor}))
                     INSTANCE_CAPTURE_CACHE[cache_key] = cached
             return None
         if isinstance(remote_payload, dict):
-            remote_items = remote_payload.get("panes") or []
+            remote_items = bounded_pane_dicts(remote_payload.get("panes"))
             set_monitor_status(host, session, remote_payload.get("monitor") or empty_monitor_status())
         else:
-            remote_items = remote_payload
+            remote_items = bounded_pane_dicts(remote_payload)
         panes = [render_captured_item(item) for item in remote_items]
         if REMOTE_CAPTURE_CACHE_SECS > 0:
             with INSTANCE_CAPTURE_CACHE_LOCK:
@@ -3162,6 +3177,8 @@ print(json.dumps({"panes": out, "monitor": monitor}))
         return None
     panes_meta = []
     for line in r.stdout.strip().splitlines():
+        if len(panes_meta) >= MAX_CAPTURE_PANES:
+            break
         parts = line.split("|")
         if len(parts) >= 3:
             idx = bounded_int(parts[0], -1, min_value=0)
