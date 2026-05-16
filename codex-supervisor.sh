@@ -684,19 +684,46 @@ find_project_scoped_children() {
 process_tree_descendants() {
   python3 - "$@" <<'PY'
 import collections
+import os
+import select
 import subprocess
 import sys
+import time
 
 MAX_PS_OUTPUT_BYTES = 1_000_000
 
 def ps_output(args):
-    r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
-    if r.returncode != 0:
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    chunks = []
+    fds = {proc.stdout.fileno(): chunks, proc.stderr.fileno(): []}
+    total = 0
+    deadline = time.monotonic() + 2.0
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError("ps timed out")
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > MAX_PS_OUTPUT_BYTES:
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("ps output too large")
+            fds[fd].append(chunk)
+    if proc.wait(timeout=0.2) != 0:
         raise RuntimeError("ps failed")
-    out = r.stdout or ""
-    if len(out.encode("utf-8", "replace")) > MAX_PS_OUTPUT_BYTES:
-        raise RuntimeError("ps output too large")
-    return out
+    return b"".join(chunks).decode("utf-8", "replace")
 
 roots = []
 for raw in sys.argv[1:]:
@@ -1196,19 +1223,46 @@ dashboard_matching_pids_for_cmd() {
   local match_cmd="${1:-$DASHBOARD_CMD}"
   python3 - "$match_cmd" "$DASHBOARD_PORT" <<'PY'
 import shlex
+import os
+import select
 import subprocess
 import sys
+import time
 
 MAX_PS_OUTPUT_BYTES = 1_000_000
 
 def ps_output(args):
-    r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
-    if r.returncode != 0:
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    chunks = []
+    fds = {proc.stdout.fileno(): chunks, proc.stderr.fileno(): []}
+    total = 0
+    deadline = time.monotonic() + 2.0
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError("ps timed out")
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > MAX_PS_OUTPUT_BYTES:
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("ps output too large")
+            fds[fd].append(chunk)
+    if proc.wait(timeout=0.2) != 0:
         raise RuntimeError("ps failed")
-    out = r.stdout or ""
-    if len(out.encode("utf-8", "replace")) > MAX_PS_OUTPUT_BYTES:
-        raise RuntimeError("ps output too large")
-    return out
+    return b"".join(chunks).decode("utf-8", "replace")
 
 cmd = sys.argv[1]
 port = sys.argv[2]
