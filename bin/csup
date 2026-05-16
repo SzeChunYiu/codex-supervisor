@@ -268,26 +268,28 @@ toml_get() {
 import os, re, sys
 path, want_sec, want_key = sys.argv[1], sys.argv[2], sys.argv[3]
 cur = ""
+max_bytes = 1_000_000
 try:
-    if os.path.getsize(path) > 1_000_000:
+    with open(path, "rb") as f:
+        raw = f.read(max_bytes + 1)
+    if len(raw) > max_bytes:
         sys.exit(0)
-    with open(path) as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            if s.startswith("["):
-                cur = s.strip("[]").replace('"', '')
-                continue
-            if cur != want_sec:
-                continue
-            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\s*#.*)?$', s)
-            if m and m.group(1) == want_key:
-                v = m.group(2).strip()
-                if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
-                    v = v[1:-1]
-                print(v)
-                sys.exit(0)
+    for line in raw.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("["):
+            cur = s.strip("[]").replace('"', '')
+            continue
+        if cur != want_sec:
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\s*#.*)?$', s)
+        if m and m.group(1) == want_key:
+            v = m.group(2).strip()
+            if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+                v = v[1:-1]
+            print(v)
+            sys.exit(0)
 except FileNotFoundError:
     pass
 PY
@@ -298,16 +300,18 @@ toml_sections() {
   python3 - "$file" "$prefix" <<'PY'
 import os, sys
 path, prefix = sys.argv[1], sys.argv[2]
+max_bytes = 1_000_000
 try:
-    if os.path.getsize(path) > 1_000_000:
+    with open(path, "rb") as f:
+        raw = f.read(max_bytes + 1)
+    if len(raw) > max_bytes:
         sys.exit(0)
-    with open(path) as f:
-        for line in f:
-            s = line.strip()
-            if s.startswith("[") and s.endswith("]"):
-                name = s.strip("[]").replace('"', '')
-                if name.startswith(prefix):
-                    print(name[len(prefix):])
+    for line in raw.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            name = s.strip("[]").replace('"', '')
+            if name.startswith(prefix):
+                print(name[len(prefix):])
 except FileNotFoundError:
     pass
 PY

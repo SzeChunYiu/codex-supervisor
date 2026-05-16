@@ -63,6 +63,20 @@ huge_hosts_out="$(
   "$CSUP" hosts
 )"
 
+python3 - "$CSUP" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text()
+get_match = re.search(r'toml_get\(\) \{.*?python3 - "\$file" "\$section" "\$key" <<\'PY\'\n(.*?)\nPY', text, re.S)
+sections_match = re.search(r'toml_sections\(\) \{.*?python3 - "\$file" "\$prefix" <<\'PY\'\n(.*?)\nPY', text, re.S)
+assert get_match and sections_match, "TOML parser snippets must be present"
+for snippet in (get_match.group(1), sections_match.group(1)):
+    assert 'open(path, "rb")' in snippet
+    assert 'read(max_bytes + 1)' in snippet
+    assert 'getsize' not in snippet
+PY
+
 [[ "$huge_hosts_out" != *"late"* ]] || {
   printf 'oversized hosts TOML should fail closed instead of scanning late sections, got:\n%s\n' "$huge_hosts_out" >&2
   exit 1
