@@ -187,6 +187,7 @@ assert "renderCumulativeBars" in html, "dashboard should render cumulative token
 assert "cumulative-bar" in html, "cumulative chart should have cumulative bars"
 assert "Window total" in html, "cumulative chart should show window total reading"
 assert "Share of scanned" in html, "cumulative chart should compare cumulative window to scanned total"
+assert "meminfo.read_text()" not in dashboard_path.read_text(), "Linux meminfo should use bounded reads"
 assert hasattr(mod, "collect_system_health"), "dashboard should collect local computer health"
 health = mod.collect_system_health()
 for key in ["cpu", "memory", "disk", "storage"]:
