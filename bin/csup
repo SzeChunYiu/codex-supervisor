@@ -8,7 +8,7 @@
 #   csup start <project> [--host=<name>] [--fallback]
 #   csup submit <project> <lane> <goal text...>
 #   csup capacity [--json]
-#   csup govern [--dry-run|--apply] [--json] [--project=<name>] [--host=<name>]
+#   csup govern [--dry-run|--apply] [--json] [--max-panes=N] [--project=<name>] [--host=<name>]
 #   csup factory-audit [--project=<name>|<project>]
 #   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
 #   csup staff <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply] [--allow-stop]
@@ -1418,7 +1418,8 @@ import json
 import sys
 
 int_keys = {
-    "capacity", "total_room", "ram_room", "disk_room", "load_room",
+    "capacity", "capacity_raw", "max_panes_override",
+    "total_room", "ram_room", "disk_room", "load_room",
     "dynamic_workers", "generated_only", "panes", "queued",
 }
 obj = {}
@@ -1439,12 +1440,13 @@ PY
 # Subcommand: govern
 # ---------------------------------------------------------------------------
 cmd_govern() {
-  local mode="dry-run" target_project="" target_host="" json=0
+  local mode="dry-run" target_project="" target_host="" json=0 max_panes_override=""
   while (( $# > 0 )); do
     case "$1" in
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
       --json) json=1 ;;
+      --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
       --project=*) target_project="${1#--project=}" ;;
       --host=*) target_host="${1#--host=}" ;;
       --*) err "unknown flag: $1"; return 2 ;;
@@ -1452,13 +1454,21 @@ cmd_govern() {
     esac
     shift
   done
+  if [[ -n "$max_panes_override" && ! "$max_panes_override" =~ ^[0-9]+$ ]]; then
+    err "govern --max-panes must be a positive integer"
+    return 2
+  fi
+  if [[ -n "$max_panes_override" && "$max_panes_override" -le 0 ]]; then
+    err "govern --max-panes must be a positive integer"
+    return 2
+  fi
   if (( json )) && [[ "$mode" == "apply" ]]; then
     err "govern --json is only supported with --dry-run"
     return 2
   fi
 
   local me; me=$(this_host)
-  local capacity=0 bottleneck="unknown" total_room=0 ram_room=0 disk_room=0 load_room=0 cap_k cap_v
+  local capacity=0 capacity_raw=0 bottleneck="unknown" total_room=0 ram_room=0 disk_room=0 load_room=0 cap_k cap_v
   while IFS='=' read -r cap_k cap_v; do
     case "$cap_k" in
       available) capacity="$cap_v" ;;
@@ -1469,11 +1479,24 @@ cmd_govern() {
       load_room) load_room="$cap_v" ;;
     esac
   done < <(capacity_fields)
+  capacity_raw="$capacity"
+  if [[ -n "$max_panes_override" && "$max_panes_override" -lt "$capacity" ]]; then
+    capacity="$max_panes_override"
+    bottleneck="operator_cap"
+  fi
   local remaining="$capacity"
   if (( json )); then
-    json_emit event=summary mode="$mode" host="$me" runtime="$RUNTIME_ROOT" capacity="$capacity" bottleneck="$bottleneck" total_room="$total_room" ram_room="$ram_room" disk_room="$disk_room" load_room="$load_room"
+    if [[ -n "$max_panes_override" ]]; then
+      json_emit event=summary mode="$mode" host="$me" runtime="$RUNTIME_ROOT" capacity="$capacity" capacity_raw="$capacity_raw" max_panes_override="$max_panes_override" bottleneck="$bottleneck" total_room="$total_room" ram_room="$ram_room" disk_room="$disk_room" load_room="$load_room"
+    else
+      json_emit event=summary mode="$mode" host="$me" runtime="$RUNTIME_ROOT" capacity="$capacity" bottleneck="$bottleneck" total_room="$total_room" ram_room="$ram_room" disk_room="$disk_room" load_room="$load_room"
+    fi
   else
-    printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck"
+    if [[ -n "$max_panes_override" ]]; then
+      printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s max_panes=%s raw_capacity=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck" "$max_panes_override" "$capacity_raw"
+    else
+      printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck"
+    fi
   fi
   if (( remaining <= 0 )); then
     if (( json )); then
@@ -2652,7 +2675,7 @@ csup — codex-supervisor cross-host launcher
   csup start <project> [--host=<name>] [--fallback]
   csup submit <project> <lane> <goal text...>
   csup capacity [--json]
-  csup govern [--dry-run|--apply] [--json] [--project=<name>] [--host=<name>]
+  csup govern [--dry-run|--apply] [--json] [--max-panes=N] [--project=<name>] [--host=<name>]
   csup factory-audit [--project=<name>|<project>]
   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
   csup gm-start <project> [--host=<name>] [--dry-run|--apply]
@@ -2666,6 +2689,7 @@ csup — codex-supervisor cross-host launcher
   csup hosts         list known hosts and reachability
   csup capacity      report local safe pane headroom and limiting resource
   csup govern --json emit dry-run plan as newline-delimited JSON events
+  csup govern --max-panes=N cap this governor pass below computed capacity
 USAGE
     ;;
   *) err "unknown subcommand: $sub"; exit 2 ;;

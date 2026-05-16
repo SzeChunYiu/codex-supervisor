@@ -95,6 +95,41 @@ if [[ "$dry_run" != *"capacity=8 pane(s) bottleneck=session_cap"* ]]; then
   exit 1
 fi
 
+capped_dry_run="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  CSUP_GOVERNOR_FREE_RAM_MB=16000 \
+  CSUP_GOVERNOR_FREE_DISK_GB=100 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=10 \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --dry-run --max-panes=4
+)"
+
+if [[ "$capped_dry_run" != *"capacity=4 pane(s)"* ]]; then
+  printf 'govern --max-panes should cap computed capacity, got:\n%s\n' "$capped_dry_run" >&2
+  exit 1
+fi
+if [[ "$capped_dry_run" != *"bottleneck=operator_cap"* ]]; then
+  printf 'govern --max-panes should explain operator-cap bottleneck, got:\n%s\n' "$capped_dry_run" >&2
+  exit 1
+fi
+if [[ "$capped_dry_run" != *"START proj-a/mac-mini session=proj-a-main lanes=worker-a,bugs dynamic_workers=0 panes=4 queued=5"* ]]; then
+  printf 'govern --max-panes should cap the started pane count before adding dynamic workers, got:\n%s\n' "$capped_dry_run" >&2
+  exit 1
+fi
+
+if HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --dry-run --max-panes=0 >/tmp/csup-governor-max-panes.out 2>/tmp/csup-governor-max-panes.err; then
+  echo "govern --max-panes=0 should fail instead of removing fixed role capacity" >&2
+  exit 1
+fi
+grep -q "govern --max-panes must be a positive integer" /tmp/csup-governor-max-panes.err
+
 json_dry_run="$(
   HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
@@ -124,6 +159,34 @@ assert start["dynamic_workers"] == 2, start
 assert start["panes"] == 6, start
 assert start["queued"] == 5, start
 assert start["generated_only"] == 0, start
+PY
+
+json_capped_dry_run="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  CSUP_GOVERNOR_FREE_RAM_MB=16000 \
+  CSUP_GOVERNOR_FREE_DISK_GB=100 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=10 \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --dry-run --json --max-panes=4
+)"
+
+python3 - "$json_capped_dry_run" <<'PY'
+import json
+import sys
+
+events = [json.loads(line) for line in sys.argv[1].splitlines() if line.strip()]
+summary = events[0]
+assert summary["event"] == "summary", events
+assert summary["capacity"] == 4, summary
+assert summary["capacity_raw"] == 8, summary
+assert summary["max_panes_override"] == 4, summary
+assert summary["bottleneck"] == "operator_cap", summary
+start = next(event for event in events if event["event"] == "start")
+assert start["panes"] == 4, start
+assert start["dynamic_workers"] == 0, start
 PY
 
 if HOME="$TMPDIR/home" \
