@@ -638,6 +638,7 @@ cleanup_process_in_project_scope() {
 find_project_scoped_children() {
   local root="$1" min_depth="${2:-1}" max_depth="${3:-1}" age_min="${4:-$PERIODIC_WORKTREE_AGE_MIN}" scope target
   [[ -d "$root" ]] || return 0
+  age_min=$(nonnegative_int_or_default "$age_min" 5)
   if cleanup_global_enabled; then
     find -L "$root" -mindepth "$min_depth" -maxdepth "$max_depth" -type d -mmin +"$age_min" 2>/dev/null
     return 0
@@ -3083,7 +3084,9 @@ cmd_cleanup() {
       *) err "cleanup: unknown arg $1"; return 1 ;;
     esac
   done
-  local before after freed
+  local before after freed cleanup_sessions_retain_days cleanup_supervisor_log_max_mb
+  cleanup_sessions_retain_days=$(nonnegative_int_or_default "$CODEX_SESSIONS_RETAIN_DAYS" 3)
+  cleanup_supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50)
   before=$(free_gb_on_cwd)
   log "cleanup: starting ($before G free on $(pwd); scope=$(cleanup_global_enabled && echo global || echo project))"
 
@@ -3205,8 +3208,8 @@ cmd_cleanup() {
 
   # 11) Codex CLI sessions older than CODEX_SESSIONS_RETAIN_DAYS. Per-task
   #     JSONL transcripts. Default 7 days. Skipped if retention is 0.
-  if cleanup_global_enabled && (( CODEX_SESSIONS_RETAIN_DAYS > 0 )) && [[ -d "$HOME/.codex/sessions" ]]; then
-    find "$HOME/.codex/sessions" -type f -mtime +"${CODEX_SESSIONS_RETAIN_DAYS}" \
+  if cleanup_global_enabled && (( cleanup_sessions_retain_days > 0 )) && [[ -d "$HOME/.codex/sessions" ]]; then
+    find "$HOME/.codex/sessions" -type f -mtime +"${cleanup_sessions_retain_days}" \
       -delete 2>/dev/null
   fi
 
@@ -3214,7 +3217,7 @@ cmd_cleanup() {
   if [[ -f "$LOG_FILE" ]]; then
     local sv_mb
     sv_mb=$(du -sm "$LOG_FILE" 2>/dev/null | awk '{print $1}')
-    if (( sv_mb > SUPERVISOR_LOG_MAX_MB )); then
+    if (( sv_mb > cleanup_supervisor_log_max_mb )); then
       log "cleanup: rotating supervisor log (${sv_mb}M -> 0)"
       : > "$LOG_FILE"
     fi
@@ -3414,7 +3417,9 @@ _daemon_crash_handler() {
 # The actual supervisor body, run by the daemon child.
 # $1 = restart count (0 = fresh start, >0 = crash recovery restart)
 _start_supervisor_main() {
-  local _is_restart="${1:-0}"
+  local _is_restart="${1:-0}" poll_interval periodic_cleanup_secs
+  poll_interval=$(positive_int_or_default "$POLL_INTERVAL" 15)
+  periodic_cleanup_secs=$(nonnegative_int_or_default "$PERIODIC_CLEANUP_SECS" 120)
   ensure_codex_cmd
   load_prompts
   # INT/TERM = clean stop (kills session, exits 0, self-restart loop breaks).
@@ -3472,10 +3477,10 @@ _start_supervisor_main() {
     prompt_all_panes
   fi
 
-  log "all panes prompted; entering poll loop (every ${POLL_INTERVAL}s)"
+  log "all panes prompted; entering poll loop (every ${poll_interval}s)"
   local last_periodic_cleanup=$(date +%s)
   while true; do
-    sleep "$POLL_INTERVAL"
+    sleep "$poll_interval"
     # If the tmux session is gone unexpectedly, rebuild it instead of
     # abandoning the team. `cmd_stop` terminates this daemon before/while
     # killing tmux, so explicit stops still stay stopped.
@@ -3493,9 +3498,9 @@ _start_supervisor_main() {
     # Periodic cleanup: prune worktrees + sweep tmp dirs every
     # PERIODIC_CLEANUP_SECS seconds. Lightweight enough to run from
     # the poll loop; only does no-op work when nothing is stale.
-    if (( PERIODIC_CLEANUP_SECS > 0 )); then
+    if (( periodic_cleanup_secs > 0 )); then
       local now_ts; now_ts=$(date +%s)
-      if (( now_ts - last_periodic_cleanup >= PERIODIC_CLEANUP_SECS )); then
+      if (( now_ts - last_periodic_cleanup >= periodic_cleanup_secs )); then
         last_periodic_cleanup=$now_ts
         run_periodic_cleanup
       fi
@@ -3636,12 +3641,15 @@ cmd_stop() {
 # cleanup and Time Machine snapshots (expensive); save those for the
 # explicit `cleanup` subcommand.
 run_periodic_cleanup() {
-  local before after removed=0
+  local before after removed=0 periodic_age_min codex_log_max_gb supervisor_log_max_mb
+  periodic_age_min=$(nonnegative_int_or_default "$PERIODIC_WORKTREE_AGE_MIN" 5)
+  codex_log_max_gb=$(nonnegative_int_or_default "$CODEX_LOG_MAX_GB" 1)
+  supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50)
   before=$(free_gb_on_cwd)
 
   # 0) Supervisor-owned runtime/cache dirs. By default these live on
   # /Volumes/MyDrive/codex-supervisor, not the root filesystem.
-  prune_supervisor_runtime_dirs "$PERIODIC_WORKTREE_AGE_MIN"
+  prune_supervisor_runtime_dirs "$periodic_age_min"
 
   # 1) Walk `git worktree list` for every registered worktree (these can
   #    live in /private/tmp, ~/.config/superpowers/worktrees, or anywhere)
@@ -3655,7 +3663,7 @@ run_periodic_cleanup() {
       | while read -r wt; do
           [[ -z "$wt" || "$wt" == "$main_dir" ]] && continue
           case "$(basename "$wt")" in *-saved-before) continue ;; esac
-          if find "$wt" -maxdepth 0 -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | grep -q .; then
+          if find "$wt" -maxdepth 0 -mmin +"${periodic_age_min}" 2>/dev/null | grep -q .; then
             git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
             removed=$((removed+1))
           fi
@@ -3665,7 +3673,7 @@ run_periodic_cleanup() {
 
   # 2) /private/tmp/<repo>-* dirs that are NOT registered worktrees
   #    (codex sometimes creates plain temp dirs there).
-  find "$TMP_SWEEP_ROOT" -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+  find "$TMP_SWEEP_ROOT" -maxdepth 1 -type d -name '*-*' -mmin +"${periodic_age_min}" 2>/dev/null | while read -r d; do
     case "$(basename "$d")" in
       *-saved-before|claude-501) continue ;;
     esac
@@ -3677,7 +3685,7 @@ run_periodic_cleanup() {
   # `~/.config/superpowers/worktrees` may be a symlink to MyDrive — find -L
   # follows symlinks so MyDrive contents get swept just like local would.
   if [[ -e "$SUPERPOWERS_WORKTREES_ROOT" ]]; then
-    find_project_scoped_children "$SUPERPOWERS_WORKTREES_ROOT" 2 2 "$PERIODIC_WORKTREE_AGE_MIN" | while read -r d; do
+    find_project_scoped_children "$SUPERPOWERS_WORKTREES_ROOT" 2 2 "$periodic_age_min" | while read -r d; do
       rm -rf "$d" 2>/dev/null
     done
   fi
@@ -3685,13 +3693,13 @@ run_periodic_cleanup() {
   # 3b) Direct MyDrive paths. Scoped by project unless global cleanup is opted in.
   for d in "$MYDRIVE_SUPERPOWERS_WORKTREES_ROOT" "$ACTIONS_RUNNER_WORK_ROOT"; do
     [[ -d "$d" ]] || continue
-    find_project_scoped_children "$d" 2 2 "$PERIODIC_WORKTREE_AGE_MIN" | while read -r scoped; do
+    find_project_scoped_children "$d" 2 2 "$periodic_age_min" | while read -r scoped; do
       rm -rf "$scoped" 2>/dev/null
     done
   done
 
   # 4) Orphan sibling clones in ~/Desktop/projects/<repo>-*.
-  find "$PROJECTS_ROOT" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${PERIODIC_WORKTREE_AGE_MIN}" 2>/dev/null | while read -r d; do
+  find "$PROJECTS_ROOT" -mindepth 1 -maxdepth 1 -type d -name '*-*' -mmin +"${periodic_age_min}" 2>/dev/null | while read -r d; do
     cleanup_path_in_project_scope "$d" || continue
     [[ -e "$d/.git" ]] || continue
     [[ -d "$d/.git" ]] && continue   # main checkout
@@ -3753,12 +3761,12 @@ run_periodic_cleanup() {
   # 10) Codex CLI log directory — capped at CODEX_LOG_MAX_GB. This is the
   #     single biggest disk eater for long-running supervisor sessions.
   #     Triggered ONLY when oversized; cheap when within bounds (one du call).
-  if cleanup_global_enabled && (( CODEX_LOG_MAX_GB > 0 )) && [[ -d "$HOME/.codex/log" ]]; then
+  if cleanup_global_enabled && (( codex_log_max_gb > 0 )) && [[ -d "$HOME/.codex/log" ]]; then
     local log_kb log_gb
     log_kb=$(du -sk "$HOME/.codex/log" 2>/dev/null | awk '{print $1}')
     log_gb=$(( log_kb / 1024 / 1024 ))
-    if (( log_gb >= CODEX_LOG_MAX_GB )); then
-      log "periodic cleanup: ~/.codex/log at ${log_gb}G > cap ${CODEX_LOG_MAX_GB}G; clearing"
+    if (( log_gb >= codex_log_max_gb )); then
+      log "periodic cleanup: ~/.codex/log at ${log_gb}G > cap ${codex_log_max_gb}G; clearing"
       find "$HOME/.codex/log" -mindepth 1 -delete 2>/dev/null
     fi
   fi
@@ -3767,7 +3775,7 @@ run_periodic_cleanup() {
   if [[ -f "$LOG_FILE" ]]; then
     local sv_mb
     sv_mb=$(du -sm "$LOG_FILE" 2>/dev/null | awk '{print $1}')
-    if (( sv_mb > SUPERVISOR_LOG_MAX_MB )); then
+    if (( sv_mb > supervisor_log_max_mb )); then
       log "periodic cleanup: rotating supervisor log (${sv_mb}M)"
       : > "$LOG_FILE"
     fi

@@ -66,7 +66,7 @@ CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS=0 \
 
     CODEX_SUPERVISOR_GLOBAL_CLEANUP=0
     GLOBAL_CLEANUP=0
-    PERIODIC_WORKTREE_AGE_MIN=0
+    PERIODIC_WORKTREE_AGE_MIN=bad
     run_periodic_cleanup
 
     assert_missing "$2/private-tmp/current-proj-temp"
@@ -76,6 +76,7 @@ CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS=0 \
     assert_missing "$2/projects/current-proj-worker"
     assert_exists "$2/projects/other-proj-worker"
 
+    SUPERVISOR_LOG_MAX_MB=bad
     PRUNE_WORKTREE_AGE_HOURS=-1
     cmd_cleanup
     PRUNE_WORKTREE_AGE_HOURS=bad
