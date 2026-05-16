@@ -20,6 +20,28 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_MAX_PROMPT_WORDS=bad bash -c \
   'source "$1"; validate_prompt_line "$2" "test-prompts" 1' \
   _ "$SCRIPT" "$valid"
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_MAX_PROMPT_WORDS=999999 bash -c \
+  'source "$1"; validate_prompt_line "$2" "test-prompts" 1' \
+  _ "$SCRIPT" "$valid"
+
+word_cap="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_MAX_PROMPT_WORDS=999999 bash -c 'source "$1"; nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50 500' _ "$SCRIPT")"
+[[ "$word_cap" == "50" ]] || { echo "oversized prompt word cap should fail closed to default, got $word_cap" >&2; exit 1; }
+
+huge_cap_long="/goal "
+for i in $(seq 1 60); do huge_cap_long+="w$i "; done
+huge_cap_long+="docs/parallel-sessions.md"
+if CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_MAX_PROMPT_WORDS=999999 bash -c \
+  'source "$1"; validate_prompt_line "$2" "test-prompts" 1' \
+  _ "$SCRIPT" "$huge_cap_long" >/tmp/codex-supervisor-huge-cap-prompt.out 2>/tmp/codex-supervisor-huge-cap-prompt.err; then
+  echo "oversized prompt word cap should sanitize to default and reject long prompts" >&2
+  exit 1
+fi
+if ! grep -q "50 words or fewer" /tmp/codex-supervisor-huge-cap-prompt.err; then
+  echo "oversized cap rejection should mention the default word limit" >&2
+  cat /tmp/codex-supervisor-huge-cap-prompt.err >&2
+  exit 1
+fi
+
 if run_prompt_check "You are PANE 0, lane BUGS. Read docs/parallel-sessions.md."; then
   echo "prompt without /goal should fail" >&2
   exit 1

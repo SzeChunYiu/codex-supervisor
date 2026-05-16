@@ -566,8 +566,8 @@ signed_int_or_default() {
   fi
 }
 
-tmux_window_x() { positive_int_or_default "$TMUX_WINDOW_X" 240; }
-tmux_window_y() { positive_int_or_default "$TMUX_WINDOW_Y" 70; }
+tmux_window_x() { positive_int_or_default "$TMUX_WINDOW_X" 240 1000; }
+tmux_window_y() { positive_int_or_default "$TMUX_WINDOW_Y" 70 300; }
 
 cleanup_global_enabled() {
   truthy "$GLOBAL_CLEANUP" || truthy "${CODEX_SUPERVISOR_GLOBAL_CLEANUP:-}"
@@ -1622,7 +1622,7 @@ prompt_references_md() {
 
 validate_prompt_line() {
   local line="$1" source_name="${2:-prompts}" line_no="${3:-?}" words prompt_max_words
-  prompt_max_words=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50)
+  prompt_max_words=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50 500)
 
   if ! [[ "$line" =~ ^/goal([[:space:]]|$) ]]; then
     err "$source_name line $line_no: prompt must start with /goal"
@@ -2088,7 +2088,7 @@ ITERATION_STARTED=()  # epoch seconds when current iteration started (after goal
 # Bounded pane snapshot -- single capture-pane call, last N lines only.
 capture_tail() {
   local tail_lines
-  tail_lines=$(positive_int_or_default "$CAPTURE_TAIL_LINES" 80)
+  tail_lines=$(positive_int_or_default "$CAPTURE_TAIL_LINES" 80 1000)
   tmux capture-pane -t "$1" -p -S "-$tail_lines" 2>/dev/null
 }
 

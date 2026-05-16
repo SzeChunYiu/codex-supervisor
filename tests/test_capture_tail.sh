@@ -38,3 +38,16 @@ if [[ "$bad_args" != *"capture-pane -t codex-supervisor:0.1 -p -S -80"* ]]; then
   printf 'capture_tail should sanitize invalid line counts to the default tail; got args: %s\n' "$bad_args" >&2
   exit 1
 fi
+
+PATH="$TMPDIR/bin:$PATH" \
+TMUX_ARGS_FILE="$TMPDIR/tmux-huge.args" \
+CODEX_SUPERVISOR_CAPTURE_LINES=999999 \
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  bash -c 'source "$1"; capture_tail "codex-supervisor:0.1" >/dev/null' \
+  _ "$SCRIPT"
+
+huge_args="$(cat "$TMPDIR/tmux-huge.args")"
+if [[ "$huge_args" != *"capture-pane -t codex-supervisor:0.1 -p -S -80"* ]]; then
+  printf 'capture_tail should sanitize oversized line counts to the default tail; got args: %s\n' "$huge_args" >&2
+  exit 1
+fi
