@@ -221,6 +221,7 @@ assert "dashboard source file too large to hash" in script_text, "oversized dash
 dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")
+assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2", extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "bad"}), "invalid hash cap env should sanitize to the safe default"
 large_base = {"status": "ok", "panes": 1, "refresh_interval_secs": 0.5, "source": {"path": str(large_source), "sha256": large_info["sha256"]}}
 assert not dashboard_ok(large_base, cmd=large_source, extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "1024"}), "oversized dashboard source hash should fail closed"
 oversized_body = json.dumps({**base, "refresh_interval_secs": 0.2}).encode() + (b" " * 1_000_001)
