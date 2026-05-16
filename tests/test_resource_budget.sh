@@ -121,6 +121,9 @@ stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; effective_start_
 stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; effective_start_stagger_secs 6' _ "$SCRIPT")"
 [[ "$stagger" == "2" ]] || { echo "6 panes should stagger 2s by default" >&2; exit 1; }
 
+stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_START_STAGGER_SECS=bad bash -c 'source "$1"; effective_start_stagger_secs 6' _ "$SCRIPT")"
+[[ "$stagger" == "0" ]] || { echo "invalid explicit stagger should sanitize to 0, got $stagger" >&2; exit 1; }
+
 mkdir -p "$TMPDIR/bin"
 cat > "$TMPDIR/bin/free" <<'MOCK_FREE'
 #!/usr/bin/env bash
