@@ -16,6 +16,10 @@ run_prompt_check() {
 valid="/goal You are PANE 0, lane BUGS. Read docs/parallel-sessions.md and docs/parallel-sessions/bugs.md, then iterate per the protocol until rate-limited."
 run_prompt_check "$valid"
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_MAX_PROMPT_WORDS=bad bash -c \
+  'source "$1"; validate_prompt_line "$2" "test-prompts" 1' \
+  _ "$SCRIPT" "$valid"
+
 if run_prompt_check "You are PANE 0, lane BUGS. Read docs/parallel-sessions.md."; then
   echo "prompt without /goal should fail" >&2
   exit 1
@@ -94,3 +98,8 @@ if ! grep -q "at most 1 panes" /tmp/codex-supervisor-max-panes.err; then
   cat /tmp/codex-supervisor-max-panes.err >&2
   exit 1
 fi
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_SUPERVISOR_MAX_PANES=bad \
+  CODEX_SUPERVISOR_PROMPTS="$ROOT/codex-prompts.example.txt" \
+  bash -c 'source "$1"; load_prompts; [[ "${#PROMPTS[@]}" == "3" ]]' _ "$SCRIPT"

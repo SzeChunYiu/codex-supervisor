@@ -56,6 +56,21 @@ generated_workers="$(CODEX_SUPERVISOR_TEST_SOURCE=1 \
   bash -c 'source "$1"; load_prompts; printf "%s\n" "${LANE_LABELS[@]}"' _ "$SCRIPT")"
 [[ "$generated_workers" == $'WORKER-1\nWORKER-2' ]] || { echo "generated-only dynamic workers wrong: $generated_workers" >&2; exit 1; }
 
+malformed_generated_config="$(CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_SUPERVISOR_GENERATED_ONLY=bad \
+  CODEX_SUPERVISOR_GM=bad \
+  CODEX_SUPERVISOR_MANAGER=bad \
+  CODEX_SUPERVISOR_REVIEWER=bad \
+  CODEX_SUPERVISOR_DEBUGGER=bad \
+  CODEX_SUPERVISOR_PLANNER=bad \
+  CODEX_SUPERVISOR_DYNAMIC_WORKERS=bad \
+  CODEX_SUPERVISOR_PROMPTS="$ROOT/codex-prompts.example.txt" \
+  bash -c 'source "$1"; load_prompts; printf "%s\n" "${LANE_LABELS[@]}"' _ "$SCRIPT")"
+printf '%s\n' "$malformed_generated_config" | grep -q '^CEO$' || {
+  echo "malformed generated role config should sanitize and keep default CEO lane, got: $malformed_generated_config" >&2
+  exit 1
+}
+
 # Resilience defaults: dead panes are respawned, and a missing tmux session is
 # recreated by the daemon instead of silently exiting.
 CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
