@@ -156,8 +156,16 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, min_value=1, max_value=4096)
+MAX_TMUX_TMPDIR_CHARS = env_int("CSUP_TMUX_TMPDIR_MAX_CHARS", 4096, min_value=16, max_value=4096)
 MAX_PROJECT_SCAN_ENTRIES = env_int("CSUP_DASHBOARD_MAX_PROJECT_SCAN_ENTRIES", 500, min_value=1, max_value=10000)
 MAX_STATE_FILES = env_int("CSUP_DASHBOARD_MAX_STATE_FILES", 200, min_value=1, max_value=5000)
+
+def tmux_sock_dir(env=os.environ) -> str:
+    base = env.get("TMUX_TMPDIR", "/tmp") or "/tmp"
+    if len(base) > MAX_TMUX_TMPDIR_CHARS:
+        base = "/tmp"
+    return f"{base}/tmux-{os.getuid()}"
+
 
 def bounded_int(value: object, default: int, *, min_value: int, max_value: int | None = None) -> int:
     try:
@@ -931,9 +939,16 @@ CAP_LINES = env_int("CSUP_STREAMER_LINES", 200, 1, 1000)
 TARGET_W = env_int("CSUP_STREAMER_WIDTH", 160, 20, 1000)
 TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5, 300)
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1, 4096)
+MAX_TMUX_TMPDIR_CHARS = env_int("CSUP_TMUX_TMPDIR_MAX_CHARS", 4096, 16, 4096)
 CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05, 60.0)
 MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024, 10_000_000)
 MAX_PANE_DIMENSION = 10_000
+
+def tmux_sock_dir():
+    base = os.environ.get("TMUX_TMPDIR", "/tmp") or "/tmp"
+    if len(base) > MAX_TMUX_TMPDIR_CHARS:
+        base = "/tmp"
+    return f"{base}/tmux-{os.getuid()}"
 
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
@@ -1017,7 +1032,7 @@ def list_sockets():
     back to the default socket so single-server / legacy installs still work.
     """
     import glob, os as _os
-    sock_dir = _os.environ.get("TMUX_TMPDIR", "/tmp") + f"/tmux-{_os.getuid()}"
+    sock_dir = tmux_sock_dir()
     socks = []
     if _os.path.isdir(sock_dir):
         for idx, path in enumerate(glob.iglob(sock_dir + "/*")):
@@ -1703,7 +1718,7 @@ def state_instances() -> list[dict]:
     local_tmux_sessions: set[str] | None = None
     try:
         import glob as _glob
-        sock_dir = f"{os.environ.get('TMUX_TMPDIR', '/tmp')}/tmux-{os.getuid()}"
+        sock_dir = tmux_sock_dir()
         sockets: list[str] = []
         if os.path.isdir(sock_dir):
             for idx, p in enumerate(_glob.iglob(sock_dir + "/*")):
@@ -2969,9 +2984,16 @@ def safe_float(value, default=0.0, min_value=0.0, max_value=None):
 lines = safe_int(sys.argv[2], 1, 1)
 max_capture_panes = safe_int(sys.argv[4] if len(sys.argv) > 4 else 512, 512, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1, 4096)
+max_tmux_tmpdir_chars = safe_int(os.environ.get("CSUP_TMUX_TMPDIR_MAX_CHARS"), 4096, 16, 4096)
 max_pane_dimension = 10_000
 cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05, 60.0)
 max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024, 10_000_000)
+def tmux_sock_dir():
+    base = os.environ.get("TMUX_TMPDIR", "/tmp") or "/tmp"
+    if len(base) > max_tmux_tmpdir_chars:
+        base = "/tmp"
+    return f"{base}/tmux-{os.getuid()}"
+
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
     stdout_chunks = []
@@ -3043,7 +3065,7 @@ def run_capture(cmd):
 # other socket in the user's tmpdir. tmux list-sessions on the wrong socket
 # returns success with empty output, so we explicitly grep for the name.
 def find_socket(session_name):
-    sock_dir = f"{os.environ.get('TMUX_TMPDIR', '/tmp')}/tmux-{os.getuid()}"
+    sock_dir = tmux_sock_dir()
     candidates = [session_name, "default"]
     try:
         for idx, p in enumerate(glob.iglob(sock_dir + "/*")):

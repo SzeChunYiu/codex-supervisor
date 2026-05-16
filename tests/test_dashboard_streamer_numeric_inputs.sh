@@ -22,6 +22,7 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 os.environ["CSUP_MAX_TMUX_SOCKET_SCAN"] = "3"
+os.environ["CSUP_TMUX_TMPDIR_MAX_CHARS"] = "64"
 os.environ["CSUP_STREAMER_CMD_TIMEOUT_SECS"] = "0.5"
 os.environ["CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES"] = "1024"
 os.environ["CSUP_STREAMER_POLL_FAST"] = "999999"
@@ -79,6 +80,16 @@ finally:
     os.stat = orig_stat
     glob.iglob = orig_iglob
 
+orig_tmux_tmpdir = os.environ.get("TMUX_TMPDIR")
+try:
+    os.environ["TMUX_TMPDIR"] = "x" * 1024
+    assert ns["tmux_sock_dir"]() == f"/tmp/tmux-{os.getuid()}"
+finally:
+    if orig_tmux_tmpdir is None:
+        os.environ.pop("TMUX_TMPDIR", None)
+    else:
+        os.environ["TMUX_TMPDIR"] = orig_tmux_tmpdir
+
 class FakeSubprocess:
     TimeoutExpired = subprocess.TimeoutExpired
     CompletedProcess = subprocess.CompletedProcess
@@ -107,6 +118,7 @@ class FakeSubprocess:
 
 assert ns["CMD_TIMEOUT_SECS"] == 0.5
 assert ns["MAX_CMD_OUTPUT_BYTES"] == 1024
+assert ns["tmux_sock_dir"]().endswith(f"/tmux-{os.getuid()}")
 assert "select.select" in source, "streamer command capture should read pipes incrementally"
 assert "subprocess.Popen" in source, "streamer command capture must not use unbounded subprocess.run capture_output"
 assert "output limit exceeded" in source, "streamer command capture should fail closed on oversized output"
