@@ -1017,7 +1017,7 @@ except (TypeError, ValueError):
 expected_cmd = os.path.realpath(sys.argv[3])
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+        payload = json.loads(r.read(1_000_000).decode("utf-8"))
     if "status" not in payload or "panes" not in payload:
         raise SystemExit(1)
     # 2026-05-15: NEVER replace a dashboard that is actively serving projects.
@@ -1066,7 +1066,7 @@ import urllib.request
 port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+        payload = json.loads(r.read(1_000_000).decode("utf-8"))
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     path = str(source.get("path") or "")
     if path:
@@ -1086,7 +1086,7 @@ port = sys.argv[1]
 url = f"http://127.0.0.1:{port}"
 try:
     with urllib.request.urlopen(f"{url}/api/health.json", timeout=1.5) as r:
-        h = json.loads(r.read().decode("utf-8"))
+        h = json.loads(r.read(1_000_000).decode("utf-8"))
     print(
         "dashboard: "
         f"{h.get('status', 'unknown')} · {h.get('projects', 0)} projects · "
@@ -1107,7 +1107,7 @@ import urllib.request
 port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/refresh.json", timeout=8) as r:
-        r.read()
+        r.read(1_000_000)
 except Exception:
     pass
 PY

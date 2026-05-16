@@ -2325,7 +2325,7 @@ def project_slug(name):
 def fetch_state():
     url = base.rstrip("/") + "/api/state.json?compact=1&tail=12"
     with urllib.request.urlopen(url, timeout=15) as r:
-        return json.load(r)
+        return json.loads(r.read(2_000_000).decode("utf-8"))
 
 def flatten(state):
     rows = {}
