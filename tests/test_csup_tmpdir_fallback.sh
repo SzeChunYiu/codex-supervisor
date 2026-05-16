@@ -50,4 +50,22 @@ bad_min_out="$(
   exit 1
 }
 
+python3 - "$TMPBASE/home/.config/csup/huge-hosts.toml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text("#" * 1_000_001 + '\n[hosts."late"]\nssh = "local"\n')
+PY
+
+huge_hosts_out="$(
+  HOME="$TMPBASE/home" \
+  CSUP_HOSTS_FILE="$TMPBASE/home/.config/csup/huge-hosts.toml" \
+  "$CSUP" hosts
+)"
+
+[[ "$huge_hosts_out" != *"late"* ]] || {
+  printf 'oversized hosts TOML should fail closed instead of scanning late sections, got:\n%s\n' "$huge_hosts_out" >&2
+  exit 1
+}
+
 echo "ok: csup selects a writable TMPDIR fallback before Python-backed parsing"
