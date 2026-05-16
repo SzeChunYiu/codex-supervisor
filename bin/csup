@@ -2468,8 +2468,14 @@ cmd_steward() {
         target_project="${1#--project=}"
         [[ -n "$target_project" ]] || { err "steward: --project requires a name"; return 2; }
         ;;
-      --sample-secs=*) sample_secs="${1#--sample-secs=}" ;;
-      --dashboard-url=*) dashboard_url="${1#--dashboard-url=}" ;;
+      --sample-secs=*)
+        sample_secs="${1#--sample-secs=}"
+        require_option_value steward --sample-secs "$sample_secs" || return 2
+        ;;
+      --dashboard-url=*)
+        dashboard_url="${1#--dashboard-url=}"
+        require_option_value steward --dashboard-url "$dashboard_url" || return 2
+        ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) target_project="$1" ;;
     esac
