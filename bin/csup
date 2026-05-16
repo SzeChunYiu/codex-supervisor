@@ -483,7 +483,19 @@ slurm_submit_holder_named() {
   local sbatch_cmd="mkdir -p $(shell_quote "$workdir") && sbatch --parsable --job-name=$(shell_quote "$name") --partition=$(shell_quote "$partition") --time=$(shell_quote "$time") --nodes=$(shell_quote "$nodes") --ntasks=1 --cpus-per-task=$(shell_quote "$cpus") --mem=$(shell_quote "$mem") --account=$(shell_quote "$account") --chdir=$(shell_quote "$workdir") --output=$(shell_quote "$output") --wrap=$(shell_quote "$wrap")"
   # On a LUNARC compute node, sbatch is available directly — no SSH needed.
   if on_lunarc_compute_node && host_is_lunarc "$host"; then
-    eval "$sbatch_cmd"
+    mkdir -p "$workdir" && \
+      sbatch --parsable \
+        --job-name="$name" \
+        --partition="$partition" \
+        --time="$time" \
+        --nodes="$nodes" \
+        --ntasks=1 \
+        --cpus-per-task="$cpus" \
+        --mem="$mem" \
+        --account="$account" \
+        --chdir="$workdir" \
+        --output="$output" \
+        --wrap="$wrap"
   else
     ssh_exec "$ssh_target" "$sbatch_cmd"
   fi
@@ -576,7 +588,7 @@ remote_slurm_keepalive_start() {
   launch="nohup setsid env -u LD_LIBRARY_PATH srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$inner") > $(shell_quote "$log") 2>&1 < /dev/null & disown; echo started slurm_job=$job session=$(shell_quote "$session") log=$(shell_quote "$log")"
   local run_cmd="mkdir -p $(shell_quote "$workdir") && bash -lc $(shell_quote "$launch")"
   if on_lunarc_compute_node && host_is_lunarc "$host"; then
-    eval "$run_cmd"
+    mkdir -p "$workdir" && bash -lc "$launch"
   else
     ssh_exec "$ssh_target" "$run_cmd"
   fi
@@ -593,7 +605,7 @@ remote_slurm_keepalive_start_job() {
   launch="nohup setsid env -u LD_LIBRARY_PATH srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$inner") > $(shell_quote "$log") 2>&1 < /dev/null & disown; echo started slurm_job=$job session=$(shell_quote "$session") log=$(shell_quote "$log")"
   local run_cmd="mkdir -p $(shell_quote "$workdir") && bash -lc $(shell_quote "$launch")"
   if on_lunarc_compute_node && host_is_lunarc "$host"; then
-    eval "$run_cmd"
+    mkdir -p "$workdir" && bash -lc "$launch"
   else
     ssh_exec "$ssh_target" "$run_cmd"
   fi
@@ -640,7 +652,7 @@ remote_slurm_keepalive_start_batch_job() {
   launch="nohup setsid env -u LD_LIBRARY_PATH srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$inner") > $(shell_quote "$log") 2>&1 < /dev/null & disown; echo started slurm_job=$job sessions=$(shell_quote "$sessions_csv") log=$(shell_quote "$log")"
   local run_cmd="mkdir -p $(shell_quote "$workdir") && bash -lc $(shell_quote "$launch")"
   if on_lunarc_compute_node && host_is_lunarc "$host"; then
-    eval "$run_cmd"
+    mkdir -p "$workdir" && bash -lc "$launch"
   else
     ssh_exec "$ssh_target" "$run_cmd"
   fi
@@ -2694,15 +2706,39 @@ cmd_status() {
         [[ -n "$node" && "$node" != "$info" ]] && runtime="$runtime node=$node"
       fi
       printf '\n[%s] session=%s%s\n' "$h" "$session" "$runtime"
-      local status_role_env=""
+      local status_role_env="" status_ceo="" status_manager="" status_reviewer="" status_debugger="" status_validator=""
       case "${host_role:-}" in
-        team|worker|remote-executor) status_role_env=" CODEX_SUPERVISOR_CEO=0 CODEX_SUPERVISOR_MANAGER=0 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0" ;;
-        manager) status_role_env=" CODEX_SUPERVISOR_CEO=0 CODEX_SUPERVISOR_MANAGER=1 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0" ;;
-        ceo|executive|meta|remote-meta) status_role_env=" CODEX_SUPERVISOR_CEO=1 CODEX_SUPERVISOR_MANAGER=0 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0" ;;
+        team|worker|remote-executor)
+          status_role_env=" CODEX_SUPERVISOR_CEO=0 CODEX_SUPERVISOR_MANAGER=0 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0"
+          status_ceo=0; status_manager=0; status_reviewer=0; status_debugger=0; status_validator=0
+          ;;
+        manager)
+          status_role_env=" CODEX_SUPERVISOR_CEO=0 CODEX_SUPERVISOR_MANAGER=1 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0"
+          status_ceo=0; status_manager=1; status_reviewer=0; status_debugger=0; status_validator=0
+          ;;
+        ceo|executive|meta|remote-meta)
+          status_role_env=" CODEX_SUPERVISOR_CEO=1 CODEX_SUPERVISOR_MANAGER=0 CODEX_SUPERVISOR_REVIEWER=0 CODEX_SUPERVISOR_DEBUGGER=0 CODEX_SUPERVISOR_VALIDATOR=0"
+          status_ceo=1; status_manager=0; status_reviewer=0; status_debugger=0; status_validator=0
+          ;;
       esac
       if is_same_machine "$h"; then
         local prompts_abs; prompts_abs=$(path_under_project_if_relative "$d" "$prompts")
-        ( cd "$d" && eval "CODEX_SUPERVISOR_SESSION=$(shell_quote "$session") CODEX_SUPERVISOR_PROMPTS=$(shell_quote "$prompts_abs")$status_role_env $(shell_quote "$SUPERVISOR") status" 2>&1 | head -12 ) || echo "  (status command failed)"
+        if [[ -n "$status_ceo" ]]; then
+          ( cd "$d" && \
+            CODEX_SUPERVISOR_SESSION="$session" \
+            CODEX_SUPERVISOR_PROMPTS="$prompts_abs" \
+            CODEX_SUPERVISOR_CEO="$status_ceo" \
+            CODEX_SUPERVISOR_MANAGER="$status_manager" \
+            CODEX_SUPERVISOR_REVIEWER="$status_reviewer" \
+            CODEX_SUPERVISOR_DEBUGGER="$status_debugger" \
+            CODEX_SUPERVISOR_VALIDATOR="$status_validator" \
+            "$SUPERVISOR" status 2>&1 | head -12 ) || echo "  (status command failed)"
+        else
+          ( cd "$d" && \
+            CODEX_SUPERVISOR_SESSION="$session" \
+            CODEX_SUPERVISOR_PROMPTS="$prompts_abs" \
+            "$SUPERVISOR" status 2>&1 | head -12 ) || echo "  (status command failed)"
+        fi
       else
         if host_reachable "$h"; then
           local prompts_abs; prompts_abs=$(path_under_project_if_relative "$remote_dir" "$prompts")
