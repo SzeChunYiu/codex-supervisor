@@ -2158,6 +2158,10 @@ def clone_jsonable(value):
     return str(value)
 
 
+def json_api_bytes(value) -> bytes:
+    return json.dumps(clone_jsonable(value), allow_nan=False).encode()
+
+
 def project_slug(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(name or "project").lower()).strip("-")
     return slug or "project"
@@ -8336,7 +8340,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             compact = q.get("compact", ["0"])[0].lower() in {"1", "true", "yes", "on"}
             tail_lines = bounded_int(q.get("tail", ["6"])[0], 6, min_value=1, max_value=50)
-            payload = json.dumps(state_payload(project_filter, compact=compact, tail_lines=tail_lines)).encode()
+            payload = json_api_bytes(state_payload(project_filter, compact=compact, tail_lines=tail_lines))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -8344,7 +8348,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         if request_path == "/api/health.json":
-            payload = json.dumps(health_payload()).encode()
+            payload = json_api_bytes(health_payload())
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -8417,10 +8421,10 @@ class Handler(BaseHTTPRequestHandler):
             text = strip_ansi(ansi_text)
             self.send_response(200)
             if wants_json:
-                payload = json.dumps({
+                payload = json_api_bytes({
                     "text": text,
                     "html": ansi_to_html(ansi_text),
-                }).encode()
+                })
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
