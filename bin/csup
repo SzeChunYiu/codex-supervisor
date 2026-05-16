@@ -1463,10 +1463,25 @@ cmd_submit() {
     done < <(toml_sections "$cfg" "hosts.")
   fi
   [[ -n "$tasks_dir" ]] || { err "project '$project' has no tasks_dir configured"; return 1; }
-  mkdir -p "$project_dir/$tasks_dir"
+  local tasks_abs
+  tasks_abs=$(python3 - "$project_dir" "$tasks_dir" <<'PY'
+import os
+import sys
+project_dir, path = sys.argv[1], sys.argv[2]
+if os.path.isabs(path):
+    print(os.path.normpath(path))
+else:
+    print(os.path.normpath(os.path.join(project_dir, path)))
+PY
+)
+  case "$tasks_abs" in
+    "$project_dir"/*) ;;
+    *) err "submit: tasks_dir must resolve inside the project"; return 2 ;;
+  esac
+  mkdir -p "$tasks_abs"
   local text="$*"
   [[ "$text" == /goal* ]] || text="/goal $text"
-  printf '%s\n' "$text" >> "$project_dir/$tasks_dir/$lane.txt"
+  printf '%s\n' "$text" >> "$tasks_abs/$lane.txt"
   printf 'queued %s/%s: %s\n' "$project" "$lane" "$text"
 }
 
