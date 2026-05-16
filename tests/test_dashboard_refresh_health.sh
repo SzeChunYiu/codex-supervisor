@@ -189,6 +189,9 @@ def dashboard_ok(payload, desired="0.5"):
         return rc == 0
 
 
+script_text = script.read_text()
+assert "r.read(1_000_000)" in script_text, "dashboard health HTTP reads must be bounded"
+
 dashboard_sha = __import__("hashlib").sha256(dashboard_path.read_bytes()).hexdigest()[:16]
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")

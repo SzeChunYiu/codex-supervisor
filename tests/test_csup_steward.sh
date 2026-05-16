@@ -6,6 +6,8 @@ CSUP="$ROOT/bin/csup"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+grep -q 'r.read(2_000_000)' "$CSUP" || { echo "csup steward dashboard reads must be bounded" >&2; exit 1; }
+
 cat > "$TMPDIR/state.json" <<'JSON'
 {
   "projects": [
