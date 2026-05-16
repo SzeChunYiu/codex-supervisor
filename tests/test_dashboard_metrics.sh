@@ -140,6 +140,25 @@ assert [e["tool"] for e in tool_usage["recent_tool_call_events"]] == ["exec_comm
 assert tool_usage["latest_tool"] == "exec_command", tool_usage
 assert tool_usage["latest_event_at"] == "2026-05-11T00:02:30.000Z", tool_usage
 
+limited = tmp / "limited-sessions"
+limited.mkdir()
+for i in range(5):
+    (limited / f"rollout-{i}.jsonl").write_text(json.dumps({
+        "timestamp": f"2026-05-11T00:0{i}:00.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"total_token_usage": {"total_tokens": i + 1}},
+        },
+    }) + "\n")
+mod.CODEX_SESSIONS_DIR = limited
+mod.TOKEN_SCAN_MAX_WALK_ENTRIES = 2
+mod.TOKEN_SCAN_MAX_FILES = 10
+limited_files = mod.recent_codex_session_files(time.time())
+assert len(limited_files) == 2, limited_files
+limited_usage = mod.collect_token_usage(now=time.time(), force=True)
+assert limited_usage["session_files_scanned"] == 2, limited_usage
+
 html = mod.INDEX_HTML
 assert "renderOverviewDashboard" in html, "root page should render a dashboard overview"
 assert "Total tokens" in html, "overview should include total token usage"
