@@ -41,4 +41,17 @@ if ! grep -q "unknown flag: --bogus" /tmp/csup-stop-bogus.err; then
   exit 1
 fi
 
-echo "ok: csup start/stop reject empty host values and unknown stop flags"
+for cmd in submit govern factory-run gm-start staff station status; do
+  if HOME="$TMPDIR/home" CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+    "$CSUP" "$cmd" --host= >/tmp/csup-empty-host-"$cmd".out 2>/tmp/csup-empty-host-"$cmd".err; then
+    echo "csup $cmd should reject an empty --host value" >&2
+    exit 1
+  fi
+  if ! grep -q "$cmd: --host requires a name" /tmp/csup-empty-host-"$cmd".err; then
+    echo "empty $cmd --host error should be explicit" >&2
+    cat /tmp/csup-empty-host-"$cmd".err >&2
+    exit 1
+  fi
+done
+
+echo "ok: csup commands reject empty host values and unknown stop flags"

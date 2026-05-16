@@ -1427,7 +1427,11 @@ cmd_submit() {
   local project="" lane="" target_host=""
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}"; shift ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "submit: --host requires a name"; return 2; }
+        shift
+        ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *)
         project="$1"; shift
@@ -1596,7 +1600,10 @@ cmd_govern() {
       --json) json=1 ;;
       --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
       --project=*) target_project="${1#--project=}" ;;
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "govern: --host requires a name"; return 2; }
+        ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) target_project="$1" ;;
     esac
@@ -1860,7 +1867,10 @@ cmd_factory_run() {
   local project="" target_host="" mode="dry-run" scenario="resume" sessions_override="" workers_override="" max_workers_override="" max_panes_override="" allow_static=0
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "factory-run: --host requires a name"; return 2; }
+        ;;
       --scenario=*) scenario="${1#--scenario=}" ;;
       --sessions=*) sessions_override="${1#--sessions=}" ;;
       --workers=*) workers_override="${1#--workers=}" ;;
@@ -1978,7 +1988,10 @@ cmd_gm_start() {
   local project="" target_host="" mode="dry-run"
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "gm-start: --host requires a name"; return 2; }
+        ;;
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
       --*) err "unknown flag: $1"; return 2 ;;
@@ -2066,7 +2079,10 @@ cmd_staff() {
   local project="" target_host="" mode="dry-run" scenario="resume" allow_stop=0 max_workers_override="" workers_override="" sessions_override="" max_panes_override=""
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "staff: --host requires a name"; return 2; }
+        ;;
       --scenario=*) scenario="${1#--scenario=}" ;;
       --sessions=*) sessions_override="${1#--sessions=}" ;;
       --workers=*) workers_override="${1#--workers=}" ;;
@@ -2235,7 +2251,10 @@ cmd_station() {
   local project="" target_host="" mode="dry-run" sessions=1 workers=0 fixed_panes="${CSUP_STATION_FIXED_PANES:-1}"
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "station: --host requires a name"; return 2; }
+        ;;
       --sessions=*) sessions="${1#--sessions=}" ;;
       --workers=*) workers="${1#--workers=}" ;;
       --dry-run) mode="dry-run" ;;
@@ -2810,7 +2829,10 @@ cmd_status() {
   local project="" target_host=""
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "status: --host requires a name"; return 2; }
+        ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) project="$1" ;;
     esac
