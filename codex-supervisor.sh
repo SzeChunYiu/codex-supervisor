@@ -1713,8 +1713,8 @@ queue_token_lc_in_list() {
   return 1
 }
 
-bounded_run_file_env() {
-  local name="$1" default="$2" raw root
+bounded_root_subdir_file_env() {
+  local name="$1" default="$2" subdir="$3" raw root
   raw="${!name:-}"
   [[ ${#raw} -le 4096 ]] || raw=""
   [[ -n "$raw" ]] || { printf '%s\n' "$default"; return; }
@@ -1723,10 +1723,24 @@ bounded_run_file_env() {
   root="$SUPERVISOR_ROOT"
   [[ "$root" == /* ]] || root="$PWD/$root"
   case "$raw" in
-    "$root"/run/*) printf '%s\n' "$raw" ;;
+    "$root"/"$subdir"/*) printf '%s\n' "$raw" ;;
     *) printf '%s\n' "$default" ;;
   esac
 }
+
+bounded_run_file_env() {
+  bounded_root_subdir_file_env "$1" "$2" run
+}
+
+bounded_log_file_env() {
+  bounded_root_subdir_file_env "$1" "$2" logs
+}
+
+# Dashboard pid/log files are internal runtime artifacts. Keep explicit
+# environment overrides scoped to the supervisor runtime tree so inherited
+# values cannot redirect dashboard startup writes to arbitrary files.
+DASHBOARD_LOG="$(bounded_log_file_env CODEX_SUPERVISOR_DASHBOARD_LOG "$SUPERVISOR_ROOT/logs/csup-dashboard.log")"
+DASHBOARD_PID_FILE="$(bounded_run_file_env CODEX_SUPERVISOR_DASHBOARD_PID_FILE "$SUPERVISOR_ROOT/run/csup-dashboard.pid")"
 
 # The dashboard lock is an internal coordination primitive. Keep it under the
 # supervisor run dir even when an inherited environment tries to point it at an
