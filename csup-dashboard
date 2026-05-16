@@ -1415,13 +1415,13 @@ def list_projects() -> list[dict]:
 
 def read_state_file(path: pathlib.Path) -> dict:
     vals: dict[str, str] = {}
-    try:
-        for raw in path.read_text().splitlines():
-            if "=" in raw:
-                k, v = raw.split("=", 1)
-                vals[k] = v
-    except OSError as e:
-        print(f"state read skipped: {path}: {e}", file=sys.stderr)
+    raw_text = read_text_bounded(path, max_bytes=1_000_000, label="state read")
+    if raw_text is None:
+        return vals
+    for raw in raw_text.splitlines():
+        if "=" in raw:
+            k, v = raw.split("=", 1)
+            vals[k] = v
     return vals
 
 
@@ -1778,13 +1778,10 @@ def parse_lanes_from_lines(raw_lines: list[str]) -> dict[int, str]:
 
 def parse_lanes(prompts_path: pathlib.Path) -> dict[int, str]:
     """Parse a prompts file: each /goal line maps a pane ordinal to a lane."""
-    try:
-        if not prompts_path.is_file():
-            return {}
-        return parse_lanes_from_lines(prompts_path.read_text().splitlines())
-    except OSError as e:
-        print(f"prompts read skipped: {prompts_path}: {e}", file=sys.stderr)
+    raw_text = read_text_bounded(prompts_path, max_bytes=1_000_000, label="prompts read")
+    if raw_text is None:
         return {}
+    return parse_lanes_from_lines(raw_text.splitlines())
 
 
 def fetch_remote_lanes(host: str, hosts: dict, me: str | None, prompts_path: str,
