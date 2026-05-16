@@ -54,4 +54,28 @@ layout_bad_pane="$(cat "$TMPDIR/layout-bad-pane.log")"
 [[ "$layout_bad_pane" != *"bad"* ]] || { echo "non-numeric pane ids should be excluded from generated layout: $layout_bad_pane" >&2; exit 1; }
 [[ "$layout_bad_pane" == *",0}"* || "$layout_bad_pane" == *",0,"* ]] || { echo "layout should still include valid pane 0: $layout_bad_pane" >&2; exit 1; }
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 LAYOUT_LOG="$TMPDIR/layout-huge.log" bash -c '
+  source "$1"
+  SESSION=demo
+  PANE_IDX=(0 1)
+  log() { :; }
+  command() { if [[ "$1" == "-v" && "$2" == "python3" ]]; then return 0; fi; builtin command "$@"; }
+  tmux() {
+    if [[ "$1" == "display-message" ]]; then
+      printf "%s\n" "999999 999999"
+      return 0
+    fi
+    if [[ "$1" == "select-layout" ]]; then
+      printf "%s\n" "$*" >> "$LAYOUT_LOG"
+      return 0
+    fi
+    return 0
+  }
+  apply_even_grid
+' _ "$SCRIPT"
+
+layout_huge="$(cat "$TMPDIR/layout-huge.log")"
+[[ "$layout_huge" == *"80x24"* ]] || { echo "oversized dimensions should sanitize to defaults, got: $layout_huge" >&2; exit 1; }
+[[ "$layout_huge" != *"999999"* ]] || { echo "layout must not preserve oversized dimensions: $layout_huge" >&2; exit 1; }
+
 echo "ok: even-grid layout sanitizes numeric inputs"
