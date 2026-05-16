@@ -7,6 +7,7 @@ DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
+import json
 import pathlib
 import subprocess
 import sys
@@ -84,6 +85,10 @@ assert mod.collect_storage_health(hosts={}, me="local", host_probe_cache={})["to
 
 assert mod.safe_float("nan") is None
 assert mod.safe_int(float("inf")) == 0
+cloned = mod.clone_jsonable({float("nan"): float("inf"), "nested": [float("-inf")]})
+assert cloned["nan"] is None, cloned
+assert cloned["nested"] == [None], cloned
+json.dumps(cloned, allow_nan=False)
 mod.run_stable = lambda *args, **kwargs: subprocess.CompletedProcess(
     args[0] if args else [],
     0,
