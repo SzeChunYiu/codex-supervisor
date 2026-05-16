@@ -57,6 +57,22 @@ def fake_run(cmd, *args, **kwargs):
     return real_run(cmd, *args, **kwargs)
 subprocess.run = fake_run
 
+# State discovery must not read an unbounded number of stale/corrupt state files.
+for i in range(5):
+    (home / f".codex-supervisor-overflow-{i}.state").write_text("BROKEN=1\n")
+orig_read_state_file = mod.read_state_file
+orig_max_state_files = mod.MAX_STATE_FILES
+read_paths = []
+def counting_read_state_file(path):
+    read_paths.append(path)
+    return {}
+mod.read_state_file = counting_read_state_file
+mod.MAX_STATE_FILES = 2
+assert mod.state_instances() == [], read_paths
+assert len(read_paths) == 2, read_paths
+mod.read_state_file = orig_read_state_file
+mod.MAX_STATE_FILES = orig_max_state_files
+
 projects = mod.list_projects()
 instances = [
     inst

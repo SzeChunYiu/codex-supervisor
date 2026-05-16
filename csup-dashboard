@@ -147,6 +147,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, min_value=1)
+MAX_STATE_FILES = env_int("CSUP_DASHBOARD_MAX_STATE_FILES", 200, min_value=1)
 
 def bounded_int(value: object, default: int, *, min_value: int, max_value: int | None = None) -> int:
     try:
@@ -1518,7 +1519,9 @@ def state_instances() -> list[dict]:
         local_tmux_sessions = sessions
     except Exception:
         local_tmux_sessions = None
-    for state in STATE_GLOB.parent.glob(STATE_GLOB.name):
+    for idx, state in enumerate(STATE_GLOB.parent.glob(STATE_GLOB.name)):
+        if idx >= MAX_STATE_FILES:
+            break
         vals = read_state_file(state)
         root_raw = vals.get("PROJECT_ROOT") or ""
         prompts_raw = vals.get("PROMPTS_FILE") or ""
