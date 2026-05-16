@@ -55,6 +55,7 @@ file is `codex-tasks/<lane>.txt` in the first host config that declares a
 csup capacity
 csup govern --dry-run
 csup govern --dry-run --json
+csup govern --dry-run --max-panes=4
 csup govern --apply
 ```
 
@@ -80,6 +81,9 @@ or cannot accept another worker wave. Use `csup capacity --json` for scripts
 or dashboards that need the same calculation in a stable machine-readable
 shape. Use `csup govern --dry-run --json` when a scheduler needs the exact
 start/skip plan as newline-delimited JSON events without parsing operator text.
+Use `csup govern --max-panes=N` to impose an operator cap for one governor pass;
+when that cap lowers the computed capacity, the summary bottleneck becomes
+`operator_cap`.
 
 The governor intentionally does not decide product direction. If queues grow
 without closing acceptance checklist gaps, the project validator should stop
