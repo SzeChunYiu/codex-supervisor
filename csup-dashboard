@@ -3960,25 +3960,28 @@ def codex_session_dirs() -> list[pathlib.Path]:
 
 
 def iter_jsonl_files_bounded(session_dir: pathlib.Path, max_entries: int):
-    """Yield JSONL session files without walking unbounded directory trees."""
+    """Yield JSONL session files without materializing unbounded directories."""
     entries_seen = 0
+    stack = [session_dir]
     try:
-        for dirpath, dirnames, filenames in os.walk(session_dir):
-            dirnames.sort()
-            filenames.sort()
-            kept_dirs: list[str] = []
-            for dirname in dirnames:
-                entries_seen += 1
-                if entries_seen > max_entries:
-                    break
-                kept_dirs.append(dirname)
-            dirnames[:] = kept_dirs
-            for filename in filenames:
-                entries_seen += 1
-                if entries_seen > max_entries:
-                    return
-                if filename.endswith(".jsonl"):
-                    yield pathlib.Path(dirpath) / filename
+        while stack:
+            current = stack.pop()
+            try:
+                iterator = os.scandir(current)
+            except OSError:
+                continue
+            with iterator:
+                for entry in iterator:
+                    entries_seen += 1
+                    if entries_seen > max_entries:
+                        return
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(pathlib.Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".jsonl"):
+                            yield pathlib.Path(entry.path)
+                    except OSError:
+                        continue
     except OSError as e:
         print(f"token scan skipped: {session_dir}: {e}", file=sys.stderr)
 
