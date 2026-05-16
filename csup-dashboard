@@ -3193,10 +3193,10 @@ def collect_process_health(limit: int | None = None) -> dict:
 
     return {
         "top_cpu_processes": sorted(
-            processes, key=lambda p: (float(p.get("cpu_percent") or 0), int(p.get("rss_bytes") or 0)), reverse=True
+            processes, key=lambda p: (safe_float(p.get("cpu_percent")) or 0.0, safe_int(p.get("rss_bytes"))), reverse=True
         )[:limit],
         "top_memory_processes": sorted(
-            processes, key=lambda p: (int(p.get("rss_bytes") or 0), float(p.get("cpu_percent") or 0)), reverse=True
+            processes, key=lambda p: (safe_int(p.get("rss_bytes")), safe_float(p.get("cpu_percent")) or 0.0), reverse=True
         )[:limit],
         "error": "",
     }
@@ -3608,7 +3608,7 @@ def refresh(lines: int):
         CACHE["updated_at"] = finished_at
         CACHE["last_refresh_duration_ms"] = round((finished_at - started_at) * 1000)
         CACHE["last_refresh_error"] = ""
-        CACHE["refresh_count"] = int(CACHE.get("refresh_count") or 0) + 1
+        CACHE["refresh_count"] = bounded_int(CACHE.get("refresh_count"), 0, min_value=0) + 1
         CACHE["projects"] = out_projects
         CACHE["token_usage"] = token_usage
         CACHE["tool_call_usage"] = tool_call_usage
@@ -3663,7 +3663,8 @@ def safe_float(value: object):
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -3986,7 +3987,7 @@ def collect_tool_call_usage(now: float | None = None, *, force: bool = False) ->
         usage["total_tool_calls"] += len(events)
         for event in events:
             tool = event.get("tool") or "unknown"
-            usage["tool_counts"][tool] = int(usage["tool_counts"].get(tool, 0)) + 1
+            usage["tool_counts"][tool] = safe_int(usage["tool_counts"].get(tool)) + 1
             recent_events.append({
                 "timestamp": event.get("timestamp") or "",
                 "tool": tool,
@@ -4040,10 +4041,7 @@ def health_payload() -> dict:
         snapshot = json.loads(json.dumps(CACHE))
     now = time.time()
     age_secs = cache_age(now, snapshot.get("updated_at"))
-    try:
-        interval = max(0.05, float(snapshot.get("refresh_interval_secs") or DEFAULT_REFRESH))
-    except (TypeError, ValueError):
-        interval = DEFAULT_REFRESH
+    interval = bounded_float(snapshot.get("refresh_interval_secs"), DEFAULT_REFRESH, min_value=0.05)
     stale_after = max(30, interval * 4)
     instance_errors = []
     unreachable_hosts = set()
@@ -4057,7 +4055,7 @@ def health_payload() -> dict:
             panes += len(inst.get("panes", []) or [])
             for pane in inst.get("panes", []) or []:
                 pane_state = str(pane.get("state") or "?")
-                state_counts[pane_state] = int(state_counts.get(pane_state, 0)) + 1
+                state_counts[pane_state] = safe_int(state_counts.get(pane_state)) + 1
                 reasons = pane_issue_reasons(inst, pane)
                 if reasons and len(pane_issues) < 80:
                     last_tail = ""
