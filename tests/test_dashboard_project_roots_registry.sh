@@ -107,6 +107,17 @@ mod.PROJECT_CACHE_FILE.write_text("[" + (" " * 2_000_001) + "]")
 projects = mod.list_projects()
 assert projects == [], projects
 assert mod.read_text_bounded(mod.PROJECT_ROOTS_FILE, max_bytes=1_000_000, label="project roots read") is None
+assert mod.read_text_bounded(mod.PROJECT_CACHE_FILE, max_bytes=2_000_000, label="project cache read") is None
+assert mod.bounded_env_file_path("MISSING_TEST_ENV", pathlib.Path("fallback")) == pathlib.Path("fallback")
+old_registry_env = __import__("os").environ.get("CSUP_PROJECT_ROOTS_FILE")
+try:
+    __import__("os").environ["CSUP_PROJECT_ROOTS_FILE"] = "x" * (mod.MAX_DASHBOARD_ENV_PATH_CHARS + 1)
+    assert mod.bounded_env_file_path("CSUP_PROJECT_ROOTS_FILE", pathlib.Path("fallback")) == pathlib.Path("fallback")
+finally:
+    if old_registry_env is None:
+        __import__("os").environ.pop("CSUP_PROJECT_ROOTS_FILE", None)
+    else:
+        __import__("os").environ["CSUP_PROJECT_ROOTS_FILE"] = old_registry_env
 small = home / ".config/csup/small.txt"
 small.write_bytes("ok\xff".encode("latin1"))
 assert mod.read_text_bounded(small, max_bytes=10, label="small read") == "ok�"
