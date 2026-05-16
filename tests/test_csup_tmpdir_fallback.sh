@@ -37,4 +37,17 @@ out="$(
   exit 1
 }
 
+bad_min_out="$(
+  HOME="$TMPBASE/home" \
+  CSUP_HOSTS_FILE="$TMPBASE/home/.config/csup/hosts.toml" \
+  TMPDIR="$TMPBASE/alt-tmp" \
+  CSUP_MIN_TMP_KB=bad \
+  "$CSUP" ls
+)"
+
+[[ "$bad_min_out" == *"proj"* ]] || {
+  printf 'expected csup to ignore invalid CSUP_MIN_TMP_KB instead of tripping arithmetic, got:\n%s\n' "$bad_min_out" >&2
+  exit 1
+}
+
 echo "ok: csup selects a writable TMPDIR fallback before Python-backed parsing"
