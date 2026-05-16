@@ -30,7 +30,7 @@ run_start() {
     tmux() {
       case "$1" in
         has-session)
-          [[ -e "$SESSION_FILE" ]]
+          test -e "$SESSION_FILE"
           ;;
         *)
           return 0

@@ -96,7 +96,10 @@ PATH="$TMPDIR/bin:$PATH" \
       fi
       sleep 0.1
     done
-    [[ -n "$child_pid" && -n "$grandchild_pid" ]]
+    if [[ -z "$child_pid" || -z "$grandchild_pid" ]]; then
+      echo "session cleanup process tree did not start" >&2
+      exit 1
+    fi
 
     export FAKE_PANE_PID="$root_pid"
     terminate_session_process_trees >/dev/null 2>&1

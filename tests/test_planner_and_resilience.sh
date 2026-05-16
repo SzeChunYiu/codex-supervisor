@@ -60,8 +60,14 @@ generated_workers="$(CODEX_SUPERVISOR_TEST_SOURCE=1 \
 # recreated by the daemon instead of silently exiting.
 CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   source "$1"
-  [[ "$AUTO_RESPAWN_DEAD_PANES" == "1" ]]
-  [[ "$AUTO_RECREATE_SESSION" == "1" ]]
+  if [[ "$AUTO_RESPAWN_DEAD_PANES" != "1" ]]; then
+    echo "AUTO_RESPAWN_DEAD_PANES should default to 1" >&2
+    exit 1
+  fi
+  if [[ "$AUTO_RECREATE_SESSION" != "1" ]]; then
+    echo "AUTO_RECREATE_SESSION should default to 1" >&2
+    exit 1
+  fi
   type pane_dead >/dev/null
   type recreate_missing_session >/dev/null
 ' _ "$SCRIPT"

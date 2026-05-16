@@ -12,6 +12,18 @@ CODEX_SUPERVISOR_LOG="$TMPDIR/supervisor.log" \
   bash -c '
     set -e
     source "$1"
+    assert_exists() {
+      if [[ ! -e "$1" ]]; then
+        echo "expected path to exist: $1" >&2
+        exit 1
+      fi
+    }
+    assert_missing() {
+      if [[ -e "$1" ]]; then
+        echo "expected path to be removed: $1" >&2
+        exit 1
+      fi
+    }
     prepare_runtime_dirs
     test -d "$SUPERVISOR_ROOT/logs"
     test -d "$SUPERVISOR_ROOT/run"
@@ -30,8 +42,8 @@ CODEX_SUPERVISOR_LOG="$TMPDIR/supervisor.log" \
     PERIODIC_WORKTREE_AGE_MIN=5
     prune_supervisor_runtime_dirs
 
-    [[ ! -e "$SUPERVISOR_CACHE_ROOT/npm/old" ]]
-    [[ ! -e "$SUPERVISOR_TMP_ROOT/old" ]]
-    [[ -e "$SUPERVISOR_CACHE_ROOT/npm/fresh/blob" ]]
-    [[ -e "$SUPERVISOR_TMP_ROOT/fresh/blob" ]]
+    assert_missing "$SUPERVISOR_CACHE_ROOT/npm/old"
+    assert_missing "$SUPERVISOR_TMP_ROOT/old"
+    assert_exists "$SUPERVISOR_CACHE_ROOT/npm/fresh/blob"
+    assert_exists "$SUPERVISOR_TMP_ROOT/fresh/blob"
   ' _ "$SCRIPT"

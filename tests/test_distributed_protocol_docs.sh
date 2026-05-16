@@ -21,7 +21,10 @@ require_text() {
   fi
 }
 
-[[ -s "$protocol" ]]
+if [[ ! -s "$protocol" ]]; then
+  printf 'missing or empty distributed protocol doc: %s\n' "$protocol" >&2
+  exit 1
+fi
 
 require_text "$protocol" "No anonymous source copies"
 require_text "$protocol" "One writable lease per scope"
