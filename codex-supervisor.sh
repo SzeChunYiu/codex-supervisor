@@ -517,6 +517,15 @@ nonnegative_int_or_default() {
   fi
 }
 
+nonnegative_decimal_or_default() {
+  local raw="${1:-}" default="${2:-0}"
+  if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
 signed_int_or_default() {
   local raw="${1:-}" default="${2:-0}"
   if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
@@ -2877,7 +2886,7 @@ PY
 }
 
 cpu_load_headroom_panes() {
-  python3 - "$1" "$2" "$MAX_LOAD_PER_CPU" <<'PY'
+  python3 - "$1" "$2" "${3:-$MAX_LOAD_PER_CPU}" <<'PY'
 import math
 import sys
 
@@ -2918,13 +2927,14 @@ effective_start_stagger_secs() {
 ensure_start_resource_budget() {
   local pane_count="${1:-${#PROMPTS[@]}}"
   local free_ram free_disk need_ram need_disk_gb extra_disk_gb cpus load load_room
-  local min_ram ram_per min_disk disk_per
+  local min_ram ram_per min_disk disk_per max_load_per_cpu
 
   free_ram=$(free_ram_mb)
   free_disk=$(free_gb_on_runtime_root)
   cpus=$(cpu_count)
   load=$(load1)
-  load_room=$(cpu_load_headroom_panes "$cpus" "$load")
+  max_load_per_cpu=$(nonnegative_decimal_or_default "$MAX_LOAD_PER_CPU" 1.25)
+  load_room=$(cpu_load_headroom_panes "$cpus" "$load" "$max_load_per_cpu")
   min_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
   ram_per=$(nonnegative_int_or_default "$RAM_MB_PER_PANE" 600)
   min_disk=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
@@ -2933,8 +2943,8 @@ ensure_start_resource_budget() {
   extra_disk_gb=$(ceil_div "$(( pane_count * disk_per ))" 1024)
   need_disk_gb=$(( min_disk + extra_disk_gb ))
 
-  if [[ "$MAX_LOAD_PER_CPU" != "0" && "$MAX_LOAD_PER_CPU" != "0.0" ]] && (( pane_count > load_room )); then
-    err "not enough CPU/load headroom to start ${pane_count} pane(s): load=${load} on ${cpus} CPU(s), capacity for ${load_room} new pane(s) at ${MAX_LOAD_PER_CPU} load/CPU"
+  if [[ "$max_load_per_cpu" != "0" && "$max_load_per_cpu" != "0.0" ]] && (( pane_count > load_room )); then
+    err "not enough CPU/load headroom to start ${pane_count} pane(s): load=${load} on ${cpus} CPU(s), capacity for ${load_room} new pane(s) at ${max_load_per_cpu} load/CPU"
     err "start fewer panes, let current jobs settle, move lanes to a remote host, or set CODEX_SUPERVISOR_MAX_LOAD_PER_CPU=0 if another scheduler owns CPU"
     return 1
   fi
