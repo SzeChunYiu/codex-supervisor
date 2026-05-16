@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="$ROOT/codex-supervisor.sh"
 TMPDIR="$(mktemp -d)"
-trap '[[ -f "$TMPDIR/pid" ]] && kill "$(cat "$TMPDIR/pid")" 2>/dev/null || true; rm -rf "$TMPDIR"' EXIT
+PID_FILE="$TMPDIR/root/run/csup-dashboard.pid"
+trap '[[ -f "$PID_FILE" ]] && kill "$(cat "$PID_FILE")" 2>/dev/null || true; rm -rf "$TMPDIR"' EXIT
 mkdir -p "$TMPDIR/bin" "$TMPDIR/root"
 
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
@@ -52,11 +53,10 @@ CODEX_SUPERVISOR_DASHBOARD_TMUX=0 \
 CODEX_SUPERVISOR_DASHBOARD=bad \
 CODEX_SUPERVISOR_DASHBOARD_PORT="$port" \
 CODEX_SUPERVISOR_DASHBOARD_CMD="$TMPDIR/fake-dashboard" \
-CODEX_SUPERVISOR_DASHBOARD_PID_FILE="$TMPDIR/pid" \
 PATH="$TMPDIR/bin:$PATH" \
   bash -c 'source "$1"; ensure_dashboard; dashboard_http_ok' _ "$SCRIPT"
 
-[[ -f "$TMPDIR/pid" ]] || { echo "expected nohup dashboard pid file" >&2; exit 1; }
+[[ -f "$PID_FILE" ]] || { echo "expected nohup dashboard pid file" >&2; exit 1; }
 if [[ -s "$TMPDIR/tmux.log" ]]; then
   cat "$TMPDIR/tmux.log" >&2
   exit 1
