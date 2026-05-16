@@ -94,6 +94,12 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
         assert e.code == 404, e
         assert e.headers.get("X-Content-Type-Options") == "nosniff", e.headers
 
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/pane?host=local&session=s&index=999999999", timeout=2)
+        raise AssertionError("oversized pane index should be rejected before host capture")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, e
+
     srv.shutdown()
 
 html = mod.INDEX_HTML
