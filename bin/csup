@@ -489,7 +489,7 @@ slurm_ensure_allocation() {
   esac
   { info "no active SLURM allocation for '$host'; submitting holder job $(slurm_job_name "$host")"; } >&2
   slurm_submit_holder "$host" >/dev/null || return 1
-  wait_secs="${CSUP_SLURM_WAIT_SECS:-120}"
+  wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120)
   waited=0
   while (( waited < wait_secs )); do
     sleep 5
@@ -2182,7 +2182,7 @@ cmd_station() {
       if [[ "$mode" == "apply" ]]; then
         printf 'SUBMIT %s/%s slot=%s job_name=%s requested_panes=%s\n' "$project" "$h" "$slot" "$job_name" "$requested_panes"
         slurm_submit_holder_named "$h" "$job_name" >/dev/null || { printf 'HOLD %s/%s slot=%s job_name=%s sessions_waiting=%s reason=submit_failed\n' "$project" "$h" "$slot" "$job_name" "$remaining"; return 0; }
-        wait_secs="${CSUP_SLURM_WAIT_SECS:-120}"
+        wait_secs=$(nonnegative_int_or_default "${CSUP_SLURM_WAIT_SECS:-}" 120)
         waited=0
         info=""
         while (( waited < wait_secs )); do
