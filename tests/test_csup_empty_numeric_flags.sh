@@ -23,14 +23,31 @@ check_empty_flag() {
   fi
 }
 
+check_invalid_flag() {
+  local cmd="$1" flag="$2"
+  shift 2
+  if HOME="$TMPDIR/home" CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+    "$CSUP" "$cmd" "$@" "$flag=abc" >/tmp/csup-invalid-"$cmd"-"${flag#--}".out 2>/tmp/csup-invalid-"$cmd"-"${flag#--}".err; then
+    echo "csup $cmd should reject invalid $flag" >&2
+    exit 1
+  fi
+  if ! grep -q "$cmd $flag must be a positive integer" /tmp/csup-invalid-"$cmd"-"${flag#--}".err; then
+    echo "invalid $cmd $flag error should be explicit" >&2
+    cat /tmp/csup-invalid-"$cmd"-"${flag#--}".err >&2
+    exit 1
+  fi
+}
+
 check_empty_flag govern --max-panes
 
 for flag in --sessions --workers --max-workers --max-panes; do
   check_empty_flag factory-run "$flag" proj
   check_empty_flag staff "$flag" proj
+  check_invalid_flag factory-run "$flag" proj
+  check_invalid_flag staff "$flag" proj
 done
 
 check_empty_flag station --sessions proj
 check_empty_flag station --workers proj
 
-echo "ok: csup numeric override flags reject empty values"
+echo "ok: csup numeric override flags reject empty and invalid values"
