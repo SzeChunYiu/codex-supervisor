@@ -100,6 +100,23 @@ default_refresh = subprocess.check_output(
 ).strip()
 assert default_refresh == "0.2", default_refresh
 
+sanitized_dashboard_knobs = subprocess.check_output(
+    [
+        "bash",
+        "-c",
+        f"source {script}; printf '%s|%s|%s' \"$DASHBOARD_PORT\" \"$DASHBOARD_LINES\" \"$DASHBOARD_REFRESH\"",
+    ],
+    env={
+        **os.environ,
+        "CODEX_SUPERVISOR_TEST_SOURCE": "1",
+        "CODEX_SUPERVISOR_DASHBOARD_PORT": "bad",
+        "CODEX_SUPERVISOR_DASHBOARD_LINES": "bad",
+        "CODEX_SUPERVISOR_DASHBOARD_REFRESH": "bad",
+    },
+    text=True,
+).strip()
+assert sanitized_dashboard_knobs == "7777|12|0.2", sanitized_dashboard_knobs
+
 with tempfile.TemporaryDirectory() as tmp:
     launcher_link = pathlib.Path(tmp) / "codex-supervisor.sh"
     launcher_link.symlink_to(script)
