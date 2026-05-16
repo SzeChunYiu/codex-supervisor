@@ -78,7 +78,17 @@ ensure_tmpdir_headroom
 ssh_timeout_secs() {
   local value="${CSUP_SSH_TIMEOUT_SECS:-8}"
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || value=8
-  printf '%s' "$value"
+  python3 - "$value" <<'PY'
+import math
+import sys
+try:
+    value = float(sys.argv[1])
+    if not math.isfinite(value) or value <= 0 or value > 300:
+        value = 8.0
+except (TypeError, ValueError, OverflowError):
+    value = 8.0
+print(value)
+PY
 }
 
 shell_run_timeout() {
@@ -87,7 +97,7 @@ shell_run_timeout() {
 import math, os, signal, subprocess, sys
 try:
     timeout = float(sys.argv[1])
-    if not math.isfinite(timeout) or timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
         timeout = 8.0
 except (TypeError, ValueError):
     timeout = 8.0
@@ -128,13 +138,13 @@ shell_capture_timeout() {
 import math, os, select, signal, subprocess, sys, time
 try:
     timeout = float(sys.argv[1])
-    if not math.isfinite(timeout) or timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
         timeout = 8.0
 except (TypeError, ValueError):
     timeout = 8.0
 try:
     max_bytes = int(os.environ.get("CSUP_SHELL_CAPTURE_MAX_BYTES", "1000000"))
-    if max_bytes < 1024:
+    if max_bytes < 1024 or max_bytes > 10000000:
         max_bytes = 1000000
 except (TypeError, ValueError, OverflowError):
     max_bytes = 1000000
