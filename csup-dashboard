@@ -2938,6 +2938,7 @@ def safe_float(value, default=0.0, min_value=0.0):
         return default
     return parsed
 lines = safe_int(sys.argv[2], 1, 1)
+max_capture_panes = safe_int(sys.argv[4] if len(sys.argv) > 4 else 512, 512, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1)
 cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05)
 max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024)
@@ -3047,6 +3048,8 @@ if r.returncode != 0:
     raise SystemExit(r.returncode)
 out = []
 for ordinal, row in enumerate((r.stdout or "").splitlines()):
+    if len(out) >= max_capture_panes:
+        break
     parts = row.split("\t")
     if len(parts) < 3:
         continue
@@ -3104,7 +3107,7 @@ except Exception as e:
     monitor["error"] = str(e)[:160]
 print(json.dumps({"panes": out, "monitor": monitor}))
 '''
-        r = runner(["python3", "-c", script, session, str(lines), str(STATE_CAPTURE_MIN_LINES)])
+        r = runner(["python3", "-c", script, session, str(lines), str(STATE_CAPTURE_MIN_LINES), str(MAX_CAPTURE_PANES)])
         if r.returncode != 0:
             if REMOTE_CAPTURE_CACHE_SECS > 0:
                 with INSTANCE_CAPTURE_CACHE_LOCK:
