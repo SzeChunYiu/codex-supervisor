@@ -144,8 +144,15 @@ if CODEX_SUPERVISOR_TEST_SOURCE=1 \
   echo "oversized copied config should fail closed instead of being edited or clobbered" >&2
   exit 1
 fi
-grep -q 'refusing to edit oversized codex config' /tmp/csup-oversized-config.out || {
-  echo "missing oversized config refusal" >&2
+grep -q 'refusing to copy oversized codex config' /tmp/csup-oversized-config.out || {
+  echo "missing oversized source config copy refusal" >&2
   cat /tmp/csup-oversized-config.out >&2
   exit 1
 }
+if [[ -s "$OVERSIZED_SUP_HOME/config.toml" ]]; then
+  echo "oversized source config should not be copied into supervisor CODEX_HOME" >&2
+  ls -l "$OVERSIZED_SUP_HOME/config.toml" >&2
+  exit 1
+fi
+
+echo "ok: each pane gets an isolated Codex home/state runtime"
