@@ -2230,20 +2230,24 @@ wait_ready_and_send() {
 # Bursting >RESPAWN_BURST_LIMIT respawns inside RESPAWN_BURST_WINDOW_SECS
 # trips a cooldown so the next death wave doesn't compound.
 respawn_rate_limit_check() {
-  local now; now=$(date +%s)
+  local now burst_window burst_limit backoff_secs
+  now=$(date +%s)
+  burst_window=$(nonnegative_int_or_default "$RESPAWN_BURST_WINDOW_SECS" 10)
+  burst_limit=$(positive_int_or_default "$RESPAWN_BURST_LIMIT" 3)
+  backoff_secs=$(nonnegative_int_or_default "$RESPAWN_BACKOFF_SECS" 30)
   if (( RESPAWN_BACKOFF_UNTIL > now )); then
     return 1
   fi
   # Drop timestamps older than the window.
-  local cutoff=$(( now - RESPAWN_BURST_WINDOW_SECS ))
+  local cutoff=$(( now - burst_window ))
   local kept=() ts
   for ts in "${RESPAWN_TIMES[@]}"; do
     (( ts >= cutoff )) && kept+=("$ts")
   done
   RESPAWN_TIMES=("${kept[@]}")
-  if (( ${#RESPAWN_TIMES[@]} >= RESPAWN_BURST_LIMIT )); then
-    RESPAWN_BACKOFF_UNTIL=$(( now + RESPAWN_BACKOFF_SECS ))
-    log "respawn burst limit hit (${#RESPAWN_TIMES[@]}/${RESPAWN_BURST_LIMIT} in ${RESPAWN_BURST_WINDOW_SECS}s); backing off for ${RESPAWN_BACKOFF_SECS}s to avoid cascade"
+  if (( ${#RESPAWN_TIMES[@]} >= burst_limit )); then
+    RESPAWN_BACKOFF_UNTIL=$(( now + backoff_secs ))
+    log "respawn burst limit hit (${#RESPAWN_TIMES[@]}/${burst_limit} in ${burst_window}s); backing off for ${backoff_secs}s to avoid cascade"
     return 1
   fi
   RESPAWN_TIMES+=("$now")
@@ -2274,10 +2278,21 @@ respawn_pane_and_prompt() {
 # (with grace-bounded auto-resend).
 check_pane() {
   local i=$1 prompt=$2 target now since_last
+  local auto_respawn_dead auto_resend respawn_on_goal_done resend_grace
+  local limit_hits respawn_cooldown hard_limit_cooldown min_free_ram min_free_gb
   target=$(pane_target "$i")
   now=$(date +%s)
+  auto_respawn_dead=$(nonnegative_int_or_default "$AUTO_RESPAWN_DEAD_PANES" 1)
+  auto_resend=$(nonnegative_int_or_default "$AUTO_RESEND" 1)
+  respawn_on_goal_done=$(nonnegative_int_or_default "$RESPAWN_ON_GOAL_DONE" 1)
+  resend_grace=$(nonnegative_int_or_default "$RESEND_GRACE_SECS" 30)
+  limit_hits=$(positive_int_or_default "$LIMIT_HITS_BEFORE_KILL" 3)
+  respawn_cooldown=$(nonnegative_int_or_default "$RESPAWN_COOLDOWN_SECS" 300)
+  hard_limit_cooldown=$(nonnegative_int_or_default "$HARD_LIMIT_COOLDOWN_SECS" 3600)
+  min_free_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
+  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
 
-  if (( AUTO_RESPAWN_DEAD_PANES )) && pane_dead "$target"; then
+  if (( auto_respawn_dead )) && pane_dead "$target"; then
     respawn_pane_and_prompt "$i" "$prompt" "dead pane detected"
     return
   fi
@@ -2290,9 +2305,9 @@ check_pane() {
   # fails under usage limits.
   if capture_needs_fresh_context "$cap"; then
     since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
-    local fast_cooldown=$RESPAWN_COOLDOWN_SECS
+    local fast_cooldown=$respawn_cooldown
     if capture_has_ci "$cap" "try again at"; then
-      fast_cooldown=$HARD_LIMIT_COOLDOWN_SECS
+      fast_cooldown=$hard_limit_cooldown
     fi
     if (( since_last < fast_cooldown )); then
       log "[pane $i ${LANE_LABELS[$i]}] compacting/compact-task state but cooldown active (${since_last}s/${fast_cooldown}s)"
@@ -2308,12 +2323,12 @@ check_pane() {
     # Codex prints "try again at <date> <time>" on hard limits. When we see
     # this we use a much longer cooldown (default 1h) since the limit is account-
     # wide and respawning won't help — it'll just hit the same wall.
-    local cooldown=$RESPAWN_COOLDOWN_SECS
+    local cooldown=$respawn_cooldown
     if capture_has_ci "$cap" "try again at"; then
-      cooldown=$HARD_LIMIT_COOLDOWN_SECS
+      cooldown=$hard_limit_cooldown
     fi
-    log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${LIMIT_HITS_BEFORE_KILL} (cooldown ${cooldown}s)"
-    if (( ${LIMIT_STREAK[$i]} >= LIMIT_HITS_BEFORE_KILL )); then
+    log "[pane $i ${LANE_LABELS[$i]}] limit hit ${LIMIT_STREAK[$i]}/${limit_hits} (cooldown ${cooldown}s)"
+    if (( ${LIMIT_STREAK[$i]} >= limit_hits )); then
       since_last=$(( now - ${LAST_RESPAWN[$i]:-0} ))
       if (( since_last < cooldown )); then
         log "[pane $i ${LANE_LABELS[$i]}] cooldown active (${since_last}s/${cooldown}s) -- skipping respawn"
@@ -2334,14 +2349,14 @@ check_pane() {
   #   queue-redo  - pop next from queue; if empty, resend original prompt
   #   redo        - always resend original
   #   rest        - leave idle
-  if (( AUTO_RESEND )) && [[ "$ON_COMPLETE" != "rest" ]]; then
+  if (( auto_resend )) && [[ "$ON_COMPLETE" != "rest" ]]; then
     if capture_goal_done "$cap"; then
       if (( ${LAST_GOAL_DONE[$i]:-0} == 0 )); then
         LAST_GOAL_DONE[$i]=$now
-        log "[pane $i ${LANE_LABELS[$i]}] goal achieved; on-complete=$ON_COMPLETE in ${RESEND_GRACE_SECS}s"
+        log "[pane $i ${LANE_LABELS[$i]}] goal achieved; on-complete=$ON_COMPLETE in ${resend_grace}s"
       else
         local idle=$(( now - LAST_GOAL_DONE[$i] ))
-        if (( idle >= RESEND_GRACE_SECS )); then
+        if (( idle >= resend_grace )); then
           # Reset BEFORE deciding to avoid re-firing if the action takes time
           LAST_GOAL_DONE[$i]=0
           # Skip if pane has gotten busy again in the meantime
@@ -2374,20 +2389,20 @@ check_pane() {
             # rather than spawning into OOM and killing the tmux server.
             local _ram; _ram=$(free_ram_mb)
             local _disk; _disk=$(free_gb_on_cwd)
-            if (( _ram < MIN_FREE_RAM_MB )); then
-              log "[pane $i $lane] low RAM (${_ram}MB < ${MIN_FREE_RAM_MB}MB) — running cleanup, deferring respawn"
+            if (( _ram < min_free_ram )); then
+              log "[pane $i $lane] low RAM (${_ram}MB < ${min_free_ram}MB) — running cleanup, deferring respawn"
               run_periodic_cleanup
               # Reset iteration timer so we don't trip the MAX_ITERATION_SECS cap
               # while we're intentionally deferring.
               ITERATION_STARTED[$i]=$now
-            elif (( _disk < MIN_FREE_GB )); then
+            elif (( _disk < min_free_gb )); then
               # Disk pre-flight: same logic as RAM. Codex respawn writes
               # session JSONL + ~/.codex/log + sometimes spawns worktrees;
               # skipping respawn under disk pressure prevents the cascade.
-              log "[pane $i $lane] low disk (${_disk}G < ${MIN_FREE_GB}G) — running cleanup, deferring respawn"
+              log "[pane $i $lane] low disk (${_disk}G < ${min_free_gb}G) — running cleanup, deferring respawn"
               run_periodic_cleanup
               ITERATION_STARTED[$i]=$now
-            elif (( RESPAWN_ON_GOAL_DONE )); then
+            elif (( respawn_on_goal_done )); then
               log "[pane $i $lane] respawning codex before next task ($sent_label)"
               terminate_pane_process_tree "$target" "pane $i $lane before next task"
               local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
@@ -2415,7 +2430,7 @@ check_pane() {
         # Timer is live — check if it has now expired even though the
         # "Goal achieved" text is gone.
         local idle=$(( now - LAST_GOAL_DONE[$i] ))
-        if (( idle >= RESEND_GRACE_SECS )); then
+        if (( idle >= resend_grace )); then
           LAST_GOAL_DONE[$i]=0
           if ! pane_capture_active "$target" "$cap"; then
             local lane="${LANE_LABELS[$i]}" next_task="" sent_label=""
@@ -2439,13 +2454,13 @@ check_pane() {
             if [[ -n "$next_task" ]]; then
               local _ram; _ram=$(free_ram_mb)
               local _disk; _disk=$(free_gb_on_cwd)
-              if (( _ram < MIN_FREE_RAM_MB )); then
+              if (( _ram < min_free_ram )); then
                 log "[pane $i $lane] low RAM (${_ram}MB) — deferring respawn"
                 run_periodic_cleanup; ITERATION_STARTED[$i]=$now
-              elif (( _disk < MIN_FREE_GB )); then
+              elif (( _disk < min_free_gb )); then
                 log "[pane $i $lane] low disk (${_disk}G) — deferring respawn"
                 run_periodic_cleanup; ITERATION_STARTED[$i]=$now
-              elif (( RESPAWN_ON_GOAL_DONE )); then
+              elif (( respawn_on_goal_done )); then
                 log "[pane $i $lane] respawning codex before next task ($sent_label) [timer expired, text gone]"
                 terminate_pane_process_tree "$target" "pane $i $lane before next task"
                 local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
@@ -2474,7 +2489,7 @@ check_pane() {
              && ! capture_has "$cap" "$NOT_READY_PATTERN"; } \
            || [[ "$_idle_state" == "READY" || "$_idle_state" == "?" ]]; then
           local _ready_started=${ITERATION_STARTED[$i]:-0}
-          if (( _ready_started > 0 )) && (( now - _ready_started >= RESEND_GRACE_SECS )); then
+          if (( _ready_started > 0 )) && (( now - _ready_started >= resend_grace )); then
             local _rlane="${LANE_LABELS[$i]}" _rnext="" _rlabel=""
             local _rlane_lc _reffective="$ON_COMPLETE"
             _rlane_lc=$(printf '%s' "$_rlane" | tr '[:upper:]' '[:lower:]')
@@ -2499,7 +2514,7 @@ check_pane() {
                 ITERATION_STARTED[$i]=$now
               else
                 log "[pane $i $_rlane] ready/idle retry UNCONFIRMED"
-                if (( RESPAWN_ON_GOAL_DONE )); then
+                if (( respawn_on_goal_done )); then
                   respawn_pane_and_prompt "$i" "$_rnext" "ready/idle retry unconfirmed"
                 else
                   ITERATION_STARTED[$i]=$now
@@ -2517,12 +2532,12 @@ check_pane() {
           local _cstate; _cstate="${_idle_state:-$(classify_capture_state "$cap")}"
           local _cstarted=${ITERATION_STARTED[$i]:-0}
           if [[ "$_cstate" == "?" ]] && (( _cstarted > 0 )) \
-             && (( now - _cstarted >= RESEND_GRACE_SECS )); then
+             && (( now - _cstarted >= resend_grace )); then
             local _cnext; _cnext=$(pop_next_task "${LANE_LABELS[$i]}") || true
             [[ -z "$_cnext" ]] && _cnext="${PROMPTS[$i]}"
             local _cram; _cram=$(free_ram_mb)
             local _cdisk; _cdisk=$(free_gb_on_cwd)
-            if (( _cram >= MIN_FREE_RAM_MB )) && (( _cdisk >= MIN_FREE_GB )); then
+            if (( _cram >= min_free_ram )) && (( _cdisk >= min_free_gb )); then
               log "[pane $i ${LANE_LABELS[$i]}] continuous lane in ? state (quiet exit); respawning"
               terminate_pane_process_tree "$target" "pane $i ${LANE_LABELS[$i]} before continuous respawn"
               local _pane_cmd; _pane_cmd=$(codex_command_for_pane "$i") || return
