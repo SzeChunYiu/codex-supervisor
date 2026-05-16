@@ -43,6 +43,23 @@ socket.gethostname = lambda: "local"
 projects = mod.list_projects()
 assert [(p["name"], pathlib.Path(p["path"]).name) for p in projects] == [("project-a", "project-a")], projects
 
+scan_dir = home / "Desktop/many-projects"
+scan_dir.mkdir(parents=True)
+for i in range(5):
+    child = scan_dir / f"proj-{i}"
+    child.mkdir()
+    (child / ".codex-supervisor.toml").write_text(
+        f"[project]\nname = \"proj-{i}\"\n[hosts.local]\nssh = \"local\"\n"
+    )
+mod.PROJECT_SEARCH_DIRS = [scan_dir]
+mod.PROJECT_ROOTS_FILE = home / ".config/csup/missing-roots.txt"
+mod.PROJECT_CACHE_FILE = home / ".config/csup/missing-cache.json"
+orig_max_project_scan = mod.MAX_PROJECT_SCAN_ENTRIES
+mod.MAX_PROJECT_SCAN_ENTRIES = 2
+projects = mod.list_projects()
+assert len([p for p in projects if p["name"].startswith("proj-")]) == 2, projects
+mod.MAX_PROJECT_SCAN_ENTRIES = orig_max_project_scan
+
 # If direct project config access is unavailable too, the cache still carries
 # the backstage host structure from a prior trusted csup discovery pass.
 mod.PROJECT_ROOTS_FILE = home / ".config/csup/missing-roots.txt"
@@ -53,6 +70,7 @@ mod.PROJECT_CACHE_FILE.write_text(__import__("json").dumps([{
 }]))
 projects = mod.list_projects()
 assert any(p["name"] == "cached-proj" and p["hosts"].get("local", {}).get("session") == "cached" for p in projects), projects
+mod.PROJECT_SEARCH_DIRS = [home / "Desktop/projects-does-not-exist"]
 mod.PROJECT_ROOTS_FILE = home / ".config/csup/oversized-roots.txt"
 mod.PROJECT_ROOTS_FILE.write_text("#" * 1_000_001)
 mod.PROJECT_CACHE_FILE = home / ".config/csup/oversized-cache.json"

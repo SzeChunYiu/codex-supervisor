@@ -147,6 +147,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, min_value=1)
+MAX_PROJECT_SCAN_ENTRIES = env_int("CSUP_DASHBOARD_MAX_PROJECT_SCAN_ENTRIES", 500, min_value=1)
 MAX_STATE_FILES = env_int("CSUP_DASHBOARD_MAX_STATE_FILES", 200, min_value=1)
 
 def bounded_int(value: object, default: int, *, min_value: int, max_value: int | None = None) -> int:
@@ -1374,14 +1375,21 @@ def list_projects() -> list[dict]:
     by_root: dict[str, dict] = {}
     seen = set()
     candidates: list[pathlib.Path] = []
+    scan_entries = 0
     for base in PROJECT_SEARCH_DIRS:
         if not base.exists():
             continue
         try:
-            candidates.extend(base.iterdir())
+            for child in base.iterdir():
+                if scan_entries >= MAX_PROJECT_SCAN_ENTRIES:
+                    break
+                candidates.append(child)
+                scan_entries += 1
         except OSError as e:
             print(f"project scan skipped: {base}: {e}", file=sys.stderr)
             continue
+        if scan_entries >= MAX_PROJECT_SCAN_ENTRIES:
+            break
     candidates.extend(EXTRA_PROJECT_ROOTS)
     # macOS TCC can deny directory scans of ~/Desktop to dashboard processes
     # launched by tmux/nohup even when direct file access to known project
