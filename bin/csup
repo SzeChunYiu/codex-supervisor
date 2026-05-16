@@ -1445,6 +1445,10 @@ cmd_submit() {
     esac
   done
   [[ -n "$project" && -n "$lane" && $# -gt 0 ]] || { err "usage: csup submit <project> <lane> <goal text...>"; return 2; }
+  [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]] || {
+    err "submit: lane must be a safe filename token"
+    return 2
+  }
   local project_dir; project_dir=$(find_project_config "$project")
   [[ -z "$project_dir" ]] && { err "no .codex-supervisor.toml found for project '$project'"; return 1; }
   local cfg="$project_dir/.codex-supervisor.toml"
