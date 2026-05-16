@@ -505,6 +505,15 @@ positive_int_or_default() {
   fi
 }
 
+nonnegative_int_or_default() {
+  local raw="${1:-}" default="${2:-0}"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
 tmux_window_x() { positive_int_or_default "$TMUX_WINDOW_X" 240; }
 tmux_window_y() { positive_int_or_default "$TMUX_WINDOW_Y" 70; }
 
@@ -2875,15 +2884,20 @@ effective_start_stagger_secs() {
 ensure_start_resource_budget() {
   local pane_count="${1:-${#PROMPTS[@]}}"
   local free_ram free_disk need_ram need_disk_gb extra_disk_gb cpus load load_room
+  local min_ram ram_per min_disk disk_per
 
   free_ram=$(free_ram_mb)
   free_disk=$(free_gb_on_runtime_root)
   cpus=$(cpu_count)
   load=$(load1)
   load_room=$(cpu_load_headroom_panes "$cpus" "$load")
-  need_ram=$(( MIN_FREE_RAM_MB + pane_count * RAM_MB_PER_PANE ))
-  extra_disk_gb=$(ceil_div "$(( pane_count * DISK_MB_PER_PANE ))" 1024)
-  need_disk_gb=$(( MIN_FREE_GB + extra_disk_gb ))
+  min_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
+  ram_per=$(nonnegative_int_or_default "$RAM_MB_PER_PANE" 600)
+  min_disk=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
+  disk_per=$(nonnegative_int_or_default "$DISK_MB_PER_PANE" 1024)
+  need_ram=$(( min_ram + pane_count * ram_per ))
+  extra_disk_gb=$(ceil_div "$(( pane_count * disk_per ))" 1024)
+  need_disk_gb=$(( min_disk + extra_disk_gb ))
 
   if [[ "$MAX_LOAD_PER_CPU" != "0" && "$MAX_LOAD_PER_CPU" != "0.0" ]] && (( pane_count > load_room )); then
     err "not enough CPU/load headroom to start ${pane_count} pane(s): load=${load} on ${cpus} CPU(s), capacity for ${load_room} new pane(s) at ${MAX_LOAD_PER_CPU} load/CPU"
@@ -2891,14 +2905,14 @@ ensure_start_resource_budget() {
     return 1
   fi
 
-  if (( RAM_MB_PER_PANE > 0 && free_ram < need_ram )); then
-    err "not enough free RAM to start ${pane_count} pane(s): ${free_ram}MB free, need >= ${need_ram}MB (${RAM_MB_PER_PANE}MB/pane + ${MIN_FREE_RAM_MB}MB reserve)"
+  if (( ram_per > 0 && free_ram < need_ram )); then
+    err "not enough free RAM to start ${pane_count} pane(s): ${free_ram}MB free, need >= ${need_ram}MB (${ram_per}MB/pane + ${min_ram}MB reserve)"
     err "start fewer panes, move lanes to a remote host, or raise CODEX_SUPERVISOR_RAM_MB_PER_PANE only if measured"
     return 1
   fi
 
-  if (( DISK_MB_PER_PANE > 0 && free_disk < need_disk_gb )); then
-    err "not enough free disk to start ${pane_count} pane(s): ${free_disk}G free, need >= ${need_disk_gb}G (${DISK_MB_PER_PANE}MB/pane + ${MIN_FREE_GB}G reserve)"
+  if (( disk_per > 0 && free_disk < need_disk_gb )); then
+    err "not enough free disk to start ${pane_count} pane(s): ${free_disk}G free, need >= ${need_disk_gb}G (${disk_per}MB/pane + ${min_disk}G reserve)"
     err "run: $0 cleanup"
     return 1
   fi
@@ -2914,13 +2928,16 @@ ensure_start_resource_budget() {
 # 8 panes blow through ~15 GB in an hour. Refusing under MIN_FREE_GB
 # prevents the disk-full crash mode that orphans MCP children.
 ensure_disk_space() {
-  local free; free=$(free_gb_on_cwd)
-  if (( free < MIN_FREE_GB )); then
-    err "disk too full to start: ${free}G free on $(pwd) (need >= ${MIN_FREE_GB}G)"
+  local free min_free_gb warn_free_gb
+  free=$(free_gb_on_cwd)
+  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
+  warn_free_gb=$(nonnegative_int_or_default "$WARN_FREE_GB" 10)
+  if (( free < min_free_gb )); then
+    err "disk too full to start: ${free}G free on $(pwd) (need >= ${min_free_gb}G)"
     err "free space first; try: $0 cleanup"
     return 1
   fi
-  if (( free < WARN_FREE_GB )); then
+  if (( free < warn_free_gb )); then
     log "WARNING: only ${free}G free on $(pwd); consider running: $0 cleanup"
   fi
   return 0
