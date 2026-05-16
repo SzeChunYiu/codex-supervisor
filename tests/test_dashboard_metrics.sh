@@ -247,6 +247,9 @@ assert oversized_disk["reachable"] is False, oversized_disk
 assert oversized_disk["error"] == "disk probe returned oversized JSON", oversized_disk
 mod.host_runner = orig_host_runner
 mod.MAX_REMOTE_JSON_CHARS = orig_max_remote_json
+assert "MAX_DF_OUTPUT_BYTES" in mod.REMOTE_DISK_SCRIPT, "remote disk df output must be capped"
+assert "select.select" in mod.REMOTE_DISK_SCRIPT, "remote disk df should read pipes incrementally"
+assert "subprocess.run(" not in mod.REMOTE_DISK_SCRIPT, "remote disk df must not use unbounded capture_output"
 
 assert "Computer health" in html, "dashboard should show computer health"
 assert "systemHealthCard" in html, "dashboard should group CPU/RAM/disk into one card"
