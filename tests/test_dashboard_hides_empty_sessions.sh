@@ -7,6 +7,7 @@ DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
 import sys
 
@@ -48,5 +49,22 @@ projects = mod.CACHE["projects"]
 assert [p["name"] for p in projects] == ["live-project"], projects
 assert projects[0]["instances"][0]["session"] == "live-session", projects
 assert projects[0]["instances"][0]["panes"], projects
+
+old_show_empty = os.environ.get("CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS")
+try:
+    os.environ["CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS"] = "empty-project"
+    mod.refresh(28)
+    projects = mod.CACHE["projects"]
+    assert [p["name"] for p in projects] == ["empty-project", "live-project"], projects
+    assert projects[0]["instances"][0]["session"] == "empty-session", projects
+    os.environ["CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS"] = "x" * (mod.MAX_STATION_PROJECT_FILTER_CHARS + 1)
+    mod.refresh(28)
+    projects = mod.CACHE["projects"]
+    assert [p["name"] for p in projects] == ["live-project"], projects
+finally:
+    if old_show_empty is None:
+        os.environ.pop("CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS", None)
+    else:
+        os.environ["CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS"] = old_show_empty
 print("ok: dashboard hides empty non-running sessions")
 PY
