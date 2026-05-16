@@ -62,6 +62,33 @@ cap_limited="$(
   exit 1
 }
 
+json_out="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_GOVERNOR_FREE_RAM_MB=4096 \
+  CSUP_GOVERNOR_FREE_DISK_GB=100 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=10 \
+  CSUP_GOVERNOR_RUNNING_PANES=0 \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" capacity --json
+)"
+
+python3 - "$json_out" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["available"] == 2, payload
+assert payload["bottleneck"] == "ram", payload
+assert payload["ram_room"] == 2, payload
+assert payload["disk_room"] == 90, payload
+assert payload["load_room"] == 12, payload
+assert payload["max_load_per_cpu"] == 1.25, payload
+assert "host" in payload and payload["host"], payload
+assert "runtime" in payload and payload["runtime"], payload
+PY
+
 help_out="$("$CSUP" help)"
 [[ "$help_out" == *"csup capacity"* ]] || {
   printf 'help should advertise the capacity command, got:\n%s\n' "$help_out" >&2
