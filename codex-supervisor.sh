@@ -2272,19 +2272,23 @@ apply_even_grid() {
   body=$(LAYOUT_W="$W" LAYOUT_H="$H" LAYOUT_N="$n" LAYOUT_COLS="$cols" \
          LAYOUT_ROWS="$rows" LAYOUT_PANES="${PANE_IDX[*]}" python3 -c '
 import os
-def safe_int(name, default, minimum=1):
+def safe_int(name, default, minimum=1, maximum=None):
     try:
         value = int(os.environ.get(name, default))
     except (TypeError, ValueError):
         value = default
-    return value if value >= minimum else default
-W = safe_int("LAYOUT_W", 80, 20)
-H = safe_int("LAYOUT_H", 24, 6)
+    if value < minimum:
+        return default
+    if maximum is not None and value > maximum:
+        return default
+    return value
+W = safe_int("LAYOUT_W", 80, 20, 1000)
+H = safe_int("LAYOUT_H", 24, 6, 300)
 panes = [p for p in os.environ.get("LAYOUT_PANES", "").split() if p.isdigit()]
-N = safe_int("LAYOUT_N", len(panes), 1)
+N = safe_int("LAYOUT_N", len(panes), 1, 256)
 N = min(N, len(panes))
-cols = safe_int("LAYOUT_COLS", 1, 1)
-rows = safe_int("LAYOUT_ROWS", 1, 1)
+cols = safe_int("LAYOUT_COLS", 1, 1, 64)
+rows = safe_int("LAYOUT_ROWS", 1, 1, 64)
 if N <= 0 or not panes:
     raise SystemExit(1)
 SEP = ","
