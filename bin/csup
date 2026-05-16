@@ -46,6 +46,10 @@ RUNTIME_ROOT="${CSUP_RUNTIME_ROOT:-${CODEX_SUPERVISOR_ROOT:-$DEFAULT_RUNTIME_ROO
 err() { printf 'csup: error: %s\n' "$*" >&2; }
 warn() { printf 'csup: warn: %s\n' "$*" >&2; }
 info() { printf 'csup: %s\n' "$*"; }
+require_option_value() {
+  local scope="$1" flag="$2" value="$3"
+  [[ -n "$value" ]] || { err "$scope: $flag requires a value"; return 2; }
+}
 
 ensure_tmpdir_headroom() {
   [[ "${CSUP_DISABLE_TMPDIR_FALLBACK:-0}" == "1" ]] && return 0
@@ -1598,7 +1602,10 @@ cmd_govern() {
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
       --json) json=1 ;;
-      --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
+      --max-panes=*)
+        max_panes_override="${1#--max-panes=}"
+        require_option_value govern --max-panes "$max_panes_override" || return 2
+        ;;
       --project=*)
         target_project="${1#--project=}"
         [[ -n "$target_project" ]] || { err "govern: --project requires a name"; return 2; }
@@ -1878,10 +1885,22 @@ cmd_factory_run() {
         [[ -n "$target_host" ]] || { err "factory-run: --host requires a name"; return 2; }
         ;;
       --scenario=*) scenario="${1#--scenario=}" ;;
-      --sessions=*) sessions_override="${1#--sessions=}" ;;
-      --workers=*) workers_override="${1#--workers=}" ;;
-      --max-workers=*) max_workers_override="${1#--max-workers=}" ;;
-      --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
+      --sessions=*)
+        sessions_override="${1#--sessions=}"
+        require_option_value factory-run --sessions "$sessions_override" || return 2
+        ;;
+      --workers=*)
+        workers_override="${1#--workers=}"
+        require_option_value factory-run --workers "$workers_override" || return 2
+        ;;
+      --max-workers=*)
+        max_workers_override="${1#--max-workers=}"
+        require_option_value factory-run --max-workers "$max_workers_override" || return 2
+        ;;
+      --max-panes=*)
+        max_panes_override="${1#--max-panes=}"
+        require_option_value factory-run --max-panes "$max_panes_override" || return 2
+        ;;
       --allow-static-prompts) allow_static=1 ;;
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
@@ -2090,10 +2109,22 @@ cmd_staff() {
         [[ -n "$target_host" ]] || { err "staff: --host requires a name"; return 2; }
         ;;
       --scenario=*) scenario="${1#--scenario=}" ;;
-      --sessions=*) sessions_override="${1#--sessions=}" ;;
-      --workers=*) workers_override="${1#--workers=}" ;;
-      --max-workers=*) max_workers_override="${1#--max-workers=}" ;;
-      --max-panes=*) max_panes_override="${1#--max-panes=}" ;;
+      --sessions=*)
+        sessions_override="${1#--sessions=}"
+        require_option_value staff --sessions "$sessions_override" || return 2
+        ;;
+      --workers=*)
+        workers_override="${1#--workers=}"
+        require_option_value staff --workers "$workers_override" || return 2
+        ;;
+      --max-workers=*)
+        max_workers_override="${1#--max-workers=}"
+        require_option_value staff --max-workers "$max_workers_override" || return 2
+        ;;
+      --max-panes=*)
+        max_panes_override="${1#--max-panes=}"
+        require_option_value staff --max-panes "$max_panes_override" || return 2
+        ;;
       --allow-stop) allow_stop=1 ;;
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
@@ -2261,8 +2292,14 @@ cmd_station() {
         target_host="${1#--host=}"
         [[ -n "$target_host" ]] || { err "station: --host requires a name"; return 2; }
         ;;
-      --sessions=*) sessions="${1#--sessions=}" ;;
-      --workers=*) workers="${1#--workers=}" ;;
+      --sessions=*)
+        sessions="${1#--sessions=}"
+        require_option_value station --sessions "$sessions" || return 2
+        ;;
+      --workers=*)
+        workers="${1#--workers=}"
+        require_option_value station --workers "$workers" || return 2
+        ;;
       --dry-run) mode="dry-run" ;;
       --apply) mode="apply" ;;
       --*) err "unknown flag: $1"; return 2 ;;
