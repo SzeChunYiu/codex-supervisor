@@ -1469,9 +1469,9 @@ resolve_prompts_file() {
   # Fall back to the state file the daemon wrote on `start`.
   if [[ -f "$STATE_FILE" ]]; then
     local saved root
-    saved=$(grep -E '^PROMPTS_FILE=' "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    saved=$(state_value "PROMPTS_FILE")
     if [[ -n "$saved" && "$saved" != /* ]]; then
-      root=$(grep -E '^PROJECT_ROOT=' "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+      root=$(state_value "PROJECT_ROOT")
       [[ -n "$root" && -f "$root/$saved" ]] && saved="$root/$saved"
     fi
     if [[ -n "$saved" && -f "$saved" ]]; then PROMPTS_FILE="$saved"; return 0; fi
@@ -1511,7 +1511,7 @@ write_state_file() {
 state_value() {
   local key="$1"
   [[ -f "$STATE_FILE" ]] || return 0
-  grep -E "^${key}=" "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-
+  awk -F= -v key="$key" '$1 == key {print substr($0, length(key) + 2); exit}' "$STATE_FILE" 2>/dev/null
 }
 
 apply_prompt_runtime_state() {
@@ -2564,7 +2564,7 @@ resolve_tasks_dir() {
   # Fall back to the state file.
   if [[ -f "$STATE_FILE" ]]; then
     local saved
-    saved=$(grep -E '^TASKS_DIR=' "$STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    saved=$(state_value "TASKS_DIR")
     if [[ -n "$saved" && -d "$saved" ]]; then TASKS_DIR="$saved"; return 0; fi
   fi
   # If we have a resolved prompts file, use its sibling codex-tasks/.
