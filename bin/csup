@@ -2373,6 +2373,7 @@ cmd_steward() {
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -2386,6 +2387,13 @@ try:
         sample_secs = 0.0
 except (TypeError, ValueError):
     sample_secs = 0.0
+try:
+    max_sample_secs = float(os.environ.get("CSUP_STEWARD_MAX_SAMPLE_SECS", "300"))
+    if not math.isfinite(max_sample_secs) or max_sample_secs < 0:
+        max_sample_secs = 300.0
+except (TypeError, ValueError):
+    max_sample_secs = 300.0
+sample_secs = min(sample_secs, max_sample_secs)
 
 def project_slug(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name or "project").lower()).strip("-") or "project"
