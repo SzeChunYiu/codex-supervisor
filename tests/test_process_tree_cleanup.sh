@@ -29,6 +29,19 @@ exit 0
 TMUX
 chmod +x "$TMPDIR/bin/tmux"
 
+python3 - "$SCRIPT" <<'PY'
+import pathlib
+import re
+import sys
+text = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'process_tree_descendants\(\) \{.*?python3 - "\$@" <<\'PY\'\n(.*?)\nPY', text, re.S)
+assert match, "process_tree_descendants Python snippet missing"
+snippet = match.group(1)
+assert "subprocess.check_output" not in snippet
+assert "timeout=2.0" in snippet
+assert "MAX_PS_OUTPUT_BYTES = 1_000_000" in snippet
+PY
+
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_ROOT="$TMPDIR/supervisor-root" \
 CODEX_SUPERVISOR_LOG="$TMPDIR/supervisor.log" \

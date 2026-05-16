@@ -687,6 +687,17 @@ import collections
 import subprocess
 import sys
 
+MAX_PS_OUTPUT_BYTES = 1_000_000
+
+def ps_output(args):
+    r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
+    if r.returncode != 0:
+        raise RuntimeError("ps failed")
+    out = r.stdout or ""
+    if len(out.encode("utf-8", "replace")) > MAX_PS_OUTPUT_BYTES:
+        raise RuntimeError("ps output too large")
+    return out
+
 roots = []
 for raw in sys.argv[1:]:
     try:
@@ -697,7 +708,7 @@ for raw in sys.argv[1:]:
         roots.append(pid)
 
 try:
-    out = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+    out = ps_output(["ps", "-axo", "pid=,ppid="])
 except Exception:
     raise SystemExit(0)
 
@@ -1154,11 +1165,22 @@ import shlex
 import subprocess
 import sys
 
+MAX_PS_OUTPUT_BYTES = 1_000_000
+
+def ps_output(args):
+    r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
+    if r.returncode != 0:
+        raise RuntimeError("ps failed")
+    out = r.stdout or ""
+    if len(out.encode("utf-8", "replace")) > MAX_PS_OUTPUT_BYTES:
+        raise RuntimeError("ps output too large")
+    return out
+
 cmd = sys.argv[1]
 port = sys.argv[2]
 
 try:
-    out = subprocess.check_output(["ps", "-axo", "pid=,args="], text=True)
+    out = ps_output(["ps", "-axo", "pid=,args="])
 except Exception:
     raise SystemExit(0)
 

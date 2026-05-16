@@ -16,6 +16,19 @@ OUT
 PS
 chmod +x "$TMPDIR/bin/ps"
 
+python3 - "$ROOT/codex-supervisor.sh" <<'PY'
+import pathlib
+import re
+import sys
+text = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'dashboard_matching_pids_for_cmd\(\) \{.*?python3 - "\$match_cmd" "\$DASHBOARD_PORT" <<\'PY\'\n(.*?)\nPY', text, re.S)
+assert match, "dashboard_matching_pids_for_cmd Python snippet missing"
+snippet = match.group(1)
+assert "subprocess.check_output" not in snippet
+assert "timeout=2.0" in snippet
+assert "MAX_PS_OUTPUT_BYTES = 1_000_000" in snippet
+PY
+
 PATH="$TMPDIR/bin:$PATH" \
 CODEX_SUPERVISOR_DASHBOARD_CMD="$ROOT/csup-dashboard" \
 DASHBOARD_PORT="7777" \
