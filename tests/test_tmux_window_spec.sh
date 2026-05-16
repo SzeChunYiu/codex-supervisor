@@ -39,4 +39,10 @@ if ! grep -q 'tmux new-session -d -s "$SESSION" -x "$(tmux_window_x)" -y "$(tmux
   exit 1
 fi
 
+oversized_window="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_TMUX_X=999999 CODEX_SUPERVISOR_TMUX_Y=999999 bash -c 'source "$1"; printf "%sx%s" "$(tmux_window_x)" "$(tmux_window_y)"' _ "$SCRIPT")"
+[[ "$oversized_window" == "240x70" ]] || {
+  echo "oversized tmux window dimensions should sanitize to defaults, got $oversized_window" >&2
+  exit 1
+}
+
 echo "ok: tmux detached window spec is normalized and configurable"
