@@ -3328,8 +3328,8 @@ cmd_cleanup() {
     esac
   done
   local before after freed cleanup_sessions_retain_days cleanup_supervisor_log_max_mb
-  cleanup_sessions_retain_days=$(nonnegative_int_or_default "$CODEX_SESSIONS_RETAIN_DAYS" 3)
-  cleanup_supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50)
+  cleanup_sessions_retain_days=$(nonnegative_int_or_default "$CODEX_SESSIONS_RETAIN_DAYS" 3 365)
+  cleanup_supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50 1000)
   before=$(free_gb_on_cwd)
   log "cleanup: starting ($before G free on $(pwd); scope=$(cleanup_global_enabled && echo global || echo project))"
 
@@ -3886,9 +3886,9 @@ cmd_stop() {
 # explicit `cleanup` subcommand.
 run_periodic_cleanup() {
   local before after removed=0 periodic_age_min codex_log_max_gb supervisor_log_max_mb
-  periodic_age_min=$(nonnegative_int_or_default "$PERIODIC_WORKTREE_AGE_MIN" 5)
-  codex_log_max_gb=$(nonnegative_int_or_default "$CODEX_LOG_MAX_GB" 1)
-  supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50)
+  periodic_age_min=$(nonnegative_int_or_default "$PERIODIC_WORKTREE_AGE_MIN" 5 10080)
+  codex_log_max_gb=$(nonnegative_int_or_default "$CODEX_LOG_MAX_GB" 1 100)
+  supervisor_log_max_mb=$(nonnegative_int_or_default "$SUPERVISOR_LOG_MAX_MB" 50 1000)
   before=$(free_gb_on_cwd)
 
   # 0) Supervisor-owned runtime/cache dirs. By default these live on
