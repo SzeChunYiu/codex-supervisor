@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, urlparse
 MAX_REQUEST_PATH_CHARS = 8192
 MAX_QUERY_FIELDS = 20
 MAX_PANE_INDEX = 4096
+MAX_PANE_TARGET_NAME_CHARS = 128
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
 PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
@@ -8843,7 +8844,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400); return
             wants_json = response_format == "json"
             # Validate to keep shell-safe
-            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", host or "") or \
+            if len(host or "") > MAX_PANE_TARGET_NAME_CHARS or \
+               len(session or "") > MAX_PANE_TARGET_NAME_CHARS or \
+               not re.fullmatch(r"[A-Za-z0-9_.\-]+", host or "") or \
                not re.fullmatch(r"[A-Za-z0-9_.\-]+", session or "") or \
                not re.fullmatch(r"\d+", idx):
                 self.send_error(400); return

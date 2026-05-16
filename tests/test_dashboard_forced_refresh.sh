@@ -106,6 +106,13 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     except urllib.error.HTTPError as e:
         assert e.code == 400, e
 
+    long_session = "s" * (mod.MAX_PANE_TARGET_NAME_CHARS + 1)
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/pane?host=local&session={long_session}&index=0", timeout=2)
+        raise AssertionError("oversized pane session should be rejected before host capture")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, e
+
     srv.shutdown()
 
 html = mod.INDEX_HTML
