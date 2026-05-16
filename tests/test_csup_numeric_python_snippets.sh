@@ -16,6 +16,19 @@ text = pathlib.Path(sys.argv[1]).read_text()
 assert "if not math.isfinite(timeout) or timeout <= 0:" in text, "timeout helpers must guard malformed numeric input"
 assert "if not math.isfinite(sample_secs) or sample_secs < 0:" in text, "steward sample seconds must guard malformed numeric input"
 
+capacity_match = re.search(r"capacity_fields\(\) \{.*?load_room=\$\(python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S)
+assert capacity_match, "could not locate local capacity load-room Python snippet"
+capacity_snippet = capacity_match.group(1)
+for args, expected in [
+    (["4", "0", "0"], "999999"),
+    (["4", "0", "nan"], "0"),
+    (["4", "nan", "1.25"], "0"),
+    (["bad", "0", "1.25"], "0"),
+]:
+    result = subprocess.run([sys.executable, "-c", capacity_snippet, *args], text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, (args, result.returncode, result.stderr)
+    assert result.stdout.strip() == expected, (args, result.stdout, result.stderr)
+
 match = re.search(r"slurm_remote_load_room\(\) \{.*?python3 - <<'PY'\n(.*?)\nPY", text, re.S)
 assert match, "could not locate slurm remote load Python snippet"
 snippet = match.group(1)
