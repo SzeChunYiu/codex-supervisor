@@ -2871,7 +2871,7 @@ ceil_div() {
 effective_start_stagger_secs() {
   local pane_count="${1:-0}"
   if [[ -n "$START_STAGGER_SECS" ]]; then
-    echo "$START_STAGGER_SECS"
+    nonnegative_int_or_default "$START_STAGGER_SECS" 0
   elif (( pane_count >= 6 )); then
     echo 2
   elif (( pane_count >= 3 )); then
