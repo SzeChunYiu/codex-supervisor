@@ -193,3 +193,18 @@ PY
     assert_exists "$2/projects/other-proj/.next"
     assert_exists "$2/projects/other-proj-worker"
   ' _ "$SCRIPT" "$TMPDIR"
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+HOME="$TMPDIR/home" \
+CODEX_SUPERVISOR_PROJECTS_ROOT=relative/projects \
+CODEX_SUPERVISOR_TMP_SWEEP_ROOT="$(printf '%05000d' 0 | tr 0 x)" \
+CODEX_SUPERVISOR_SUPERPOWERS_WORKTREES_ROOT=relative/worktrees \
+CODEX_SUPERVISOR_DIAGNOSTIC_MESSAGES_ROOT=relative/diagnostics \
+  bash -c '
+    set -euo pipefail
+    source "$1"
+    [[ "$PROJECTS_ROOT" == "$HOME/Desktop/projects" ]] || { echo "relative projects root should fall back" >&2; exit 1; }
+    [[ "$TMP_SWEEP_ROOT" == "/private/tmp" ]] || { echo "oversized tmp sweep root should fall back" >&2; exit 1; }
+    [[ "$SUPERPOWERS_WORKTREES_ROOT" == "$HOME/.config/superpowers/worktrees" ]] || { echo "relative superpowers root should fall back" >&2; exit 1; }
+    [[ "$DIAGNOSTIC_MESSAGES_ROOT" == "/private/var/log/DiagnosticMessages" ]] || { echo "relative diagnostics root should fall back" >&2; exit 1; }
+  ' _ "$SCRIPT"
