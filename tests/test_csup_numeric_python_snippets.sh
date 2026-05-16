@@ -13,7 +13,9 @@ import sys
 
 text = pathlib.Path(sys.argv[1]).read_text()
 
-assert "if not math.isfinite(timeout) or timeout <= 0:" in text, "timeout helpers must guard malformed numeric input"
+assert "if not math.isfinite(timeout) or timeout <= 0" in text, "timeout helpers must guard malformed numeric input"
+assert "timeout > 300" in text, "timeout helpers must clamp excessive numeric input"
+assert "max_bytes < 1024 or max_bytes > 10000000" in text, "shell capture byte cap must reject excessive env overrides"
 assert "if not math.isfinite(sample_secs) or sample_secs < 0:" in text, "steward sample seconds must guard malformed numeric input"
 assert "allow_nan=False" in text, "JSON emitters must not serialize non-finite numeric tokens"
 
@@ -32,6 +34,17 @@ huge = subprocess.run(
     text=True, capture_output=True, timeout=5,
 )
 assert huge.returncode == 124 and huge.stdout == "", (huge.returncode, len(huge.stdout), huge.stderr)
+huge_override_cmd = f"{sys.executable} -c 'import sys; sys.stdout.write(\"x\" * 2000000)'"
+huge_override = subprocess.run(
+    [sys.executable, "-c", shell_capture_snippet, "999999", huge_override_cmd],
+    env={**os.environ, "CSUP_SHELL_CAPTURE_MAX_BYTES": "999999999"},
+    text=True, capture_output=True, timeout=5,
+)
+assert huge_override.returncode == 124 and huge_override.stdout == "", (
+    huge_override.returncode,
+    len(huge_override.stdout),
+    huge_override.stderr,
+)
 
 capacity_match = re.search(r"capacity_fields\(\) \{.*?load_room=\$\(python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S)
 assert capacity_match, "could not locate local capacity load-room Python snippet"
