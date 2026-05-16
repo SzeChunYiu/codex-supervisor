@@ -255,6 +255,7 @@ MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTE
 MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024, max_value=10_000_000)
 MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024, max_value=200_000_000)
 MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1, max_value=4096)
+MAX_PANE_DIMENSION = 10_000
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0, max_value=3600.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -847,6 +848,10 @@ def bounded_pane_dicts(value: object, limit: int | None = None) -> list[dict]:
     return out
 
 
+def pane_dimension(value: object) -> int:
+    return bounded_int(value, 0, min_value=0, max_value=MAX_PANE_DIMENSION)
+
+
 def run_ssh_stable(ssh_target: str, cmd: list[str], *, timeout: float, retries: int = 1) -> subprocess.CompletedProcess:
     # OpenSSH ControlMaster sockets can refuse concurrent multiplexed session
     # opens. LUNARC is especially sensitive because several host aliases share
@@ -925,6 +930,7 @@ TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5, 300)
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1, 4096)
 CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05, 60.0)
 MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024, 10_000_000)
+MAX_PANE_DIMENSION = 10_000
 
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
@@ -1105,8 +1111,8 @@ def capture_all():
                 cap = run_capture(tmux_cmd(socket, "capture-pane", "-e", "-t", f"={session}:.{idx}", "-p", "-S", f"-{CAP_LINES}"))
                 panes.append({
                     "index": idx, "ordinal": ordinal, "dead": parts[1] == "1", "cmd": parts[2],
-                    "width": safe_int(parts[3], 0, 0) if len(parts) > 3 else 0,
-                    "height": safe_int(parts[4], 0, 0) if len(parts) > 4 else 0,
+                    "width": safe_int(parts[3], 0, 0, MAX_PANE_DIMENSION) if len(parts) > 3 else 0,
+                    "height": safe_int(parts[4], 0, 0, MAX_PANE_DIMENSION) if len(parts) > 4 else 0,
                     "title": parts[5] if len(parts) > 5 else "",
                     "ansi": cap.stdout if cap.returncode == 0 else "",
                 })
@@ -2771,8 +2777,8 @@ def render_captured_item_simple(item: dict, tail_lines: int = DEFAULT_TAIL,
         "state": state,
         "model": m.group(1) if m else "",
         "lane": lane_label_for_capture(item, lane_map),
-        "width": bounded_int(item.get("width"), 0, min_value=0),
-        "height": bounded_int(item.get("height"), 0, min_value=0),
+        "width": pane_dimension(item.get("width")),
+        "height": pane_dimension(item.get("height")),
         "tail": tail,
         "tail_html": ansi_to_html("\n".join(tail_ansi)),
         "tail_line_count": len(tail),
@@ -2926,8 +2932,8 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
             "state": state,
             "model": m.group(1) if m else "",
             "lane": lane_label_for_capture(item, lane_map),
-            "width": bounded_int(item.get("width"), 0, min_value=0),
-            "height": bounded_int(item.get("height"), 0, min_value=0),
+            "width": pane_dimension(item.get("width")),
+            "height": pane_dimension(item.get("height")),
             "tail": tail,
             "tail_html": ansi_to_html("\n".join(tail_ansi)),
             "tail_line_count": len(tail),
@@ -2960,6 +2966,7 @@ def safe_float(value, default=0.0, min_value=0.0, max_value=None):
 lines = safe_int(sys.argv[2], 1, 1)
 max_capture_panes = safe_int(sys.argv[4] if len(sys.argv) > 4 else 512, 512, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1, 4096)
+max_pane_dimension = 10_000
 cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05, 60.0)
 max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024, 10_000_000)
 def _read_process_limited(proc, *, timeout, max_bytes):
@@ -3076,7 +3083,7 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
     idx = safe_int(parts[0], -1, 0)
     if idx < 0:
         continue
-    height = safe_int(parts[4], 0, 0) if len(parts) > 4 else 0
+    height = safe_int(parts[4], 0, 0, max_pane_dimension) if len(parts) > 4 else 0
     cap_lines = max(lines, safe_int(sys.argv[3], lines, 1))
     c = run_capture(tx("capture-pane", "-e", "-t", f"{session}:.{idx}", "-p", "-S", f"-{cap_lines}"))
     out.append({
@@ -3084,7 +3091,7 @@ for ordinal, row in enumerate((r.stdout or "").splitlines()):
         "ordinal": ordinal,
         "dead": parts[1] == "1",
         "cmd": parts[2],
-        "width": safe_int(parts[3], 0, 0) if len(parts) > 3 else 0,
+        "width": safe_int(parts[3], 0, 0, max_pane_dimension) if len(parts) > 3 else 0,
         "height": height,
         "title": parts[5] if len(parts) > 5 else "",
         "ansi": c.stdout if c.returncode == 0 else "",
@@ -3212,8 +3219,8 @@ print(json.dumps({"panes": out, "monitor": monitor}))
                 "ordinal": len(panes_meta),
                 "dead": parts[1] == "1",
                 "cmd": parts[2],
-                "width": bounded_int(parts[3], 0, min_value=0) if len(parts) > 3 else 0,
-                "height": bounded_int(parts[4], 0, min_value=0) if len(parts) > 4 else 0,
+                "width": pane_dimension(parts[3]) if len(parts) > 3 else 0,
+                "height": pane_dimension(parts[4]) if len(parts) > 4 else 0,
                 "title": parts[5] if len(parts) > 5 else "",
             })
 

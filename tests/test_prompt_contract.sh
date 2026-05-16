@@ -103,3 +103,18 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 \
   CODEX_SUPERVISOR_MAX_PANES=bad \
   CODEX_SUPERVISOR_PROMPTS="$ROOT/codex-prompts.example.txt" \
   bash -c 'source "$1"; load_prompts; [[ "${#PROMPTS[@]}" == "3" ]]' _ "$SCRIPT"
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_SUPERVISOR_MAX_PANES=999999 \
+  CODEX_SUPERVISOR_MAX_PROMPT_WORDS=999999 \
+  CODEX_SUPERVISOR_DYNAMIC_WORKERS=999999 \
+  CODEX_SUPERVISOR_MAX_ITERATION_SECS=999999999 \
+  bash -c '
+    source "$1"
+    sanitize_prompt_runtime_config
+    if [[ "$MAX_PANES" != "8" ]]; then exit 1; fi
+    if [[ "$PROMPT_MAX_WORDS" != "50" ]]; then exit 1; fi
+    if [[ "$DYNAMIC_WORKERS" != "0" ]]; then exit 1; fi
+    max_iteration_secs=$(nonnegative_int_or_default "$MAX_ITERATION_SECS" 2700 86400)
+    if [[ "$max_iteration_secs" != "2700" ]]; then exit 1; fi
+  ' _ "$SCRIPT"

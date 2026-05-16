@@ -118,6 +118,13 @@ assert panes[1]["width"] == 0 and panes[1]["height"] == 0, panes[1]
 assert state["projects"][0]["instances"][0]["stream_updated_at"] == 0.0, state["projects"][0]["instances"][0]
 assert mod.capture_cache_key("h", "s", "bad", {"bad": "lane"}) == ("h", "s", mod.DEFAULT_TAIL, ((-1, "lane"),))
 assert mod.render_captured_item_simple({"index": "bad", "ansi": "a\nb"}, tail_lines="bad")["tail"] == ["a", "b"]
+huge_dims = mod.render_captured_item_simple({
+    "index": 3,
+    "width": 999999999,
+    "height": 999999999,
+    "ansi": "oversized dims",
+})
+assert huge_dims["width"] == 0 and huge_dims["height"] == 0, huge_dims
 assert mod.capture_cache_problem("h", "s", "bad") == {}
 print("ok: state payload overlays fresh streaming pane text between full refreshes")
 PY
