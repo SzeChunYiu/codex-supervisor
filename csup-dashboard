@@ -2145,7 +2145,16 @@ def lane_label_for_capture(item: dict, lane_map: dict[int, str] | None = None) -
 
 
 def clone_jsonable(value):
-    return json.loads(json.dumps(value))
+    """Return a JSON-safe copy without non-finite floats or exotic keys."""
+    if isinstance(value, dict):
+        return {str(k): clone_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clone_jsonable(v) for v in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    return str(value)
 
 
 def project_slug(name: str) -> str:
@@ -3292,12 +3301,12 @@ def collect_system_health_cached(hosts: dict | None = None, me: str | None = Non
         if (SYSTEM_HEALTH_CACHE_SECS > 0 and cached is not None and
                 SYSTEM_HEALTH_CACHE.get("key") == key and
                 cache_age(now, SYSTEM_HEALTH_CACHE.get("updated_at")) < SYSTEM_HEALTH_CACHE_SECS):
-            return json.loads(json.dumps(cached))
+            return clone_jsonable(cached)
     value = collect_system_health(hosts, me, host_probe_cache)
     with SYSTEM_HEALTH_CACHE_LOCK:
         SYSTEM_HEALTH_CACHE["key"] = key
         SYSTEM_HEALTH_CACHE["updated_at"] = now
-        SYSTEM_HEALTH_CACHE["value"] = json.loads(json.dumps(value))
+        SYSTEM_HEALTH_CACHE["value"] = clone_jsonable(value)
     return value
 
 
@@ -3317,7 +3326,7 @@ def collect_system_health_snapshot(hosts: dict | None = None, me: str | None = N
                 "system_health",
                 lambda: collect_system_health_cached(hosts, me, host_probe_cache, time.time()),
             )
-        return json.loads(json.dumps(cached))
+        return clone_jsonable(cached)
 
     start_async_metric_refresh(
         "system_health",
@@ -3845,7 +3854,7 @@ def collect_token_usage(now: float | None = None, *, force: bool = False) -> dic
         cached = TOKEN_USAGE_CACHE.get("value")
         if (not force and cached is not None and TOKEN_USAGE_CACHE.get("key") == cache_key and
                 cache_age(now, TOKEN_USAGE_CACHE.get("updated_at")) < TOKEN_SCAN_CACHE_SECS):
-            return json.loads(json.dumps(cached))
+            return clone_jsonable(cached)
 
     files = recent_codex_session_files(now)
     usage = empty_token_usage(session_files_scanned=len(files))
@@ -3890,7 +3899,7 @@ def collect_token_usage(now: float | None = None, *, force: bool = False) -> dic
     with TOKEN_USAGE_CACHE_LOCK:
         TOKEN_USAGE_CACHE["key"] = cache_key
         TOKEN_USAGE_CACHE["updated_at"] = now
-        TOKEN_USAGE_CACHE["value"] = json.loads(json.dumps(usage))
+        TOKEN_USAGE_CACHE["value"] = clone_jsonable(usage)
     return usage
 
 
@@ -3912,7 +3921,7 @@ def collect_token_usage_snapshot(now: float | None = None) -> dict:
     if same_key:
         if age >= TOKEN_SCAN_CACHE_SECS:
             start_async_metric_refresh("token_usage", lambda: collect_token_usage(now=time.time(), force=True))
-        return json.loads(json.dumps(cached))
+        return clone_jsonable(cached)
 
     start_async_metric_refresh("token_usage", lambda: collect_token_usage(now=time.time(), force=True))
     usage = empty_token_usage()
@@ -4003,7 +4012,7 @@ def collect_tool_call_usage(now: float | None = None, *, force: bool = False) ->
         cached = TOOL_CALL_USAGE_CACHE.get("value")
         if (not force and cached is not None and TOOL_CALL_USAGE_CACHE.get("key") == cache_key and
                 cache_age(now, TOOL_CALL_USAGE_CACHE.get("updated_at")) < TOKEN_SCAN_CACHE_SECS):
-            return json.loads(json.dumps(cached))
+            return clone_jsonable(cached)
 
     files = recent_codex_session_files(now)
     usage = empty_tool_call_usage(session_files_scanned=len(files))
@@ -4038,7 +4047,7 @@ def collect_tool_call_usage(now: float | None = None, *, force: bool = False) ->
     with TOOL_CALL_USAGE_CACHE_LOCK:
         TOOL_CALL_USAGE_CACHE["key"] = cache_key
         TOOL_CALL_USAGE_CACHE["updated_at"] = now
-        TOOL_CALL_USAGE_CACHE["value"] = json.loads(json.dumps(usage))
+        TOOL_CALL_USAGE_CACHE["value"] = clone_jsonable(usage)
     return usage
 
 
@@ -4060,7 +4069,7 @@ def collect_tool_call_usage_snapshot(now: float | None = None) -> dict:
     if same_key:
         if age >= TOKEN_SCAN_CACHE_SECS:
             start_async_metric_refresh("tool_call_usage", lambda: collect_tool_call_usage(now=time.time(), force=True))
-        return json.loads(json.dumps(cached))
+        return clone_jsonable(cached)
 
     start_async_metric_refresh("tool_call_usage", lambda: collect_tool_call_usage(now=time.time(), force=True))
     usage = empty_tool_call_usage()
@@ -4070,7 +4079,7 @@ def collect_tool_call_usage_snapshot(now: float | None = None) -> dict:
 
 def health_payload() -> dict:
     with CACHE_LOCK:
-        snapshot = json.loads(json.dumps(CACHE))
+        snapshot = clone_jsonable(CACHE)
     now = time.time()
     age_secs = cache_age(now, snapshot.get("updated_at"))
     interval = bounded_float(snapshot.get("refresh_interval_secs"), DEFAULT_REFRESH, min_value=0.05)
