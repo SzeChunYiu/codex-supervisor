@@ -72,6 +72,8 @@ assert "subprocess.run(tx(" not in remote_script
 assert "subprocess.Popen" in remote_script
 assert "select.select" in remote_script
 assert "output limit exceeded" in remote_script
+assert "max_capture_panes = safe_int(sys.argv[4]" in remote_script
+assert "if len(out) >= max_capture_panes:" in remote_script
 
 mod.run_stable = fake_run_stable
 probe = mod.probe_host("lunarc", hosts, me="mac-mini")
@@ -145,6 +147,8 @@ mod.CSUP_STREAMING = False
 mod.MAX_CAPTURE_PANES = 2
 def many_panes_runner(*args, **kwargs):
     def run(cmd):
+        assert cmd[:2] == ["python3", "-c"], cmd
+        assert cmd[-1] == "2", cmd
         return subprocess.CompletedProcess(cmd, 0, '{"panes": [' + ",".join(
             '{"index": %d, "ansi": "pane%d"}' % (i, i) for i in range(5)
         ) + ']}', "")
