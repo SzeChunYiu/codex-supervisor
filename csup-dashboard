@@ -43,16 +43,23 @@ MAX_PANE_TARGET_NAME_CHARS = 128
 MAX_PROJECT_FILTER_CHARS = 128
 MAX_STATION_PROJECT_FILTER_CHARS = 4096
 MAX_STATION_PROJECT_FILTER_ITEMS = 256
+MAX_DASHBOARD_ENV_PATH_CHARS = 4096
+
+def bounded_env_file_path(name: str, default: pathlib.Path) -> pathlib.Path:
+    raw = os.environ.get(name)
+    if raw is None or len(raw) > MAX_DASHBOARD_ENV_PATH_CHARS:
+        return default
+    return pathlib.Path(raw)
 
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
-PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
+PROJECT_ROOTS_FILE = bounded_env_file_path(
     "CSUP_PROJECT_ROOTS_FILE",
-    str(pathlib.Path.home() / ".config/csup/project-roots.txt"),
-))
-PROJECT_CACHE_FILE = pathlib.Path(os.environ.get(
+    pathlib.Path.home() / ".config/csup/project-roots.txt",
+)
+PROJECT_CACHE_FILE = bounded_env_file_path(
     "CSUP_PROJECT_CACHE_FILE",
-    str(pathlib.Path.home() / ".config/csup/project-cache.json"),
-))
+    pathlib.Path.home() / ".config/csup/project-cache.json",
+)
 # Detect when we are running on a LUNARC compute node so the dashboard can use
 # the right config + project locations without manual --project-root flags or
 # HOME overrides on every launch. cn*/cx*/cg* are the SLURM allocation

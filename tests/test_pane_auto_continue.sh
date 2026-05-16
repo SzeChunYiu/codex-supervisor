@@ -269,6 +269,8 @@ bash -c '
   pane_dead() { return 1; }
   capture_tail() { printf "%s\n" "$CAPTURE"; }
   pop_next_task() { return 1; }
+  free_gb_on_cwd() { echo 100; }
+  free_ram_mb() { echo 100000; }
   send_prompt_to_pane() { printf "%s\n" "$2" > "$SENT_FILE"; return 0; }
   check_pane 0 "${PROMPTS[0]}"
 ' _ "$SCRIPT" > /dev/null
