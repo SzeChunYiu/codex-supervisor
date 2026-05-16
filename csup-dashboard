@@ -201,7 +201,31 @@ def cache_age(now: float, value: object) -> float:
 
 REMOTE_DISK_TIMEOUT = env_float("CSUP_DASHBOARD_REMOTE_DISK_TIMEOUT_SECS", 4.0, min_value=0.1, max_value=60.0)
 DEFAULT_CODEX_SESSIONS_DIR = pathlib.Path.home() / ".codex/sessions"
-CODEX_SESSIONS_DIR = pathlib.Path(os.environ.get("CSUP_DASHBOARD_CODEX_SESSIONS_DIR", DEFAULT_CODEX_SESSIONS_DIR))
+MAX_CODEX_SESSION_DIR_CHARS = env_int("CSUP_DASHBOARD_CODEX_SESSION_DIR_MAX_CHARS", 4096, min_value=16, max_value=4096)
+MAX_EXTRA_CODEX_SESSION_DIRS_CHARS = env_int("CSUP_DASHBOARD_EXTRA_CODEX_SESSION_DIRS_MAX_CHARS", 16384, min_value=16, max_value=65536)
+MAX_EXTRA_CODEX_SESSION_DIRS = env_int("CSUP_DASHBOARD_EXTRA_CODEX_SESSION_DIRS_MAX", 128, min_value=0, max_value=1024)
+
+def bounded_env_path(name: str, default: pathlib.Path) -> pathlib.Path:
+    raw = os.environ.get(name)
+    if raw is None or len(raw) > MAX_CODEX_SESSION_DIR_CHARS:
+        return default
+    return pathlib.Path(raw)
+
+def bounded_extra_session_dirs(raw: str | None) -> list[pathlib.Path]:
+    raw = raw or ""
+    if len(raw) > MAX_EXTRA_CODEX_SESSION_DIRS_CHARS:
+        return []
+    dirs: list[pathlib.Path] = []
+    for part in raw.split(os.pathsep):
+        item = part.strip()
+        if not item or len(item) > MAX_CODEX_SESSION_DIR_CHARS:
+            continue
+        dirs.append(pathlib.Path(item).expanduser())
+        if len(dirs) >= MAX_EXTRA_CODEX_SESSION_DIRS:
+            break
+    return dirs
+
+CODEX_SESSIONS_DIR = bounded_env_path("CSUP_DASHBOARD_CODEX_SESSIONS_DIR", DEFAULT_CODEX_SESSIONS_DIR)
 EXTRA_CODEX_SESSIONS_DIRS = os.environ.get("CSUP_DASHBOARD_CODEX_SESSIONS_DIRS", "")
 SUPERVISOR_CODEX_HOME_ROOTS = [
     pathlib.Path.home() / ".codex-supervisor/codex-home",
@@ -4186,9 +4210,8 @@ def codex_session_dirs() -> list[pathlib.Path]:
     if CODEX_SESSIONS_DIR != DEFAULT_CODEX_SESSIONS_DIR:
         return dirs
 
-    for raw in EXTRA_CODEX_SESSIONS_DIRS.split(os.pathsep):
-        if raw.strip():
-            add(pathlib.Path(raw.strip()).expanduser())
+    for path in bounded_extra_session_dirs(EXTRA_CODEX_SESSIONS_DIRS):
+        add(path)
     for root in SUPERVISOR_CODEX_HOME_ROOTS:
         if not root.exists():
             continue
