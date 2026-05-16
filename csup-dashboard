@@ -3314,11 +3314,47 @@ def collect_disk_health(path: str | pathlib.Path | None = None) -> dict:
 
 
 REMOTE_DISK_SCRIPT = r'''
-import json, os, pathlib, shutil, subprocess, sys
+import json, os, pathlib, select, shutil, subprocess, sys, time
+
+MAX_DF_OUTPUT_BYTES = 100_000
+
+def run_df(path):
+    proc = subprocess.Popen(["df", "-kP", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    chunks = []
+    fds = {proc.stdout.fileno(): chunks, proc.stderr.fileno(): []}
+    total = 0
+    deadline = time.monotonic() + 2.0
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait()
+            return subprocess.CompletedProcess(["df", "-kP", path], 124, "", "command timed out")
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > MAX_DF_OUTPUT_BYTES:
+                proc.kill()
+                proc.wait()
+                return subprocess.CompletedProcess(["df", "-kP", path], 124, "", "output limit exceeded")
+            fds[fd].append(chunk)
+    return subprocess.CompletedProcess(
+        ["df", "-kP", path], proc.wait(timeout=0.2),
+        b"".join(chunks).decode("utf-8", "replace"), "",
+    )
 
 def filesystem_for(path):
     try:
-        r = subprocess.run(["df", "-kP", path], capture_output=True, text=True, timeout=2)
+        r = run_df(path)
         if r.returncode == 0:
             lines = (r.stdout or "").splitlines()
             if len(lines) >= 2:
