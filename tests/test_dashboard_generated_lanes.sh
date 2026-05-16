@@ -8,6 +8,7 @@ python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -52,6 +53,25 @@ with tempfile.TemporaryDirectory() as d:
     prompts = pathlib.Path(d) / "prompts.txt"
     prompts.write_text("/goal You are PANE 0, lane huge. Work.\n" + ("#" * 1_000_001))
     assert mod.parse_lanes(prompts) == {}
+
+captured = {}
+def fake_runner_factory(host, hosts, me, timeout, retries=1, slurm_job_id=""):
+    def runner(cmd):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            "/goal You are PANE 0, lane remote. Work.\n",
+            "",
+        )
+    return runner
+
+mod.host_runner = fake_runner_factory
+remote_lanes = mod.fetch_remote_lanes("lunarc", {"lunarc": {"ssh": "lunarc"}}, "local", "/remote/prompts.txt")
+assert remote_lanes == {0: "remote"}, remote_lanes
+script = captured["cmd"][2]
+assert "read(100001)" in script, script
+assert ".read_text()" not in script, script
 
 print("ok: dashboard labels generated CEO panes")
 PY

@@ -1795,7 +1795,19 @@ def fetch_remote_lanes(host: str, hosts: dict, me: str | None, prompts_path: str
                          slurm_job_id=str((connection or {}).get("job_id", "")))
     if not runner:
         return {}
-    script = "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.read_text()[:100000])"
+    script = """
+import pathlib
+import sys
+p = pathlib.Path(sys.argv[1])
+try:
+    with p.open("rb") as f:
+        data = f.read(100001)
+    if len(data) > 100000:
+        sys.exit(2)
+    sys.stdout.write(data.decode("utf-8", "replace"))
+except OSError:
+    sys.exit(1)
+"""
     try:
         r = runner(["python3", "-c", script, prompts_path])
         if r.returncode == 0:
