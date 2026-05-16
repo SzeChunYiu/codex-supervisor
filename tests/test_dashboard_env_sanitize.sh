@@ -56,6 +56,11 @@ assert mod.REFRESH_INSTANCE_TIMEOUT_SECS == 3.0
 assert mod.REMOTE_PROJECT_TOML_CACHE_SECS == 60.0
 assert mod.TMUX_DISCOVERY_TIMEOUT_SECS == 12.0
 assert mod.station_candidate_sessions("proj")[-1] == "proj-station-4"
+assert mod.bounded_int(-1, 7777, min_value=1, max_value=65535) == 7777
+assert mod.bounded_int(70000, 7777, min_value=1, max_value=65535) == 7777
+assert mod.bounded_int("24", 12, min_value=1, max_value=200) == 24
+assert mod.bounded_float("nan", 0.2, min_value=0.05) == 0.2
+assert mod.bounded_float("0.1", 0.2, min_value=0.05) == 0.1
 assert "def env_float" in mod._STREAMER_SCRIPT
 assert 'CSUP_STREAMER_POLL_FAST", 0.1' in mod._STREAMER_SCRIPT
 PY

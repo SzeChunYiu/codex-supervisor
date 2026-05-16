@@ -21,6 +21,7 @@ import signal
 import hashlib
 import html
 import json
+import math
 import os
 import pathlib
 import re
@@ -138,6 +139,28 @@ def env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def bounded_int(value: object, default: int, *, min_value: int, max_value: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
+
+
+def bounded_float(value: object, default: float, *, min_value: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or parsed < min_value:
+        return default
+    return parsed
 
 
 REMOTE_DISK_TIMEOUT = env_float("CSUP_DASHBOARD_REMOTE_DISK_TIMEOUT_SECS", 4.0, min_value=0.1)
@@ -8385,6 +8408,9 @@ def main():
     ap.add_argument("--project-root", action="append", dest="project_roots", default=[],
                     metavar="PATH", help="Extra project root to scan (may be given multiple times)")
     args = ap.parse_args()
+    args.port = bounded_int(args.port, 7777, min_value=1, max_value=65535)
+    args.lines = bounded_int(args.lines, DEFAULT_TAIL, min_value=1, max_value=200)
+    args.refresh = bounded_float(args.refresh, DEFAULT_REFRESH, min_value=0.05)
 
     for p in args.project_roots:
         EXTRA_PROJECT_ROOTS.append(pathlib.Path(p))
