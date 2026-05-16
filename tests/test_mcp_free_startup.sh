@@ -128,3 +128,24 @@ HOME="$TMPDIR/home" \
 CODEX_SUPERVISOR_ROOT="$TMPDIR/supervisor-root" \
   bash -c 'source "$1"; SESSION="custom-session"; refresh_session_paths; [[ "$SUPERVISOR_CODEX_HOME" == "$CODEX_SUPERVISOR_ROOT/codex-home/custom-session" ]] && [[ "$SUPERVISOR_CACHE_ROOT" == "$CODEX_SUPERVISOR_ROOT/cache/custom-session" ]] && [[ "$SUPERVISOR_TMP_ROOT" == "$CODEX_SUPERVISOR_ROOT/tmp/custom-session" ]] && [[ "$LOG_FILE" == "$CODEX_SUPERVISOR_ROOT/logs/custom-session.log" ]] && [[ "$STATE_FILE" == "$CODEX_SUPERVISOR_ROOT/run/custom-session.state" ]]' \
   _ "$SCRIPT"
+
+OVERSIZED_CODEX_HOME="$TMPDIR/oversized-codex"
+OVERSIZED_SUP_HOME="$TMPDIR/oversized-supervisor-codex"
+mkdir -p "$OVERSIZED_CODEX_HOME"
+python3 - <<PY
+from pathlib import Path
+Path("$OVERSIZED_CODEX_HOME/config.toml").write_text("model = \"gpt-5.5\"\n" + "x" * 2_000_001)
+PY
+if CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_HOME="$OVERSIZED_CODEX_HOME" \
+  CODEX_SUPERVISOR_CODEX_HOME="$OVERSIZED_SUP_HOME" \
+  CODEX_SUPERVISOR_ROOT="$TMPDIR/oversized-supervisor-root" \
+  bash -c 'cd "$2"; source "$1"; prepare_codex_home' _ "$SCRIPT" "$ROOT" >/tmp/csup-oversized-config.out 2>&1; then
+  echo "oversized copied config should fail closed instead of being edited or clobbered" >&2
+  exit 1
+fi
+grep -q 'refusing to edit oversized codex config' /tmp/csup-oversized-config.out || {
+  echo "missing oversized config refusal" >&2
+  cat /tmp/csup-oversized-config.out >&2
+  exit 1
+}
