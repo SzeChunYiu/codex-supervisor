@@ -1771,7 +1771,7 @@ cmd_factory_run() {
     scheduler=$(host_scheduler "$h")
     if [[ "$scheduler" == "slurm" ]]; then
       fixed="${CSUP_STATION_FIXED_PANES:-1}"
-      [[ "$fixed" =~ ^[0-9]+$ ]] || fixed=3
+      [[ "$fixed" =~ ^[0-9]+$ ]] || fixed=1
       cap=$(slurm_slot_capacity_panes "$h")
       safe_workers=$((cap - fixed))
       (( safe_workers < 1 )) && { printf 'HOLD %s/%s reason=no_safe_worker_capacity cap=%s fixed=%s\n' "$project_name" "$h" "$cap" "$fixed"; continue; }
