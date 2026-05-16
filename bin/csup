@@ -1331,7 +1331,10 @@ cmd_start() {
   local project="" target_host="" fallback=0 _slurm_started=0
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "start: --host requires a name"; return 2; }
+        ;;
       --fallback) fallback=1 ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) project="$1" ;;
@@ -2559,7 +2562,11 @@ cmd_stop() {
   local project="" target_host=""
   while (( $# > 0 )); do
     case "$1" in
-      --host=*) target_host="${1#--host=}" ;;
+      --host=*)
+        target_host="${1#--host=}"
+        [[ -n "$target_host" ]] || { err "stop: --host requires a name"; return 2; }
+        ;;
+      --*) err "unknown flag: $1"; return 2 ;;
       *) project="$1" ;;
     esac
     shift
