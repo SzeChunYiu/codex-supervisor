@@ -30,7 +30,7 @@ cat > "$TMPDIR/bin/ssh" <<'SSH'
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
 case "$*" in
   *"-O check"*) exit 255 ;;
-  *"squeue"*"csup-station"*) echo "111|cx01"; exit 0 ;;
+  *"squeue"*"csup-station"*) echo "111|${FAKE_SLURM_NODE:-cx01}"; exit 0 ;;
   *" -N "*|"-N "*) sleep 60 ;;
 esac
 exit 0
@@ -62,6 +62,23 @@ PATH="$TMPDIR/bin:$PATH" \
 grep -q 'tunnel already up: cx01' "$TMPDIR/second.out"
 second_launches=$(grep -c -- '-N' "$TMPDIR/ssh.log" || true)
 [[ "$second_launches" == "1" ]] || { cat "$TMPDIR/ssh.log" >&2; exit 1; }
+
+FAKE_SLURM_NODE='cx[01' \
+HOME="$TMPDIR/home" \
+CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+CSUP_TUNNEL_STATE="$TMPDIR/home/.config/csup/unsafe-tunnels.tsv" \
+PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" tunnel > "$TMPDIR/unsafe-node.out" 2>&1
+
+grep -q 'skipping unsafe SLURM node name for tunnel: cx\[01' "$TMPDIR/unsafe-node.out" || {
+  printf 'expected unsafe node name warning, got:\n%s\n' "$(cat "$TMPDIR/unsafe-node.out")" >&2
+  exit 1
+}
+[[ ! -s "$TMPDIR/home/.config/csup/unsafe-tunnels.tsv" ]] || {
+  printf 'unsafe node names must not be written to tunnel state:\n' >&2
+  cat "$TMPDIR/home/.config/csup/unsafe-tunnels.tsv" >&2
+  exit 1
+}
 
 bad_port_help="$(
   HOME="$TMPDIR/home" \

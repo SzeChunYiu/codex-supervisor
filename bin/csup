@@ -2520,11 +2520,26 @@ _tunnel_pid_alive() {
   [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
 }
 
+_tunnel_valid_node() {
+  local node="$1"
+  [[ "$node" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+_tunnel_lookup_port_in_file() {
+  local file="$1" node="$2"
+  awk -F '\t' -v node="$node" '$1 == node { print $3; exit }' "$file" 2>/dev/null
+}
+
+_tunnel_node_in_file() {
+  local file="$1" node="$2"
+  awk -F '\t' -v node="$node" '$1 == node { found=1; exit } END { exit found ? 0 : 1 }' "$file" 2>/dev/null
+}
+
 _tunnel_port_for_node() {
   # Returns existing port for node, or picks next free one
   local node="$1"
   local existing
-  existing=$(grep -m1 "^${node}	" "$TUNNEL_STATE" 2>/dev/null | cut -f3)
+  existing=$(_tunnel_lookup_port_in_file "$TUNNEL_STATE" "$node")
   if [[ "$existing" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "$existing"
     return
@@ -2593,8 +2608,12 @@ cmd_tunnel() {
       [[ -z "$ssh_target" || "$ssh_target" == "local" ]] && continue
       local node; node=$(slurm_active_job_node "$h" 2>/dev/null) || true
       [[ -z "$node" ]] && continue
+      if ! _tunnel_valid_node "$node"; then
+        warn "skipping unsafe SLURM node name for tunnel: $node"
+        continue
+      fi
       # Deduplicate by node
-      grep -q "^${node}	" "$nodes_tmp" 2>/dev/null || printf '%s\t%s\n' "$node" "$ssh_target" >> "$nodes_tmp"
+      _tunnel_node_in_file "$nodes_tmp" "$node" || printf '%s\t%s\n' "$node" "$ssh_target" >> "$nodes_tmp"
     done < <(toml_sections "$cfg" "hosts.")
   done < <(list_projects)
 
@@ -2623,7 +2642,7 @@ cmd_tunnel() {
   while IFS=$'\t' read -r node ssh_target; do
     [[ -z "$node" ]] && continue
     # Already alive?
-    local existing_port; existing_port=$(grep -m1 "^${node}	" "$alive_tmp" 2>/dev/null | cut -f3)
+    local existing_port; existing_port=$(_tunnel_lookup_port_in_file "$alive_tmp" "$node")
     if [[ -n "$existing_port" ]]; then
       (( auto )) || printf 'tunnel already up: %s → http://127.0.0.1:%s\n' "$node" "$existing_port"
       continue
