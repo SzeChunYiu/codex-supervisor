@@ -65,4 +65,14 @@ if [[ "$forks" != "1" ]]; then
   exit 1
 fi
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_ROOT="$TMPDIR/root-lock" \
+CODEX_SUPERVISOR_NODE_START_LOCK_SECS=bad \
+bash -c '
+  source "$1"
+  log() { :; }
+  acquire_node_start_lock
+  release_node_start_lock
+' _ "$SCRIPT"
+
 echo "ok: concurrent start calls serialize daemon fork"

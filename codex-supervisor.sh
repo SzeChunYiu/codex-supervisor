@@ -3022,15 +3022,17 @@ node_start_lock_path() {
 # lock can't be acquired in that window the caller proceeds anyway (better
 # overlapping startup than a deadlock).
 acquire_node_start_lock() {
-  (( NODE_START_LOCK_SECS <= 0 )) && return 0
+  local lock_secs
+  lock_secs=$(nonnegative_int_or_default "$NODE_START_LOCK_SECS" 300)
+  (( lock_secs <= 0 )) && return 0
   command -v flock >/dev/null 2>&1 || return 0
   local lock; lock=$(node_start_lock_path)
   exec 9>"$lock" 2>/dev/null || return 0
-  if flock -w "$NODE_START_LOCK_SECS" 9; then
+  if flock -w "$lock_secs" 9; then
     log "node start lock acquired: $lock"
     return 0
   fi
-  log "WARNING: could not acquire node start lock within ${NODE_START_LOCK_SECS}s; proceeding without serialisation"
+  log "WARNING: could not acquire node start lock within ${lock_secs}s; proceeding without serialisation"
   return 0
 }
 
