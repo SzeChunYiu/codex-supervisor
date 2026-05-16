@@ -149,9 +149,9 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
-MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, min_value=1)
-MAX_PROJECT_SCAN_ENTRIES = env_int("CSUP_DASHBOARD_MAX_PROJECT_SCAN_ENTRIES", 500, min_value=1)
-MAX_STATE_FILES = env_int("CSUP_DASHBOARD_MAX_STATE_FILES", 200, min_value=1)
+MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, min_value=1, max_value=4096)
+MAX_PROJECT_SCAN_ENTRIES = env_int("CSUP_DASHBOARD_MAX_PROJECT_SCAN_ENTRIES", 500, min_value=1, max_value=10000)
+MAX_STATE_FILES = env_int("CSUP_DASHBOARD_MAX_STATE_FILES", 200, min_value=1, max_value=5000)
 
 def bounded_int(value: object, default: int, *, min_value: int, max_value: int | None = None) -> int:
     try:
@@ -191,17 +191,17 @@ SUPERVISOR_CODEX_HOME_ROOTS = [
     pathlib.Path.home() / ".codex-supervisor/codex-home",
     pathlib.Path("/Volumes/MyDrive/codex-supervisor/codex-home"),
 ]
-TOKEN_SCAN_MAX_FILES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_FILES", 300, min_value=1)
-TOKEN_SCAN_MTIME_DAYS = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MTIME_DAYS", 14, min_value=0)
-TOKEN_SCAN_MAX_BYTES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_BYTES", 262144, min_value=1)
-TOKEN_SCAN_MAX_WALK_ENTRIES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_WALK_ENTRIES", 2000, min_value=1)
+TOKEN_SCAN_MAX_FILES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_FILES", 300, min_value=1, max_value=5000)
+TOKEN_SCAN_MTIME_DAYS = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MTIME_DAYS", 14, min_value=0, max_value=3650)
+TOKEN_SCAN_MAX_BYTES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_BYTES", 262144, min_value=1, max_value=10_000_000)
+TOKEN_SCAN_MAX_WALK_ENTRIES = env_int("CSUP_DASHBOARD_TOKEN_SCAN_MAX_WALK_ENTRIES", 2000, min_value=1, max_value=100_000)
 TOKEN_SCAN_CACHE_SECS = env_float("CSUP_DASHBOARD_TOKEN_SCAN_CACHE_SECS", 10.0, min_value=0.0)
-TOKEN_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_MAX_EVENTS", 72, min_value=1)
-TOKEN_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_EVENTS_PER_FILE", 8, min_value=1)
-TOOL_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOOL_HISTORY_MAX_EVENTS", 144, min_value=1)
-TOOL_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOOL_HISTORY_EVENTS_PER_FILE", 24, min_value=1)
-PROCESS_TOP_LIMIT = env_int("CSUP_DASHBOARD_PROCESS_TOP_LIMIT", 8, min_value=1)
-SYSTEM_HISTORY_MAX_POINTS = env_int("CSUP_DASHBOARD_SYSTEM_HISTORY_MAX_POINTS", 180, min_value=1)
+TOKEN_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_MAX_EVENTS", 72, min_value=1, max_value=10_000)
+TOKEN_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOKEN_HISTORY_EVENTS_PER_FILE", 8, min_value=1, max_value=1000)
+TOOL_HISTORY_MAX_EVENTS = env_int("CSUP_DASHBOARD_TOOL_HISTORY_MAX_EVENTS", 144, min_value=1, max_value=10_000)
+TOOL_HISTORY_EVENTS_PER_FILE = env_int("CSUP_DASHBOARD_TOOL_HISTORY_EVENTS_PER_FILE", 24, min_value=1, max_value=1000)
+PROCESS_TOP_LIMIT = env_int("CSUP_DASHBOARD_PROCESS_TOP_LIMIT", 8, min_value=1, max_value=100)
+SYSTEM_HISTORY_MAX_POINTS = env_int("CSUP_DASHBOARD_SYSTEM_HISTORY_MAX_POINTS", 180, min_value=1, max_value=10_000)
 TOKEN_USAGE_KEYS = (
     "input_tokens",
     "cached_input_tokens",
@@ -247,10 +247,10 @@ INSTANCE_MONITOR_CACHE: dict = {}
 PROMPT_LANE_CACHE: dict = {}
 PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
 REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0)
-MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024)
-MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
-MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024)
-MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024)
+MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024, max_value=20_000_000)
+MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024, max_value=10_000_000)
+MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024, max_value=10_000_000)
+MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024, max_value=200_000_000)
 MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1, max_value=4096)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
@@ -262,7 +262,7 @@ REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR
 REMOTE_CAPTURE_STICKY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_STICKY_SECS", 90.0, min_value=0.0)
 REMOTE_INITIAL_CAPTURE_ASYNC = env_bool("CSUP_DASHBOARD_REMOTE_INITIAL_CAPTURE_ASYNC", True)
 PROMPT_LANE_CACHE_SECS = env_float("CSUP_DASHBOARD_PROMPT_LANE_CACHE_SECS", 60.0, min_value=0.0)
-STATE_CAPTURE_MIN_LINES = env_int("CSUP_DASHBOARD_STATE_CAPTURE_MIN_LINES", 80, min_value=1)
+STATE_CAPTURE_MIN_LINES = env_int("CSUP_DASHBOARD_STATE_CAPTURE_MIN_LINES", 80, min_value=1, max_value=1000)
 INCLUDE_PROMPTLESS_INSTANCES = env_bool("CSUP_DASHBOARD_INCLUDE_PROMPTLESS", False)
 MONITORLESS_ROLES = {"ci-runners", "ci-runner", "service", "services"}
 SYSTEM_HEALTH_CACHE: dict = {"key": None, "updated_at": 0, "value": None}
@@ -1891,7 +1891,7 @@ def cached_streaming_sessions_for_base(ssh_target: str, job_id: str, base: str) 
 
 
 def station_candidate_sessions(base: str) -> list[str]:
-    max_station_guess = env_int("CSUP_DASHBOARD_STATION_GUESS_MAX", 4, min_value=1)
+    max_station_guess = env_int("CSUP_DASHBOARD_STATION_GUESS_MAX", 4, min_value=1, max_value=100)
     return [base] + [f"{base}-station-{idx}" for idx in range(1, max_station_guess + 1)]
 
 
