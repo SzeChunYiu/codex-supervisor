@@ -84,8 +84,13 @@ ssh_timeout_secs() {
 shell_run_timeout() {
   local timeout="$1" cmd="$2"
   python3 - "$timeout" "$cmd" <<'PY'
-import os, signal, subprocess, sys
-timeout = float(sys.argv[1])
+import math, os, signal, subprocess, sys
+try:
+    timeout = float(sys.argv[1])
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = 8.0
+except (TypeError, ValueError):
+    timeout = 8.0
 cmd = sys.argv[2]
 try:
     p = subprocess.Popen(
@@ -120,8 +125,13 @@ PY
 shell_capture_timeout() {
   local timeout="$1" cmd="$2"
   python3 - "$timeout" "$cmd" <<'PY'
-import os, signal, subprocess, sys
-timeout = float(sys.argv[1])
+import math, os, signal, subprocess, sys
+try:
+    timeout = float(sys.argv[1])
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = 8.0
+except (TypeError, ValueError):
+    timeout = 8.0
 cmd = sys.argv[2]
 try:
     p = subprocess.Popen(
@@ -955,12 +965,21 @@ slurm_remote_load_room() {
   env_cmd=$(host_remote_env "$host")
   out=$(ssh_capture_timeout "$ssh_target" "env -u LD_LIBRARY_PATH srun --jobid=$(shell_quote "$job") --overlap bash -lc $(shell_quote "$env_cmd; python3 - <<'PY'
 import math, os
-limit = float(os.environ.get('CODEX_SUPERVISOR_MAX_LOAD_PER_CPU', '0') or 0)
+raw_limit = os.environ.get('CODEX_SUPERVISOR_MAX_LOAD_PER_CPU')
+try:
+    limit = float(raw_limit) if raw_limit not in (None, '') else 0.0
+    if not math.isfinite(limit) or limit < 0:
+        limit = 1.25
+except (TypeError, ValueError):
+    limit = 1.25
 if limit <= 0:
     print(9999)
 else:
-    load = os.getloadavg()[0]
-    cpus = os.cpu_count() or 1
+    try:
+        load = max(0.0, os.getloadavg()[0])
+    except (AttributeError, OSError):
+        load = 0.0
+    cpus = max(1, os.cpu_count() or 1)
     print(max(0, int(math.floor(cpus * limit - load))))
 PY")" 2>/dev/null | tail -1 || true)
   [[ "$out" =~ ^[0-9]+$ ]] || out=9999
@@ -2279,6 +2298,7 @@ cmd_steward() {
   python3 - "$dashboard_url" "$target_project" "$sample_secs" <<'PY'
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -2286,7 +2306,12 @@ import urllib.parse
 import urllib.request
 
 base, target_project, sample_secs_raw = sys.argv[1:4]
-sample_secs = float(sample_secs_raw or 0)
+try:
+    sample_secs = float(sample_secs_raw or 0)
+    if not math.isfinite(sample_secs) or sample_secs < 0:
+        sample_secs = 0.0
+except (TypeError, ValueError):
+    sample_secs = 0.0
 
 def project_slug(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name or "project").lower()).strip("-") or "project"
