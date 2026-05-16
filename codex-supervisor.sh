@@ -532,8 +532,16 @@ nonnegative_int_or_default() {
 }
 
 nonnegative_decimal_or_default() {
-  local raw="${1:-}" default="${2:-0}"
-  if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  local raw="${1:-}" default="${2:-0}" max="${3:-}"
+  if [[ "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]] && { [[ -z "$max" ]] || python3 - "$raw" "$max" <<'PY'
+import decimal
+import sys
+try:
+    raise SystemExit(0 if decimal.Decimal(sys.argv[1]) <= decimal.Decimal(sys.argv[2]) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+  }; then
     printf '%s\n' "$raw"
   else
     printf '%s\n' "$default"
@@ -3164,7 +3172,7 @@ ensure_start_resource_budget() {
   free_disk=$(free_gb_on_runtime_root)
   cpus=$(cpu_count)
   load=$(load1)
-  max_load_per_cpu=$(nonnegative_decimal_or_default "$MAX_LOAD_PER_CPU" 1.25)
+  max_load_per_cpu=$(nonnegative_decimal_or_default "$MAX_LOAD_PER_CPU" 1.25 100)
   load_room=$(cpu_load_headroom_panes "$cpus" "$load" "$max_load_per_cpu")
   min_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
   ram_per=$(nonnegative_int_or_default "$RAM_MB_PER_PANE" 600)
