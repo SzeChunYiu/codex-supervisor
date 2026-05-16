@@ -343,12 +343,24 @@ SUPERVISOR_LOG_MAX_MB="${CODEX_SUPERVISOR_LOG_MAX_MB:-50}"
 # Cleanup is project-scoped by default. Set CODEX_SUPERVISOR_GLOBAL_CLEANUP=1
 # (or pass cleanup --global) for old whole-machine sweeps.
 GLOBAL_CLEANUP="${CODEX_SUPERVISOR_GLOBAL_CLEANUP:-0}"
-PROJECTS_ROOT="${CODEX_SUPERVISOR_PROJECTS_ROOT:-$HOME/Desktop/projects}"
-TMP_SWEEP_ROOT="${CODEX_SUPERVISOR_TMP_SWEEP_ROOT:-/private/tmp}"
-SUPERPOWERS_WORKTREES_ROOT="${CODEX_SUPERVISOR_SUPERPOWERS_WORKTREES_ROOT:-$HOME/.config/superpowers/worktrees}"
-MYDRIVE_SUPERPOWERS_WORKTREES_ROOT="${CODEX_SUPERVISOR_MYDRIVE_SUPERPOWERS_WORKTREES_ROOT:-/Volumes/MyDrive/superpowers/worktrees}"
-ACTIONS_RUNNER_WORK_ROOT="${CODEX_SUPERVISOR_ACTIONS_RUNNER_WORK_ROOT:-/Volumes/MyDrive/actions-runner-work}"
-DIAGNOSTIC_MESSAGES_ROOT="${CODEX_SUPERVISOR_DIAGNOSTIC_MESSAGES_ROOT:-/private/var/log/DiagnosticMessages}"
+safe_root_env_path() {
+  local name="$1" default="$2" raw
+  raw="${!name:-}"
+  if [[ -z "$raw" || ${#raw} -gt 4096 ]]; then
+    printf '%s\n' "$default"
+    return 0
+  fi
+  case "$raw" in
+    /*) printf '%s\n' "$raw" ;;
+    *) printf '%s\n' "$default" ;;
+  esac
+}
+PROJECTS_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_PROJECTS_ROOT "$HOME/Desktop/projects")"
+TMP_SWEEP_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_TMP_SWEEP_ROOT /private/tmp)"
+SUPERPOWERS_WORKTREES_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_SUPERPOWERS_WORKTREES_ROOT "$HOME/.config/superpowers/worktrees")"
+MYDRIVE_SUPERPOWERS_WORKTREES_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_MYDRIVE_SUPERPOWERS_WORKTREES_ROOT /Volumes/MyDrive/superpowers/worktrees)"
+ACTIONS_RUNNER_WORK_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_ACTIONS_RUNNER_WORK_ROOT /Volumes/MyDrive/actions-runner-work)"
+DIAGNOSTIC_MESSAGES_ROOT="$(safe_root_env_path CODEX_SUPERVISOR_DIAGNOSTIC_MESSAGES_ROOT /private/var/log/DiagnosticMessages)"
 # Unified dashboard. `start` launches this once if it is not already healthy.
 # Default refresh is 0.2s so the browser sees livestream-like pane output.
 DASHBOARD_ENABLED="${CODEX_SUPERVISOR_DASHBOARD:-1}"
