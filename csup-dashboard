@@ -888,32 +888,38 @@ def env_float(name, default, min_value=None):
         return default
     return value
 
-def env_int(name, default, min_value=None):
+def env_int(name, default, min_value=None, max_value=None):
     try:
         value = int(os.environ.get(name, default))
     except (TypeError, ValueError, OverflowError):
         value = default
     if min_value is not None and value < min_value:
         return default
+    if max_value is not None and value > max_value:
+        return default
     return value
 
-def safe_int(value, default=0, min_value=0):
+def safe_int(value, default=0, min_value=0, max_value=None):
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
-    return parsed if parsed >= min_value else default
+    if parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
 
 POLL_FAST = env_float("CSUP_STREAMER_POLL_FAST", 0.1, 0.01)
 POLL_IDLE = env_float("CSUP_STREAMER_POLL_IDLE", 1.5, 0.01)
 IDLE_AFTER_SECS = env_float("CSUP_STREAMER_IDLE_AFTER", 3.0, 0.0)
 HEARTBEAT_SECS = env_float("CSUP_STREAMER_HEARTBEAT", 5.0, 0.1)
-CAP_LINES = env_int("CSUP_STREAMER_LINES", 200, 1)
-TARGET_W = env_int("CSUP_STREAMER_WIDTH", 160, 20)
-TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5)
-MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1)
+CAP_LINES = env_int("CSUP_STREAMER_LINES", 200, 1, 1000)
+TARGET_W = env_int("CSUP_STREAMER_WIDTH", 160, 20, 1000)
+TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5, 300)
+MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1, 4096)
 CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05)
-MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024)
+MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024, 10_000_000)
 
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
@@ -2926,12 +2932,16 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
         script = r'''
 import json, subprocess, sys, os, glob, stat, math, select, time
 session = sys.argv[1]
-def safe_int(value, default=0, min_value=0):
+def safe_int(value, default=0, min_value=0, max_value=None):
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
-    return parsed if parsed >= min_value else default
+    if parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
 def safe_float(value, default=0.0, min_value=0.0):
     try:
         parsed = float(value)
@@ -2942,9 +2952,9 @@ def safe_float(value, default=0.0, min_value=0.0):
     return parsed
 lines = safe_int(sys.argv[2], 1, 1)
 max_capture_panes = safe_int(sys.argv[4] if len(sys.argv) > 4 else 512, 512, 1)
-max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1)
+max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1, 4096)
 cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05)
-max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024)
+max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024, 10_000_000)
 def _read_process_limited(proc, *, timeout, max_bytes):
     assert proc.stdout is not None and proc.stderr is not None
     stdout_chunks = []
