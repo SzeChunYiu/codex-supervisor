@@ -55,6 +55,17 @@ grep -q 'model = "gpt-5.5"' "$SUP_CODEX_HOME/config.toml"
 grep -q '\[features\]' "$SUP_CODEX_HOME/config.toml"
 grep -q '\[projects."/tmp/example"\]' "$SUP_CODEX_HOME/config.toml"
 grep -Fq "[projects.\"$ROOT\"]" "$SUP_CODEX_HOME/config.toml"
+python3 - "$SCRIPT" <<'PY'
+import pathlib
+import re
+import sys
+text = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'trust_project_in_codex_config\(\) \{.*?python3 - "\$cfg" "\$project_dir" <<\'PY\'\n(.*?)\nPY', text, re.S)
+assert match, "trust_project_in_codex_config Python snippet missing"
+snippet = match.group(1)
+assert "read_text" not in snippet, "codex config trust edit must use bounded binary reads"
+assert "read(max_cfg_bytes + 1)" in snippet
+PY
 awk -v header="[projects.\"$ROOT\"]" '
   $0 == header { in_section=1; next }
   in_section && /^\[/ { exit 1 }
