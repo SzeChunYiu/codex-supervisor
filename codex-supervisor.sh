@@ -1005,6 +1005,16 @@ link_codex_home_item() {
   ln -s "$src" "$dst" 2>/dev/null || cp -R "$src" "$dst"
 }
 
+safe_codex_home_extra_items() {
+  local raw="$1" item
+  printf '%s\n' "$raw" | tr '[:space:]' '\n' | while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    [[ "$item" != /* && "$item" != *..* && "$item" != *\\* ]] || continue
+    [[ "$item" =~ ^[A-Za-z0-9._-][A-Za-z0-9._/-]{0,255}$ ]] || continue
+    printf '%s\n' "$item"
+  done
+}
+
 prepare_codex_home_for() {
   local dst_home="${1:-$SUPERVISOR_CODEX_HOME}"
   prepare_runtime_dirs || return 1
@@ -1054,9 +1064,9 @@ prepare_codex_home_for() {
       ;;
   esac
 
-  for item in $CODEX_HOME_EXTRA_ITEMS; do
+  while IFS= read -r item; do
     link_codex_home_item "$src_home/$item" "$dst_home/$item"
-  done
+  done < <(safe_codex_home_extra_items "$CODEX_HOME_EXTRA_ITEMS")
 }
 
 prepare_codex_home() {
