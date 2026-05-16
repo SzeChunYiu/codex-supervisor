@@ -44,6 +44,17 @@ cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/open.txt" <<'TASKS'
 /goal open task one
 /goal open task two
 TASKS
+cat > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/bad,lane.txt" <<'TASKS'
+/goal unsafe lane task one
+/goal unsafe lane task two
+/goal unsafe lane task three
+/goal unsafe lane task four
+/goal unsafe lane task five
+/goal unsafe lane task six
+/goal unsafe lane task seven
+/goal unsafe lane task eight
+/goal unsafe lane task nine
+TASKS
 : > "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"
 
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
