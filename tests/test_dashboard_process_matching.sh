@@ -25,7 +25,9 @@ match = re.search(r'dashboard_matching_pids_for_cmd\(\) \{.*?python3 - "\$match_
 assert match, "dashboard_matching_pids_for_cmd Python snippet missing"
 snippet = match.group(1)
 assert "subprocess.check_output" not in snippet
-assert "timeout=2.0" in snippet
+assert "subprocess.run(" not in snippet
+assert "subprocess.Popen" in snippet
+assert "select.select" in snippet
 assert "MAX_PS_OUTPUT_BYTES = 1_000_000" in snippet
 PY
 
