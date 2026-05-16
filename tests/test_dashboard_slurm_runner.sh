@@ -62,6 +62,15 @@ huge_capture = mod.run_stable(
 assert huge_capture.returncode == 124 and huge_capture.stderr == "output limit exceeded", huge_capture
 mod.MAX_RUN_STABLE_OUTPUT_BYTES = orig_max_run_stable
 
+source_text = path.read_text()
+remote_script = source_text.split("if host != me:", 1)[1].split("remote_text = r.stdout", 1)[0]
+assert "CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS" in remote_script
+assert "CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES" in remote_script
+assert "def run_capture(cmd):" in remote_script
+assert "subprocess.run(cmd, capture_output=True, text=True)" not in remote_script
+assert "subprocess.run(tx(" not in remote_script
+assert "timeout=cmd_timeout_secs" in remote_script
+
 mod.run_stable = fake_run_stable
 probe = mod.probe_host("lunarc", hosts, me="mac-mini")
 assert probe["reachable"] is True, probe
