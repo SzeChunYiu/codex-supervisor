@@ -247,6 +247,7 @@ REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS"
 MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024)
 MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
 MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024)
+MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -288,13 +289,19 @@ CACHE: dict = {
 }
 
 
-def file_sha256_prefix(path: pathlib.Path, *, chunk_bytes: int = 1024 * 1024) -> str:
+def file_sha256_prefix(path: pathlib.Path, *, chunk_bytes: int = 1024 * 1024,
+                       max_bytes: int | None = None) -> str:
     digest = hashlib.sha256()
+    total = 0
+    max_bytes = MAX_SOURCE_HASH_BYTES if max_bytes is None else max_bytes
     with path.open("rb") as f:
         while True:
             chunk = f.read(chunk_bytes)
             if not chunk:
                 break
+            total += len(chunk)
+            if max_bytes > 0 and total > max_bytes:
+                raise ValueError("dashboard source file too large to hash")
             digest.update(chunk)
     return digest.hexdigest()[:16]
 
@@ -309,7 +316,7 @@ def dashboard_source_info(path: pathlib.Path | None = None) -> dict:
             "size_bytes": stat.st_size,
             "sha256": file_sha256_prefix(path),
         }
-    except OSError as e:
+    except Exception as e:
         return {"path": str(path), "mtime": 0, "size_bytes": 0, "sha256": "", "error": str(e)[:160]}
 
 
