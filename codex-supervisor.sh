@@ -526,6 +526,15 @@ nonnegative_decimal_or_default() {
   fi
 }
 
+bool_int_or_default() {
+  local raw="${1:-}" default="${2:-0}"
+  case "$raw" in
+    1|true|TRUE|yes|YES|on|ON) printf '1\n' ;;
+    0|false|FALSE|no|NO|off|OFF) printf '0\n' ;;
+    *) printf '%s\n' "$default" ;;
+  esac
+}
+
 signed_int_or_default() {
   local raw="${1:-}" default="${2:-0}"
   if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
@@ -1425,7 +1434,8 @@ prompt_references_md() {
 }
 
 validate_prompt_line() {
-  local line="$1" source_name="${2:-prompts}" line_no="${3:-?}" words
+  local line="$1" source_name="${2:-prompts}" line_no="${3:-?}" words prompt_max_words
+  prompt_max_words=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50)
 
   if ! [[ "$line" =~ ^/goal([[:space:]]|$) ]]; then
     err "$source_name line $line_no: prompt must start with /goal"
@@ -1433,8 +1443,8 @@ validate_prompt_line() {
   fi
 
   words=$(prompt_word_count "$line")
-  if (( PROMPT_MAX_WORDS > 0 && words > PROMPT_MAX_WORDS )); then
-    err "$source_name line $line_no: prompt has ${words} words; prompts must be ${PROMPT_MAX_WORDS} words or fewer"
+  if (( prompt_max_words > 0 && words > prompt_max_words )); then
+    err "$source_name line $line_no: prompt has ${words} words; prompts must be ${prompt_max_words} words or fewer"
     return 1
   fi
 
@@ -1602,6 +1612,19 @@ apply_prompt_runtime_state() {
     v=$(state_value "DYNAMIC_WORKERS")
     [[ -n "$v" ]] && DYNAMIC_WORKERS="$v"
   fi
+}
+
+sanitize_prompt_runtime_config() {
+  GENERATED_ONLY=$(bool_int_or_default "$GENERATED_ONLY" 0)
+  CEO_ENABLED=$(bool_int_or_default "$CEO_ENABLED" 1)
+  MANAGER_ENABLED=$(bool_int_or_default "$MANAGER_ENABLED" 0)
+  REVIEWER_ENABLED=$(bool_int_or_default "$REVIEWER_ENABLED" 0)
+  DEBUGGER_ENABLED=$(bool_int_or_default "$DEBUGGER_ENABLED" 0)
+  VALIDATOR_ENABLED=$(bool_int_or_default "$VALIDATOR_ENABLED" 0)
+  PLANNER_ENABLED="$VALIDATOR_ENABLED"
+  DYNAMIC_WORKERS=$(nonnegative_int_or_default "$DYNAMIC_WORKERS" 0)
+  PROMPT_MAX_WORDS=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50)
+  MAX_PANES=$(nonnegative_int_or_default "$MAX_PANES" 8)
 }
 
 # Load prompts and lane labels from the prompts file.
@@ -1788,6 +1811,7 @@ ensure_dynamic_worker_prompts() {
 load_prompts() {
   resolve_prompts_file
   apply_prompt_runtime_state
+  sanitize_prompt_runtime_config
   if [[ -z "$PROMPTS_FILE" || ! -f "$PROMPTS_FILE" ]]; then
     if truthy "$GENERATED_ONLY"; then
       PROMPTS=(); LANE_LABELS=()
