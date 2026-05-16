@@ -40,6 +40,9 @@ TASKS
 cat > "$TMPDIR/home/Desktop/projects/proj-open/codex-tasks/blockers.txt" <<'TASKS'
 /goal resolve shared blocker
 TASKS
+cat > "$TMPDIR/home/Desktop/projects/proj-open/escape.txt" <<'TASKS'
+/goal escaped task outside tasks dir
+TASKS
 
 cat > "$TMPDIR/bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
@@ -73,6 +76,7 @@ dry_run="$(
   CSUP_GOVERNOR_FREE_DISK_GB=100 \
   CSUP_GOVERNOR_LOAD1=0 \
   CSUP_GOVERNOR_CPU_COUNT=10 \
+  CSUP_DYNAMIC_QUEUE_LANES="../escape blockers open worker workers dynamic" \
   PATH="$TMPDIR/bin:$PATH" \
   "$CSUP" govern --dry-run --project=proj-open
 )"
@@ -90,6 +94,7 @@ CSUP_GOVERNOR_FREE_RAM_MB=16000 \
 CSUP_GOVERNOR_FREE_DISK_GB=100 \
 CSUP_GOVERNOR_LOAD1=0 \
 CSUP_GOVERNOR_CPU_COUNT=10 \
+CSUP_DYNAMIC_QUEUE_LANES="../escape blockers open worker workers dynamic" \
 PATH="$TMPDIR/bin:$PATH" \
   "$CSUP" govern --apply --project=proj-open >/tmp/csup-dynamic-apply.out
 

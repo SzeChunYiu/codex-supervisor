@@ -1125,24 +1125,33 @@ is_safe_lane_token() {
   [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]]
 }
 
+safe_dynamic_queue_tokens() {
+  local raw="${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}" token
+  printf '%s\n' "$raw" | tr '[:space:]' '\n' | while IFS= read -r token; do
+    [[ -n "$token" ]] || continue
+    is_safe_lane_token "$token" || continue
+    printf '%s\n' "$token"
+  done
+}
+
 is_dynamic_queue_lane() {
   local lane="$1" token
-  for token in ${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}; do
+  while IFS= read -r token; do
     [[ "$lane" == "$token" ]] && return 0
-  done
+  done < <(safe_dynamic_queue_tokens)
   return 1
 }
 
 dynamic_queue_goal_count() {
   local tasks_dir="$1" token file count total=0
   [[ -n "$tasks_dir" && -d "$tasks_dir" ]] || { echo 0; return; }
-  for token in ${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}; do
+  while IFS= read -r token; do
     file="$tasks_dir/$token.txt"
     [[ -f "$file" ]] || continue
     count=$(grep -cE '^/goal([[:space:]]|$)' "$file" 2>/dev/null || true)
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     total=$((total + count))
-  done
+  done < <(safe_dynamic_queue_tokens)
   echo "$total"
 }
 

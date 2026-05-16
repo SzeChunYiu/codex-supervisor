@@ -1685,6 +1685,24 @@ safe_lane_token() {
   [[ "$label" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$label" != *..* ]]
 }
 
+safe_queue_tokens() {
+  local raw="$1" token
+  printf '%s\n' "$raw" | tr '[:space:]' '\n' | while IFS= read -r token; do
+    [[ -n "$token" ]] || continue
+    safe_lane_token "$token" || continue
+    printf '%s\n' "$token"
+  done
+}
+
+queue_token_lc_in_list() {
+  local needle_lc="$1" raw="$2" token token_lc
+  while IFS= read -r token; do
+    token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
+    [[ "$needle_lc" == "$token_lc" ]] && return 0
+  done < <(safe_queue_tokens "$raw")
+  return 1
+}
+
 # Per-session state file remembers the prompts file path the supervisor was
 # started with, so subsequent `status` / `send` / `restart` etc. don't have
 # to be invoked from the project dir or with the env var set.
@@ -2959,22 +2977,18 @@ pop_next_task() {
   lane_lc=$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')
 
   if lane_is_dynamic_worker "$lane"; then
-    for token in $BLOCKER_QUEUE_LANES; do
-      [[ -n "$token" ]] || continue
+    while IFS= read -r token; do
       token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
       if pop_next_task_file "$TASKS_DIR/${token_lc}.txt"; then return 0; fi
-    done
+    done < <(safe_queue_tokens "$BLOCKER_QUEUE_LANES")
     for file in "$TASKS_DIR/${lane_lc}.txt" "$TASKS_DIR/${lane}.txt"; do
       if pop_next_task_file "$file"; then return 0; fi
     done
-    for token in $DYNAMIC_QUEUE_LANES; do
-      [[ -n "$token" ]] || continue
+    while IFS= read -r token; do
       token_lc=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')
-      for blocker_token in $BLOCKER_QUEUE_LANES; do
-        [[ "$token_lc" == "$(printf '%s' "$blocker_token" | tr '[:upper:]' '[:lower:]')" ]] && continue 2
-      done
+      queue_token_lc_in_list "$token_lc" "$BLOCKER_QUEUE_LANES" && continue
       if pop_next_task_file "$TASKS_DIR/${token_lc}.txt"; then return 0; fi
-    done
+    done < <(safe_queue_tokens "$DYNAMIC_QUEUE_LANES")
     return 1
   fi
 
