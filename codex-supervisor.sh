@@ -1077,6 +1077,7 @@ import sys
 import urllib.request
 
 MAX_HTTP_BYTES = 1_000_000
+MAX_SOURCE_HASH_BYTES = int(os.environ.get("CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES", "50000000"))
 
 def read_json_response(response):
     raw = response.read(MAX_HTTP_BYTES + 1)
@@ -1094,11 +1095,15 @@ except (TypeError, ValueError):
 expected_cmd = os.path.realpath(sys.argv[3])
 def file_sha256_prefix(path):
     digest = hashlib.sha256()
+    total = 0
     with open(path, "rb") as f:
         while True:
             chunk = f.read(1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if total > MAX_SOURCE_HASH_BYTES:
+                raise ValueError("dashboard source file too large to hash")
             digest.update(chunk)
     return digest.hexdigest()[:16]
 try:

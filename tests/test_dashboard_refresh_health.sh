@@ -161,10 +161,10 @@ with QuietServer(("127.0.0.1", 0), BrokenClientHandler) as srv:
 assert not srv.errors, srv.errors
 
 
-def dashboard_ok(payload, desired="0.5"):
-    return dashboard_ok_body(json.dumps(payload).encode(), desired=desired)
+def dashboard_ok(payload, desired="0.5", cmd=dashboard_path, extra_env=None):
+    return dashboard_ok_body(json.dumps(payload).encode(), desired=desired, cmd=cmd, extra_env=extra_env)
 
-def dashboard_ok_body(body, desired="0.5"):
+def dashboard_ok_body(body, desired="0.5", cmd=dashboard_path, extra_env=None):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             _ = self.request.recv(4096)
@@ -185,8 +185,10 @@ def dashboard_ok_body(body, desired="0.5"):
             "CODEX_SUPERVISOR_TEST_SOURCE": "1",
             "CODEX_SUPERVISOR_DASHBOARD_PORT": port,
             "CODEX_SUPERVISOR_DASHBOARD_REFRESH": desired,
-            "CODEX_SUPERVISOR_DASHBOARD_CMD": str(dashboard_path),
+            "CODEX_SUPERVISOR_DASHBOARD_CMD": str(cmd),
         })
+        if extra_env:
+            env.update(extra_env)
         rc = subprocess.run(
             ["bash", "-c", f"source {script}; dashboard_http_ok"],
             env=env,
@@ -204,10 +206,14 @@ assert "dashboard refresh response too large" in script_text, "manual refresh re
 assert "def read_json_response" in script_text, "dashboard health JSON reads should share a bounded helper"
 assert 'hashlib.sha256(open(expected_cmd, "rb").read())' not in script_text, "dashboard source hash must stream file chunks"
 assert "def file_sha256_prefix" in script_text, "dashboard source hash helper should stream chunks"
+assert "CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES" in script_text, "dashboard source hash should have a safety cap"
+assert "dashboard source file too large to hash" in script_text, "oversized dashboard source hashes should fail closed"
 
 dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")
+large_base = {"status": "ok", "panes": 1, "refresh_interval_secs": 0.5, "source": {"path": str(large_source), "sha256": large_info["sha256"]}}
+assert not dashboard_ok(large_base, cmd=large_source, extra_env={"CODEX_SUPERVISOR_DASHBOARD_HASH_MAX_BYTES": "1024"}), "oversized dashboard source hash should fail closed"
 oversized_body = json.dumps({**base, "refresh_interval_secs": 0.2}).encode() + (b" " * 1_000_001)
 assert not dashboard_ok_body(oversized_body, desired="0.2"), "oversized health response should fail closed"
 assert not dashboard_ok({**base, "refresh_interval_secs": 0.5}, desired="0.2"), "0.5s dashboard is too slow for requested livestream cadence"
