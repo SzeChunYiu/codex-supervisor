@@ -163,6 +163,14 @@ def bounded_float(value: object, default: float, *, min_value: float) -> float:
     return parsed
 
 
+def cache_timestamp(value: object, default: float = 0.0) -> float:
+    return bounded_float(value, default, min_value=0.0)
+
+
+def cache_age(now: float, value: object) -> float:
+    return max(0.0, now - cache_timestamp(value))
+
+
 REMOTE_DISK_TIMEOUT = env_float("CSUP_DASHBOARD_REMOTE_DISK_TIMEOUT_SECS", 4.0, min_value=0.1)
 DEFAULT_CODEX_SESSIONS_DIR = pathlib.Path.home() / ".codex/sessions"
 CODEX_SESSIONS_DIR = pathlib.Path(os.environ.get("CSUP_DASHBOARD_CODEX_SESSIONS_DIR", DEFAULT_CODEX_SESSIONS_DIR))
@@ -412,7 +420,7 @@ def merge_remote_project_hosts(local_hosts: dict) -> dict:
         cached: dict | None = None
         with REMOTE_PROJECT_TOML_CACHE_LOCK:
             entry = REMOTE_PROJECT_TOML_CACHE.get(cache_key)
-            if entry and now - float(entry.get("ts", 0)) < REMOTE_PROJECT_TOML_CACHE_SECS:
+            if entry and cache_age(now, entry.get("ts")) < REMOTE_PROJECT_TOML_CACHE_SECS:
                 cached = entry
         remote_hosts: dict = {}
         if cached:
@@ -1043,12 +1051,14 @@ class StreamingConnection:
                 now = time.time()
                 # Heartbeat: streamer is alive but nothing changed.
                 if "hb" in data and "sessions" not in data:
-                    self._last_heartbeat = float(data.get("hb") or now)
+                    self._last_heartbeat = cache_timestamp(data.get("hb"), now)
                     continue
                 full = bool(data.get("full"))
                 broadcast = False
                 with STREAMING_CACHE_LOCK:
-                    for sess in data.get("sessions", []):
+                    for sess in data.get("sessions", []) if isinstance(data.get("sessions", []), list) else []:
+                        if not isinstance(sess, dict):
+                            continue
                         sess_name = sess.get("session", "")
                         key = (self.cache_key, sess_name)
                         # Whole-session removal.
@@ -1059,25 +1069,35 @@ class StreamingConnection:
                         existing = STREAMING_CACHE.get(key) or {"panes": [], "ts": 0.0}
                         if full:
                             STREAMING_CACHE[key] = {
-                                "panes": sess.get("panes", []),
+                                "panes": sess.get("panes", []) if isinstance(sess.get("panes", []), list) else [],
                                 "monitor": sess.get("monitor") or {},
-                                "ts": float(sess.get("ts") or now),
+                                "ts": cache_timestamp(sess.get("ts"), now),
                             }
                             broadcast = True
                             continue
                         # Delta path: merge changed panes into existing list,
                         # keyed by pane index. Drop any indices in "drop".
-                        cur = {p["index"]: p for p in existing.get("panes", [])}
-                        for p in sess.get("panes", []):
-                            cur[p["index"]] = p
+                        cur = {
+                            bounded_int(p.get("index"), -1, min_value=0): p
+                            for p in existing.get("panes", [])
+                            if isinstance(p, dict)
+                        }
+                        cur.pop(-1, None)
+                        for p in sess.get("panes", []) if isinstance(sess.get("panes", []), list) else []:
+                            if not isinstance(p, dict):
+                                continue
+                            idx = bounded_int(p.get("index"), -1, min_value=0)
+                            if idx < 0:
+                                continue
+                            cur[idx] = p
                             broadcast = True
                         for idx in sess.get("drop", []) or []:
-                            cur.pop(idx, None)
+                            cur.pop(bounded_int(idx, -1, min_value=0), None)
                             broadcast = True
                         STREAMING_CACHE[key] = {
-                            "panes": sorted(cur.values(), key=lambda x: x.get("index", 0)),
+                            "panes": sorted(cur.values(), key=lambda x: bounded_int(x.get("index"), 0, min_value=0)),
                             "monitor": sess.get("monitor") or existing.get("monitor") or {},
-                            "ts": float(sess.get("ts") or now),
+                            "ts": cache_timestamp(sess.get("ts"), now),
                         }
                 if broadcast:
                     _sse_broadcast_streaming_update()
@@ -1765,7 +1785,7 @@ def parse_remote_lanes_cached(host: str, hosts: dict, me: str | None, prompts_pa
     with PROMPT_LANE_CACHE_LOCK:
         cached = PROMPT_LANE_CACHE.get(key)
         cached_value = dict((cached or {}).get("value") or {}) if cached else {}
-        fresh = bool(cached) and now - float(cached.get("updated_at") or 0) < PROMPT_LANE_CACHE_SECS
+        fresh = bool(cached) and cache_age(now, cached.get("updated_at")) < PROMPT_LANE_CACHE_SECS
     if fresh:
         return cached_value
     if async_ok:
@@ -1981,16 +2001,16 @@ def cached_probe_host(host: str, hosts: dict, me: str | None, now: float | None 
             cached = HOST_PROBE_CACHE.get(key)
             if cached:
                 value = dict(cached.get("value") or {})
-                if now - float(cached.get("updated_at", 0)) < HOST_PROBE_CACHE_SECS:
+                if cache_age(now, cached.get("updated_at")) < HOST_PROBE_CACHE_SECS:
                     return value
                 if not cached.get("refreshing"):
                     ssh_target = str(info.get("ssh", ""))
-                    cache_age = now - float(cached.get("updated_at", 0))
+                    cache_age_secs = cache_age(now, cached.get("updated_at"))
                     if (
                         ssh_target and
                         ssh_target_busy(ssh_target) and
                         value and
-                        cache_age < HOST_PROBE_DEFER_MAX_STALE_SECS
+                        cache_age_secs < HOST_PROBE_DEFER_MAX_STALE_SECS
                     ):
                         value["probe_stale"] = True
                         value["probe_deferred"] = True
@@ -2371,7 +2391,7 @@ def capture_cache_value_with_status(cached: dict, now: float) -> list[dict] | No
     cloned = clone_jsonable(value)
     last_error = str(cached.get("last_error") or "")
     if last_error:
-        age = max(0.0, now - float(cached.get("updated_at") or 0))
+        age = cache_age(now, cached.get("updated_at"))
         for pane in cloned:
             pane["capture_stale"] = True
             pane["capture_age_secs"] = round(age, 1)
@@ -2391,7 +2411,7 @@ def capture_cache_problem(host: str, session: str, lines: int,
         return {
             "error": str(cached.get("last_error") or "")[:160],
             "refreshing": bool(cached.get("refreshing")),
-            "last_attempt_age_secs": round(max(0.0, time.time() - float(cached.get("last_attempt_at") or 0)), 1),
+            "last_attempt_age_secs": round(cache_age(time.time(), cached.get("last_attempt_at")), 1),
         }
     return {}
 
@@ -2501,10 +2521,11 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
                     ]
                     if REMOTE_CAPTURE_CACHE_SECS > 0:
                         cache_key_s = capture_cache_key(host, session, tail_lines, lane_map)
+                        cached_ts = cache_timestamp(cached.get("ts"), time.time())
                         with INSTANCE_CAPTURE_CACHE_LOCK:
                             INSTANCE_CAPTURE_CACHE[cache_key_s] = {
-                                "updated_at": cached["ts"],
-                                "last_attempt_at": cached["ts"],
+                                "updated_at": cached_ts,
+                                "last_attempt_at": cached_ts,
                                 "last_error": "",
                                 "value": clone_jsonable(panes),
                                 "monitor": cached.get("monitor") or {},
@@ -2538,14 +2559,14 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
             cached = INSTANCE_CAPTURE_CACHE.get(cache_key)
             if cached:
                 value = capture_cache_value_with_status(cached, now)
-                if now - float(cached.get("updated_at", 0)) < REMOTE_CAPTURE_CACHE_SECS:
+                if cache_age(now, cached.get("updated_at")) < REMOTE_CAPTURE_CACHE_SECS:
                     return value
                 retry_secs = REMOTE_CAPTURE_CACHE_SECS
                 if cached.get("last_error"):
-                    last_attempt = float(cached.get("last_attempt_at") or cached.get("updated_at") or 0)
+                    last_attempt = cache_timestamp(cached.get("last_attempt_at") or cached.get("updated_at"))
                     retry_secs = max(REMOTE_CAPTURE_CACHE_SECS, REMOTE_CAPTURE_ERROR_RETRY_SECS)
                 else:
-                    last_attempt = float(cached.get("updated_at") or 0)
+                    last_attempt = cache_timestamp(cached.get("updated_at"))
                 if not cached.get("refreshing") and now - last_attempt >= retry_secs:
                     cached["refreshing"] = True
                     cached["last_attempt_at"] = now
@@ -2810,7 +2831,8 @@ print(json.dumps({"panes": out, "monitor": monitor}))
 def refresh_remote_capture_cache(host: str, hosts: dict, me: str | None, session: str,
                                  lines: int, lane_map: dict[int, str] | None = None,
                                  connection: dict | None = None) -> None:
-    cache_key = capture_cache_key(host, session, max(1, int(lines or DEFAULT_TAIL)), lane_map)
+    cache_lines = bounded_int(lines, DEFAULT_TAIL, min_value=1, max_value=200)
+    cache_key = capture_cache_key(host, session, cache_lines, lane_map)
     try:
         capture_session(host, hosts, me, session, lines, lane_map, connection, _bypass_cache=True)
     except Exception as e:
@@ -3086,7 +3108,11 @@ def collect_storage_health(hosts: dict | None = None, me: str | None = None,
         seen_remote_keys[key] = disk
         devices.append(disk)
 
-    usable = [d for d in devices if d.get("reachable", True) and not d.get("error") and int(d.get("total_bytes") or 0) > 0]
+    usable = [
+        d for d in devices
+        if d.get("reachable", True) and not d.get("error")
+        and bounded_int(d.get("total_bytes"), 0, min_value=0) > 0
+    ]
     # Multiple connected sessions can point at the same mounted filesystem
     # (for example two LUNARC allocations under /projects). Keep every device
     # row visible, but do not double-count identical volume readings in the
@@ -3094,13 +3120,13 @@ def collect_storage_health(hosts: dict | None = None, me: str | None = None,
     unique_volumes: dict[tuple, dict] = {}
     for d in usable:
         filesystem = str(d.get("filesystem") or "").strip()
-        total_bytes = int(d.get("total_bytes") or 0)
+        total_bytes = bounded_int(d.get("total_bytes"), 0, min_value=0)
         key = (filesystem, total_bytes) if filesystem else ("path", str(d.get("path") or ""), total_bytes)
         unique_volumes.setdefault(key, d)
     volume_values = list(unique_volumes.values())
-    total = sum(int(d.get("total_bytes") or 0) for d in volume_values)
-    free = sum(int(d.get("free_bytes") or 0) for d in volume_values)
-    used = sum(int(d.get("used_bytes") or 0) for d in volume_values)
+    total = sum(bounded_int(d.get("total_bytes"), 0, min_value=0) for d in volume_values)
+    free = sum(bounded_int(d.get("free_bytes"), 0, min_value=0) for d in volume_values)
+    used = sum(bounded_int(d.get("used_bytes"), 0, min_value=0) for d in volume_values)
     return {
         "devices": devices,
         "connected_count": len(usable),
@@ -3223,7 +3249,7 @@ def collect_system_health_cached(hosts: dict | None = None, me: str | None = Non
         cached = SYSTEM_HEALTH_CACHE.get("value")
         if (SYSTEM_HEALTH_CACHE_SECS > 0 and cached is not None and
                 SYSTEM_HEALTH_CACHE.get("key") == key and
-                now - float(SYSTEM_HEALTH_CACHE.get("updated_at") or 0) < SYSTEM_HEALTH_CACHE_SECS):
+                cache_age(now, SYSTEM_HEALTH_CACHE.get("updated_at")) < SYSTEM_HEALTH_CACHE_SECS):
             return json.loads(json.dumps(cached))
     value = collect_system_health(hosts, me, host_probe_cache)
     with SYSTEM_HEALTH_CACHE_LOCK:
@@ -3242,7 +3268,7 @@ def collect_system_health_snapshot(hosts: dict | None = None, me: str | None = N
     with SYSTEM_HEALTH_CACHE_LOCK:
         cached = SYSTEM_HEALTH_CACHE.get("value")
         same_key = cached is not None and SYSTEM_HEALTH_CACHE.get("key") == key
-        age = now - float(SYSTEM_HEALTH_CACHE.get("updated_at") or 0)
+        age = cache_age(now, SYSTEM_HEALTH_CACHE.get("updated_at"))
     if same_key:
         if SYSTEM_HEALTH_CACHE_SECS <= 0 or age >= SYSTEM_HEALTH_CACHE_SECS:
             start_async_metric_refresh(
@@ -3775,7 +3801,7 @@ def collect_token_usage(now: float | None = None, *, force: bool = False) -> dic
     with TOKEN_USAGE_CACHE_LOCK:
         cached = TOKEN_USAGE_CACHE.get("value")
         if (not force and cached is not None and TOKEN_USAGE_CACHE.get("key") == cache_key and
-                now - float(TOKEN_USAGE_CACHE.get("updated_at") or 0) < TOKEN_SCAN_CACHE_SECS):
+                cache_age(now, TOKEN_USAGE_CACHE.get("updated_at")) < TOKEN_SCAN_CACHE_SECS):
             return json.loads(json.dumps(cached))
 
     files = recent_codex_session_files(now)
@@ -3830,7 +3856,7 @@ def collect_token_usage_snapshot(now: float | None = None) -> dict:
     now = time.time() if now is None else now
     with TOKEN_USAGE_CACHE_LOCK:
         cached = TOKEN_USAGE_CACHE.get("value")
-        age = now - float(TOKEN_USAGE_CACHE.get("updated_at") or 0)
+        age = cache_age(now, TOKEN_USAGE_CACHE.get("updated_at"))
         cached_key = TOKEN_USAGE_CACHE.get("key")
     if cached is None:
         start_async_metric_refresh("token_usage", lambda: collect_token_usage(now=time.time(), force=True))
@@ -3933,7 +3959,7 @@ def collect_tool_call_usage(now: float | None = None, *, force: bool = False) ->
     with TOOL_CALL_USAGE_CACHE_LOCK:
         cached = TOOL_CALL_USAGE_CACHE.get("value")
         if (not force and cached is not None and TOOL_CALL_USAGE_CACHE.get("key") == cache_key and
-                now - float(TOOL_CALL_USAGE_CACHE.get("updated_at") or 0) < TOKEN_SCAN_CACHE_SECS):
+                cache_age(now, TOOL_CALL_USAGE_CACHE.get("updated_at")) < TOKEN_SCAN_CACHE_SECS):
             return json.loads(json.dumps(cached))
 
     files = recent_codex_session_files(now)
@@ -3978,7 +4004,7 @@ def collect_tool_call_usage_snapshot(now: float | None = None) -> dict:
     now = time.time() if now is None else now
     with TOOL_CALL_USAGE_CACHE_LOCK:
         cached = TOOL_CALL_USAGE_CACHE.get("value")
-        age = now - float(TOOL_CALL_USAGE_CACHE.get("updated_at") or 0)
+        age = cache_age(now, TOOL_CALL_USAGE_CACHE.get("updated_at"))
         cached_key = TOOL_CALL_USAGE_CACHE.get("key")
     if cached is None:
         start_async_metric_refresh("tool_call_usage", lambda: collect_tool_call_usage(now=time.time(), force=True))
@@ -4003,7 +4029,7 @@ def health_payload() -> dict:
     with CACHE_LOCK:
         snapshot = json.loads(json.dumps(CACHE))
     now = time.time()
-    age_secs = now - float(snapshot.get("updated_at") or 0)
+    age_secs = cache_age(now, snapshot.get("updated_at"))
     try:
         interval = max(0.05, float(snapshot.get("refresh_interval_secs") or DEFAULT_REFRESH))
     except (TypeError, ValueError):
@@ -8259,10 +8285,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "invalid project")
                 return
             compact = q.get("compact", ["0"])[0].lower() in {"1", "true", "yes", "on"}
-            try:
-                tail_lines = max(1, min(50, int(q.get("tail", ["6"])[0])))
-            except ValueError:
-                tail_lines = 6
+            tail_lines = bounded_int(q.get("tail", ["6"])[0], 6, min_value=1, max_value=50)
             payload = json.dumps(state_payload(project_filter, compact=compact, tail_lines=tail_lines)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -8331,10 +8354,7 @@ class Handler(BaseHTTPRequestHandler):
                 if runner is None:
                     self.send_error(502, "host unavailable"); return
                 raw_lines = q.get("lines", [str(REFRESH_LINES)])[0]
-                try:
-                    pane_lines = max(1, min(200, int(raw_lines)))
-                except ValueError:
-                    pane_lines = REFRESH_LINES
+                pane_lines = bounded_int(raw_lines, REFRESH_LINES, min_value=1, max_value=200)
                 r = runner(["tmux", "capture-pane", "-e", "-t", target,
                             "-p", "-S", f"-{pane_lines}"])
             except subprocess.TimeoutExpired:
