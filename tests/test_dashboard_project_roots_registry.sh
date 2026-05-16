@@ -115,5 +115,27 @@ assert instances[0]["ssh"] == "lunarc-project-alias", instances
 effective_from_instance = mod.effective_hosts_for_instance(hosts, instances[0]["host"], instances[0])
 assert effective_from_instance["lunarc"]["ssh"] == "lunarc-project-alias", effective_from_instance
 assert effective_from_instance["lunarc"]["scheduler"] == "slurm", effective_from_instance
+
+orig_run_stable = mod.run_stable
+run_calls = []
+def fake_run_stable(cmd, *args, **kwargs):
+    run_calls.append((cmd, kwargs))
+    assert kwargs.get("timeout") == 8.0, kwargs
+    assert kwargs.get("retries") == 0, kwargs
+    assert cmd[0] == "ssh" and "cat" in cmd, cmd
+    return __import__("subprocess").CompletedProcess(
+        cmd, 0,
+        "[hosts.remote-team]\nssh = \"lunarc\"\nsession = \"remote-team\"\n",
+        "",
+    )
+mod.REMOTE_PROJECT_TOML_CACHE.clear()
+mod.run_stable = fake_run_stable
+merged_remote = mod.merge_remote_project_hosts({
+    "lunarc": {"ssh": "lunarc", "project_dir": "/remote/proj"}
+})
+assert merged_remote["remote-team"]["session"] == "remote-team", merged_remote
+assert run_calls, "remote toml fetch must use bounded run_stable"
+mod.run_stable = orig_run_stable
+
 print("ok: dashboard discovers registered/cache project roots when directory scans are unavailable")
 PY

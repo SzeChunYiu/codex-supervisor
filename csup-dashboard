@@ -461,10 +461,10 @@ def merge_remote_project_hosts(local_hosts: dict) -> dict:
             remote_hosts = dict(cached.get("hosts") or {})
         else:
             try:
-                r = subprocess.run(
+                r = run_stable(
                     ["ssh", *SSH_BASE_OPTS, ssh_command_target(ssh_target),
                      "cat", shlex.quote(remote_toml)],
-                    capture_output=True, text=True, timeout=8.0,
+                    timeout=8.0, retries=0,
                 )
                 if r.returncode == 0 and r.stdout:
                     parsed = toml_read_text(r.stdout)
