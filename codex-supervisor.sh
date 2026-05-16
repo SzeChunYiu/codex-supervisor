@@ -812,11 +812,26 @@ source_codex_home() {
   printf '%s\n' "${CODEX_HOME:-$HOME/.codex}"
 }
 
+file_size_bytes() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+try:
+    print(os.path.getsize(sys.argv[1]))
+except OSError:
+    print(0)
+PY
+}
+
 strip_mcp_config() {
   local src="$1" dst="$2"
   if [[ ! -f "$src" ]]; then
     : > "$dst"
     return 0
+  fi
+  if [[ "$(file_size_bytes "$src")" -gt 2000000 ]]; then
+    err "refusing to copy oversized codex config: $src"
+    return 1
   fi
   awk '
     /^\[/ { in_mcp = ($0 ~ /^\[mcp_servers(\.|])/); }
@@ -890,7 +905,7 @@ prepare_codex_home_for() {
   fi
   mkdir -p "$dst_home" "$dst_home/log" "$dst_home/sessions" "$dst_home/tmp"
 
-  strip_mcp_config "$src_home/config.toml" "$dst_home/config.toml"
+  strip_mcp_config "$src_home/config.toml" "$dst_home/config.toml" || return 1
   # Worker Codex homes are isolated per supervisor session, so parent-machine
   # trusted-project entries often do not include the mounted/remote project
   # path (for example LUNARC /projects/...). Mark the exact cwd trusted in the
