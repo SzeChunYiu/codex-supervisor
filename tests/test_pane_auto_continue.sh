@@ -129,6 +129,33 @@ if [[ "$(cat "$respawned_ready" 2>/dev/null || true)" != "/goal repeat debug lan
   exit 1
 fi
 
+hard_limit_respawned="$TMPDIR/hard-limit-respawned"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_HITS=1 \
+CODEX_SUPERVISOR_RESPAWN_COOLDOWN=5 \
+CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN=3600 \
+RESPAWN_FILE="$hard_limit_respawned" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(LIMIT)
+  PROMPTS=("/goal repeat limit lane")
+  PANE_IDX=(0)
+  LIMIT_STREAK[0]=0
+  LAST_RESPAWN[0]=$(($(date +%s) - 120))
+  ITERATION_STARTED[0]=$(($(date +%s) - 10))
+  CAPTURE=$'"'"'You'"'"'"'"'"'"'"'"'ve hit your usage limit. Try again at 03:00.'"'"'
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  respawn_pane_and_prompt() { printf "%s\n" "$3" > "$RESPAWN_FILE"; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ -e "$hard_limit_respawned" ]]; then
+  echo "hard usage limits with try-again-at should not respawn before hard cooldown" >&2
+  exit 1
+fi
+
 sent_text_gone="$TMPDIR/sent-text-gone"
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_ON_COMPLETE=queue \
