@@ -57,4 +57,21 @@ elapsed = float(sys.argv[1])
 assert elapsed < 2.5, f"csup hosts probe timeout too slow: {elapsed}"
 PY
 
+bad_timeout_out="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SSH_TIMEOUT_SECS=bad \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" hosts 2>&1
+)"
+
+[[ "$bad_timeout_out" == *"slow-lunarc"* ]] || {
+  printf 'expected invalid SSH timeout to still report host status, got:\n%s\n' "$bad_timeout_out" >&2
+  exit 1
+}
+[[ "$bad_timeout_out" != *"Traceback"* && "$bad_timeout_out" != *"ValueError"* ]] || {
+  printf 'invalid SSH timeout should not leak Python tracebacks, got:\n%s\n' "$bad_timeout_out" >&2
+  exit 1
+}
+
 echo "ok: csup hosts bounds slow SSH reachability probes"

@@ -76,7 +76,9 @@ ensure_tmpdir_headroom() {
 ensure_tmpdir_headroom
 
 ssh_timeout_secs() {
-  printf '%s' "${CSUP_SSH_TIMEOUT_SECS:-8}"
+  local value="${CSUP_SSH_TIMEOUT_SECS:-8}"
+  [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || value=8
+  printf '%s' "$value"
 }
 
 shell_run_timeout() {
