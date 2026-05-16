@@ -1940,9 +1940,9 @@ cmd_gm_start() {
         local remote_dir_h; remote_dir_h=$(project_dir_for_host "$cfg" "$h" "$project_dir")
         if [[ -n "$tasks_dir_h" ]]; then
           local tasks_abs_h; tasks_abs_h=$(path_under_project_if_relative "$remote_dir_h" "$tasks_dir_h")
-          local ssh_host_h; ssh_host_h=$(toml_get "$cfg" "hosts.$h" "ssh")
+          local ssh_host_h; ssh_host_h=$(host_ssh_target "$h")
           if [[ -n "$ssh_host_h" ]]; then
-            ssh "$ssh_host_h" "mkdir -p $(shell_quote "$tasks_abs_h") && printf '/goal Re-run executive review: read docs/ceo-staffing.md and manage staffing.\n' >> $(shell_quote "$tasks_abs_h/ceo.txt")" 2>/dev/null \
+            ssh_exec "$ssh_host_h" "mkdir -p $(shell_quote "$tasks_abs_h") && printf '/goal Re-run executive review: read docs/ceo-staffing.md and manage staffing.\n' >> $(shell_quote "$tasks_abs_h/ceo.txt")" 2>/dev/null \
               && printf 'CEO-WAKE %s/%s: queued re-run task in ceo.txt so supervisor restarts CEO on next poll.\n' "$project_name" "$h" \
               || printf 'CEO-WAKE-FAIL %s/%s: could not queue re-run task (remote write failed).\n' "$project_name" "$h"
           fi
