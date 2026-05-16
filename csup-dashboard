@@ -3027,8 +3027,11 @@ def collect_memory_health() -> dict:
     try:
         meminfo = pathlib.Path("/proc/meminfo")
         if meminfo.exists():
+            meminfo_text = read_text_bounded(meminfo, max_bytes=100_000, label="meminfo read")
+            if meminfo_text is None:
+                raise OSError("meminfo unavailable or too large")
             vals = {}
-            for line in meminfo.read_text().splitlines():
+            for line in meminfo_text.splitlines():
                 parts = line.split()
                 if len(parts) >= 2:
                     vals[parts[0].rstrip(":")] = safe_int(parts[1]) * 1024
