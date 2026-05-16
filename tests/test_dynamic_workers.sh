@@ -8,6 +8,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/codex-tasks"
 cat > "$TMPDIR/codex-tasks/open.txt" <<'TASKS'
+not a goal line
+/goalbad malformed goal-like line
 /goal open task one
 /goal open task two
 TASKS
@@ -62,7 +64,12 @@ bug_lane="$(
 }
 
 remaining_open="$(grep -c '^/goal' "$TMPDIR/codex-tasks/open.txt")"
-[[ "$remaining_open" == "1" ]] || {
-  printf 'expected one open task remaining, got %s\n' "$remaining_open" >&2
+[[ "$remaining_open" == "2" ]] || {
+  printf 'expected malformed /goal-like line plus one valid open task remaining, got %s\n' "$remaining_open" >&2
+  exit 1
+}
+valid_remaining_open="$(grep -cE '^/goal([[:space:]]|$)' "$TMPDIR/codex-tasks/open.txt")"
+[[ "$valid_remaining_open" == "1" ]] || {
+  printf 'expected one valid open task remaining, got %s\n' "$valid_remaining_open" >&2
   exit 1
 }
