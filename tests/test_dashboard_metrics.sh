@@ -9,6 +9,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 python3 - "$DASHBOARD" "$TMPDIR" <<'PY'
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import pathlib
 import subprocess
@@ -157,6 +158,9 @@ mod.TOKEN_SCAN_MAX_WALK_ENTRIES = 2
 mod.TOKEN_SCAN_MAX_FILES = 10
 limited_files = mod.recent_codex_session_files(time.time())
 assert len(limited_files) == 2, limited_files
+walker_source = inspect.getsource(mod.iter_jsonl_files_bounded)
+assert "os.scandir" in walker_source, "token scans should stream directory entries"
+assert "os.walk" not in walker_source, "token scans must not materialize whole directory trees"
 limited_usage = mod.collect_token_usage(now=time.time(), force=True)
 assert limited_usage["session_files_scanned"] == 2, limited_usage
 
