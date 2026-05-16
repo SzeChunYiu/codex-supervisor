@@ -7,7 +7,7 @@
 # Subcommands:
 #   csup start <project> [--host=<name>] [--fallback]
 #   csup submit <project> <lane> <goal text...>
-#   csup capacity
+#   csup capacity [--json]
 #   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
 #   csup factory-audit [--project=<name>|<project>]
 #   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]
@@ -1316,21 +1316,25 @@ cmd_submit() {
 # Subcommand: capacity
 # ---------------------------------------------------------------------------
 cmd_capacity() {
+  local json=0 help=0
   while (( $# > 0 )); do
     case "$1" in
-      -h|--help) break ;;
+      --json) json=1 ;;
+      -h|--help) help=1 ;;
       --*) err "unknown flag: $1"; return 2 ;;
       *) err "capacity takes no positional arguments"; return 2 ;;
     esac
     shift
   done
-  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  if (( help )); then
     cat <<'USAGE'
-csup capacity
+csup capacity [--json]
 
 Reports the current local safe pane headroom and the limiting resource.
 Use before large `csup govern --apply` runs to scale up to the largest safe
 parallel session count without guessing.
+
+  --json  emit one machine-readable JSON object instead of human text
 USAGE
     return 0
   fi
@@ -1360,7 +1364,49 @@ USAGE
     esac
   done < <(capacity_fields)
 
-  printf 'csup: capacity host=%s runtime=%s available=%s bottleneck=%s\n' "$(this_host)" "$RUNTIME_ROOT" "$available" "$bottleneck"
+  local host; host=$(this_host)
+  if (( json )); then
+    python3 - "$host" "$RUNTIME_ROOT" "$available" "$bottleneck" "$total_room" \
+      "$ram_room" "$disk_room" "$load_room" "$max_total" "$running" \
+      "$free_ram_mb" "$reserve_ram_mb" "$ram_mb_per_pane" "$free_disk_gb" \
+      "$reserve_disk_gb" "$disk_mb_per_pane" "$cpus" "$load" "$max_load_per_cpu" <<'PY'
+import json
+import sys
+
+keys = [
+    "host", "runtime", "available", "bottleneck", "total_room",
+    "ram_room", "disk_room", "load_room", "max_total", "running",
+    "free_ram_mb", "reserve_ram_mb", "ram_mb_per_pane", "free_disk_gb",
+    "reserve_disk_gb", "disk_mb_per_pane", "cpus", "load1",
+    "max_load_per_cpu",
+]
+int_keys = {
+    "available", "total_room", "ram_room", "disk_room", "load_room",
+    "max_total", "running", "free_ram_mb", "reserve_ram_mb",
+    "ram_mb_per_pane", "free_disk_gb", "reserve_disk_gb",
+    "disk_mb_per_pane", "cpus",
+}
+float_keys = {"load1", "max_load_per_cpu"}
+obj = {}
+for key, raw in zip(keys, sys.argv[1:]):
+    if key in int_keys:
+        try:
+            obj[key] = int(raw)
+        except (TypeError, ValueError):
+            obj[key] = raw
+    elif key in float_keys:
+        try:
+            obj[key] = float(raw)
+        except (TypeError, ValueError):
+            obj[key] = raw
+    else:
+        obj[key] = raw
+print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+PY
+    return 0
+  fi
+
+  printf 'csup: capacity host=%s runtime=%s available=%s bottleneck=%s\n' "$host" "$RUNTIME_ROOT" "$available" "$bottleneck"
   printf 'limits total_room=%s ram_room=%s disk_room=%s load_room=%s max_total=%s running=%s\n' "$total_room" "$ram_room" "$disk_room" "$load_room" "$max_total" "$running"
   printf 'inputs free_ram_mb=%s reserve_ram_mb=%s ram_mb_per_pane=%s free_disk_gb=%s reserve_disk_gb=%s disk_mb_per_pane=%s cpus=%s load1=%s max_load_per_cpu=%s\n' \
     "$free_ram_mb" "$reserve_ram_mb" "$ram_mb_per_pane" "$free_disk_gb" "$reserve_disk_gb" "$disk_mb_per_pane" "$cpus" "$load" "$max_load_per_cpu"
@@ -2532,7 +2578,7 @@ csup — codex-supervisor cross-host launcher
 
   csup start <project> [--host=<name>] [--fallback]
   csup submit <project> <lane> <goal text...>
-  csup capacity
+  csup capacity [--json]
   csup govern [--dry-run|--apply] [--project=<name>] [--host=<name>]
   csup factory-audit [--project=<name>|<project>]
   csup factory-run <project> [--host=<name>] [--scenario=resume|balanced|full|blockers] [--dry-run|--apply]

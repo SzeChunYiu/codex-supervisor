@@ -300,7 +300,9 @@ fit available resources.
 Use `csup capacity` before aggressive scale-ups. It prints the computed safe
 local pane count plus the limiting factor (`session_cap`, `ram`, `disk`, or
 `load`) and the per-resource room used by `govern`, so operators can add the
-largest safe worker batch without guessing.
+largest safe worker batch without guessing. Use `csup capacity --json` when a
+dashboard, scheduler, or script needs the same headroom calculation without
+parsing human text.
 
 `factory-audit` is the management gate for the AI factory model. It reports
 `RED` when factory docs are missing, `docs/blocker-schema.md` is absent/invalid,
