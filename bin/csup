@@ -2414,6 +2414,12 @@ import urllib.parse
 import urllib.request
 
 base, target_project, sample_secs_raw = sys.argv[1:4]
+MAX_DASHBOARD_URL_CHARS = 2048
+MAX_STEWARD_PROJECT_FILTER_CHARS = 128
+if len(base or "") > MAX_DASHBOARD_URL_CHARS:
+    raise SystemExit("steward dashboard URL too long")
+if len(target_project or "") > MAX_STEWARD_PROJECT_FILTER_CHARS:
+    raise SystemExit("steward project filter too long")
 parsed_base = urllib.parse.urlparse(base)
 allowed_hosts = {"127.0.0.1", "localhost", "::1"}
 if parsed_base.scheme not in {"http", "https"} or (parsed_base.hostname or "") not in allowed_hosts:
