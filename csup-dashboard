@@ -326,12 +326,14 @@ def async_metric_names() -> list[str]:
 def read_text_bounded(path: pathlib.Path, *, max_bytes: int, label: str) -> str | None:
     """Read small control-plane files without letting a corrupt cache dominate startup."""
     try:
-        if not path.exists():
-            return None
-        if max_bytes > 0 and path.stat().st_size > max_bytes:
+        with path.open("rb") as f:
+            data = f.read(max_bytes + 1 if max_bytes > 0 else -1)
+        if max_bytes > 0 and len(data) > max_bytes:
             print(f"{label} skipped: {path}: file too large", file=sys.stderr)
             return None
-        return path.read_text()
+        return data.decode("utf-8", "replace")
+    except FileNotFoundError:
+        return None
     except OSError as e:
         print(f"{label} skipped: {path}: {e}", file=sys.stderr)
         return None
