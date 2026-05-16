@@ -54,6 +54,7 @@ file is `codex-tasks/<lane>.txt` in the first host config that declares a
 ```bash
 csup capacity
 csup govern --dry-run
+csup govern --dry-run --json
 csup govern --apply
 ```
 
@@ -77,7 +78,8 @@ operator can scale workers up to the current safe ceiling instead of guessing.
 The `govern` header repeats that bottleneck so dry-runs explain why a host can
 or cannot accept another worker wave. Use `csup capacity --json` for scripts
 or dashboards that need the same calculation in a stable machine-readable
-shape.
+shape. Use `csup govern --dry-run --json` when a scheduler needs the exact
+start/skip plan as newline-delimited JSON events without parsing operator text.
 
 The governor intentionally does not decide product direction. If queues grow
 without closing acceptance checklist gaps, the project validator should stop

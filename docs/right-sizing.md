@@ -84,6 +84,7 @@ Automated path:
 ```bash
 csup capacity
 csup govern --dry-run
+csup govern --dry-run --json
 csup govern --apply
 ```
 
@@ -92,7 +93,8 @@ csup govern --apply
 inputs, then filters prompts with `CODEX_SUPERVISOR_LANES`, generates only the
 needed dynamic workers with
 `CODEX_SUPERVISOR_DYNAMIC_WORKERS`, and keeps the fixed `DEBUG`/`VALIDATOR`
-panes per started session.
+panes per started session. Use `csup govern --dry-run --json` when tooling
+needs the same right-sized plan as stable machine-readable events.
 
 ## When to ask the user
 
