@@ -582,16 +582,34 @@ cleanup_git_worktree_in_current_repo() {
   [[ "$wt_common" == "$current_common" ]]
 }
 
+cleanup_command_matches_scope() {
+  local cmd="$1" scope="$2"
+  [[ -n "$cmd" && -n "$scope" ]] || return 1
+  if [[ "$scope" == */* ]]; then
+    case "$cmd" in
+      "$scope"|"$scope"/*|"$scope"-*|"$scope"_*|"$scope".*|\
+      *"$scope"|*"$scope/"*|*"$scope"-*|*"$scope"_*|*"$scope".*) return 0 ;;
+    esac
+  else
+    case "$cmd" in
+      "$scope"|"$scope"/*|"$scope"-*|"$scope"_*|"$scope".*|\
+      *" $scope"|*" $scope/"*|*" $scope"-*|*" $scope"_*|*" $scope".*|\
+      *"/$scope"|*"/$scope/"*|*"/$scope"-*|*"/$scope"_*|*"/$scope".*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
 cleanup_process_in_project_scope() {
   local pid="$1" cmd root scope
   cleanup_global_enabled && return 0
   cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
   [[ -n "$cmd" ]] || return 1
   root="$(current_project_root)"
-  [[ "$cmd" == *"$root"* ]] && return 0
+  cleanup_command_matches_scope "$cmd" "$root" && return 0
   while IFS= read -r scope; do
     [[ -n "$scope" ]] || continue
-    [[ "$cmd" == *"$scope"* ]] && return 0
+    cleanup_command_matches_scope "$cmd" "$scope" && return 0
   done < <(cleanup_scope_names)
   return 1
 }
