@@ -7,8 +7,10 @@ DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
+import glob
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 
@@ -19,6 +21,7 @@ mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(mod)
 
+os.environ["CSUP_MAX_TMUX_SOCKET_SCAN"] = "3"
 source = mod._STREAMER_SCRIPT.split('# First message: full snapshot.', 1)[0]
 ns = {}
 exec(source, ns)
@@ -31,6 +34,31 @@ assert env_float("CSUP_STREAMER_TEST_FLOAT", 0.5, 0.01) == 0.5
 assert safe_int("bad", -1, 0) == -1
 assert safe_int("3", -1, 0) == 3
 assert safe_int(float("inf"), -1, 0) == -1
+
+# Socket enumeration must stream and stop at the configured cap so a malicious
+# or corrupted tmux tmpdir cannot force unbounded stat work.
+orig_isdir = os.path.isdir
+orig_isfile = os.path.isfile
+orig_stat = os.stat
+orig_iglob = glob.iglob
+stat_calls = []
+try:
+    os.path.isdir = lambda path: str(path).endswith(f"/tmux-{os.getuid()}")
+    os.path.isfile = lambda path: False
+    glob.iglob = lambda pattern: (f"/tmp/tmux-{os.getuid()}/sock{i}" for i in range(10))
+    def fake_stat(path):
+        stat_calls.append(path)
+        class StatResult:
+            st_mode = stat.S_IFSOCK
+        return StatResult()
+    os.stat = fake_stat
+    assert ns["list_sockets"]() == ["sock0", "sock1", "sock2"]
+    assert len(stat_calls) == 3, stat_calls
+finally:
+    os.path.isdir = orig_isdir
+    os.path.isfile = orig_isfile
+    os.stat = orig_stat
+    glob.iglob = orig_iglob
 
 class FakeSubprocess:
     def __init__(self):
