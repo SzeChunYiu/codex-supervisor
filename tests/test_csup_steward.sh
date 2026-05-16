@@ -74,6 +74,24 @@ out="$("$CSUP" steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:$p
 clamped_out="$(CSUP_STEWARD_MAX_SAMPLE_SECS=0 "$CSUP" steward demo --sample-secs=999999 --dashboard-url="http://127.0.0.1:$port")"
 row_capped_out="$(CSUP_STEWARD_MAX_ROWS=2 "$CSUP" steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:$port")"
 python3 - "$TMPDIR/state.json" <<'PY'
+import json
+import pathlib
+import sys
+
+panes = [
+    {"index": i, "lane": f"worker-{i}", "state": "working", "tail": ["Pursuing goal"]}
+    for i in range(5001)
+]
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "projects": [{
+        "name": "demo",
+        "slug": "demo",
+        "instances": [{"host": "local", "session": "demo-main", "panes": panes}],
+    }]
+}))
+PY
+huge_cap_out="$(CSUP_STEWARD_MAX_SAMPLE_SECS=999999 CSUP_STEWARD_MAX_ROWS=999999 "$CSUP" steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:$port")"
+python3 - "$TMPDIR/state.json" <<'PY'
 import pathlib, sys
 pathlib.Path(sys.argv[1]).write_text('{"projects":[]}' + (' ' * 2_000_001))
 PY
@@ -89,6 +107,10 @@ wait "$server_pid" 2>/dev/null || true
 [[ "$out" == *"STEWARD summary"* ]] || { printf 'missing summary:\n%s\n' "$out" >&2; exit 1; }
 [[ "$clamped_out" == *"STEWARD summary"* ]] || { printf 'clamped sample run did not complete:\n%s\n' "$clamped_out" >&2; exit 1; }
 [[ "$row_capped_out" == *"total=2"* ]] || { printf 'row-capped steward run should scan only 2 panes:\n%s\n' "$row_capped_out" >&2; exit 1; }
+[[ "$huge_cap_out" == *"total=5000"* ]] || {
+  printf 'oversized steward caps should fall back to safe defaults (first lines):\n%s\n' "$(printf '%s\n' "$huge_cap_out" | sed -n '1,3p')" >&2
+  exit 1
+}
 [[ "$out" == *"done=1"* ]] || { printf 'missing done count:\n%s\n' "$out" >&2; exit 1; }
 [[ "$out" == *"blocked=1"* ]] || { printf 'missing blocked count:\n%s\n' "$out" >&2; exit 1; }
 [[ "$out" == *"dead=1"* ]] || { printf 'missing dead count:\n%s\n' "$out" >&2; exit 1; }
