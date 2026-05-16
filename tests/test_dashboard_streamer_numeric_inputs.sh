@@ -22,6 +22,8 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 os.environ["CSUP_MAX_TMUX_SOCKET_SCAN"] = "3"
+os.environ["CSUP_STREAMER_CMD_TIMEOUT_SECS"] = "0.5"
+os.environ["CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES"] = "1024"
 source = mod._STREAMER_SCRIPT.split('# First message: full snapshot.', 1)[0]
 ns = {}
 exec(source, ns)
@@ -61,10 +63,14 @@ finally:
     glob.iglob = orig_iglob
 
 class FakeSubprocess:
+    TimeoutExpired = subprocess.TimeoutExpired
+    CompletedProcess = subprocess.CompletedProcess
+
     def __init__(self):
         self.captured = []
 
-    def run(self, cmd, capture_output=True, text=True):
+    def run(self, cmd, capture_output=True, text=True, timeout=None):
+        assert timeout is not None, cmd
         if cmd[:2] == ["tmux", "ls"]:
             return subprocess.CompletedProcess(cmd, 0, "demo\n", "")
         if cmd[:2] == ["tmux", "list-windows"]:
@@ -82,6 +88,9 @@ class FakeSubprocess:
         if cmd[:2] == ["ps", "-axo"]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
+
+assert ns["CMD_TIMEOUT_SECS"] == 0.5
+assert ns["MAX_CMD_OUTPUT_BYTES"] == 1024
 
 fake = FakeSubprocess()
 ns["subprocess"] = fake

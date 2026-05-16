@@ -864,6 +864,24 @@ CAP_LINES = env_int("CSUP_STREAMER_LINES", 200, 1)
 TARGET_W = env_int("CSUP_STREAMER_WIDTH", 160, 20)
 TARGET_H = env_int("CSUP_STREAMER_HEIGHT", 50, 5)
 MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1)
+CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05)
+MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024)
+
+def run_capture(cmd, *, timeout=None):
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=CMD_TIMEOUT_SECS if timeout is None else timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(cmd, 124, e.stdout or "", "command timed out")
+    stdout = r.stdout or ""
+    stderr = r.stderr or ""
+    if len(stdout.encode("utf-8", "replace")) + len(stderr.encode("utf-8", "replace")) > MAX_CMD_OUTPUT_BYTES:
+        return subprocess.CompletedProcess(cmd, 124, "", "output limit exceeded")
+    return r
 
 _wide_windows = set()
 def list_sockets():
@@ -907,9 +925,7 @@ def tmux_cmd(socket, *args):
 def ensure_wide(socket, session):
     # List all windows in this session; force TARGET_W on any that are narrow.
     # Sets window-size=manual first so attached clients can't shrink them back.
-    r = subprocess.run(
-        tmux_cmd(socket, "list-windows", "-t", session, "-F", "#{window_index}\t#{window_width}"),
-        capture_output=True, text=True)
+    r = run_capture(tmux_cmd(socket, "list-windows", "-t", session, "-F", "#{window_index}\t#{window_width}"))
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -918,18 +934,14 @@ def ensure_wide(socket, session):
         key = f"{socket}:{session}:{widx}"
         w = safe_int(ww, 0, 0)
         if w < TARGET_W and key not in _wide_windows:
-            subprocess.run(
-                tmux_cmd(socket, "set-window-option", "-t", f"{session}:{widx}", "window-size", "manual"),
-                capture_output=True)
-            subprocess.run(
-                tmux_cmd(socket, "resize-window", "-t", f"{session}:{widx}", "-x", str(TARGET_W), "-y", str(TARGET_H)),
-                capture_output=True)
+            run_capture(tmux_cmd(socket, "set-window-option", "-t", f"{session}:{widx}", "window-size", "manual"))
+            run_capture(tmux_cmd(socket, "resize-window", "-t", f"{session}:{widx}", "-x", str(TARGET_W), "-y", str(TARGET_H)))
             _wide_windows.add(key)
 
 def capture_all():
     out = []
     try:
-        ps_out = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+        ps_out = run_capture(["ps", "-axo", "pid=,ppid=,args="]).stdout
     except Exception:
         ps_out = ""
 
@@ -956,13 +968,13 @@ def capture_all():
         return monitor
 
     for socket in list_sockets():
-        r = subprocess.run(tmux_cmd(socket, "ls", "-F", "#{session_name}"), capture_output=True, text=True)
+        r = run_capture(tmux_cmd(socket, "ls", "-F", "#{session_name}"))
         if r.returncode != 0:
             continue
         for session in [s.strip() for s in r.stdout.splitlines() if s.strip()]:
             ensure_wide(socket, session)
             fmt = "#{pane_index}\t#{pane_dead}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_title}"
-            r2 = subprocess.run(tmux_cmd(socket, "list-panes", "-t", f"={session}", "-F", fmt), capture_output=True, text=True)
+            r2 = run_capture(tmux_cmd(socket, "list-panes", "-t", f"={session}", "-F", fmt))
             if r2.returncode != 0:
                 continue
             panes = []
@@ -978,9 +990,7 @@ def capture_all():
                 idx = safe_int(parts[0], -1, 0)
                 if idx < 0:
                     continue
-                cap = subprocess.run(
-                    tmux_cmd(socket, "capture-pane", "-e", "-t", f"={session}:.{idx}", "-p", "-S", f"-{CAP_LINES}"),
-                    capture_output=True, text=True)
+                cap = run_capture(tmux_cmd(socket, "capture-pane", "-e", "-t", f"={session}:.{idx}", "-p", "-S", f"-{CAP_LINES}"))
                 panes.append({
                     "index": idx, "ordinal": ordinal, "dead": parts[1] == "1", "cmd": parts[2],
                     "width": safe_int(parts[3], 0, 0) if len(parts) > 3 else 0,
