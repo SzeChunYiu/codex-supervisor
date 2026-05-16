@@ -138,6 +138,18 @@ if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
 fi
 grep -q "node pane budget exceeded" /tmp/codex-supervisor-node-budget.err
 
+if CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  PROMPTS=(a)
+  count_node_panes_excluding_self() { echo 40; }
+  NODE_MAX_PANES=999999
+  ensure_node_pane_budget
+' _ "$SCRIPT" >/tmp/codex-supervisor-node-budget-huge.out 2>/tmp/codex-supervisor-node-budget-huge.err; then
+  echo "oversized NODE_MAX_PANES should sanitize to default cap and reject over-cap starts" >&2
+  exit 1
+fi
+grep -q "node pane budget exceeded" /tmp/codex-supervisor-node-budget-huge.err
+
 stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; effective_start_stagger_secs 2' _ "$SCRIPT")"
 [[ "$stagger" == "0" ]] || { echo "2 panes should not stagger by default" >&2; exit 1; }
 

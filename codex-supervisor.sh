@@ -499,9 +499,23 @@ truthy() {
   esac
 }
 
+unsigned_int_gt() {
+  local a="${1:-0}" b="${2:-0}"
+  a="$(printf '%s' "$a" | sed 's/^0*//')"; a="${a:-0}"
+  b="$(printf '%s' "$b" | sed 's/^0*//')"; b="${b:-0}"
+  if (( ${#a} > ${#b} )); then
+    return 0
+  fi
+  if (( ${#a} < ${#b} )); then
+    return 1
+  fi
+  [[ "$a" > "$b" ]]
+}
+
 positive_int_or_default() {
-  local raw="${1:-}" default="${2:-0}"
-  if [[ "$raw" =~ ^[0-9]+$ ]] && (( raw > 0 )); then
+  local raw="${1:-}" default="${2:-0}" max="${3:-}" norm
+  norm="$(printf '%s' "$raw" | sed 's/^0*//')"; norm="${norm:-0}"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && ! unsigned_int_gt "$raw" "${max:-$raw}" && [[ "$norm" != "0" ]]; then
     printf '%s\n' "$raw"
   else
     printf '%s\n' "$default"
@@ -509,8 +523,8 @@ positive_int_or_default() {
 }
 
 nonnegative_int_or_default() {
-  local raw="${1:-}" default="${2:-0}"
-  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+  local raw="${1:-}" default="${2:-0}" max="${3:-}"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && ! unsigned_int_gt "$raw" "${max:-$raw}"; then
     printf '%s\n' "$raw"
   else
     printf '%s\n' "$default"
@@ -1787,9 +1801,9 @@ sanitize_prompt_runtime_config() {
   DEBUGGER_ENABLED=$(bool_int_or_default "$DEBUGGER_ENABLED" 0)
   VALIDATOR_ENABLED=$(bool_int_or_default "$VALIDATOR_ENABLED" 0)
   PLANNER_ENABLED="$VALIDATOR_ENABLED"
-  DYNAMIC_WORKERS=$(nonnegative_int_or_default "$DYNAMIC_WORKERS" 0)
-  PROMPT_MAX_WORDS=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50)
-  MAX_PANES=$(nonnegative_int_or_default "$MAX_PANES" 8)
+  DYNAMIC_WORKERS=$(nonnegative_int_or_default "$DYNAMIC_WORKERS" 0 64)
+  PROMPT_MAX_WORDS=$(nonnegative_int_or_default "$PROMPT_MAX_WORDS" 50 500)
+  MAX_PANES=$(nonnegative_int_or_default "$MAX_PANES" 8 64)
 }
 
 # Load prompts and lane labels from the prompts file.
@@ -2527,7 +2541,7 @@ check_pane() {
   hard_limit_cooldown=$(nonnegative_int_or_default "$HARD_LIMIT_COOLDOWN_SECS" 3600)
   min_free_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
   min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
-  max_iteration_secs=$(nonnegative_int_or_default "$MAX_ITERATION_SECS" 2700)
+  max_iteration_secs=$(nonnegative_int_or_default "$MAX_ITERATION_SECS" 2700 86400)
 
   if (( auto_respawn_dead )) && pane_dead "$target"; then
     respawn_pane_and_prompt "$i" "$prompt" "dead pane detected"
@@ -3244,7 +3258,7 @@ count_node_panes_excluding_self() {
 ensure_node_pane_budget() {
   local incoming="${1:-${#PROMPTS[@]}}"
   local node_max_panes
-  node_max_panes=$(nonnegative_int_or_default "$NODE_MAX_PANES" 40)
+  node_max_panes=$(nonnegative_int_or_default "$NODE_MAX_PANES" 40 512)
   (( node_max_panes <= 0 )) && return 0
   local existing; existing=$(count_node_panes_excluding_self)
   local total=$(( existing + incoming ))

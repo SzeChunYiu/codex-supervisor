@@ -153,13 +153,14 @@ def many_panes_runner(*args, **kwargs):
         assert cmd[:2] == ["python3", "-c"], cmd
         assert cmd[-1] == "2", cmd
         return subprocess.CompletedProcess(cmd, 0, '{"panes": [' + ",".join(
-            '{"index": %d, "ansi": "pane%d"}' % (i, i) for i in range(5)
+            '{"index": %d, "width": 999999999, "height": 999999999, "ansi": "pane%d"}' % (i, i) for i in range(5)
         ) + ']}', "")
     return run
 mod.host_runner = many_panes_runner
 mod.INSTANCE_CAPTURE_CACHE.clear()
 panes = mod.capture_session("remote", {"remote": {"ssh": "remote"}}, "local", "demo", 5, _bypass_cache=True)
 assert [p["index"] for p in panes] == [0, 1], panes
+assert panes[0]["width"] == 0 and panes[0]["height"] == 0, panes[0]
 mod.host_runner = orig_host_runner
 mod.CSUP_STREAMING = orig_streaming
 mod.MAX_CAPTURE_PANES = orig_max_capture_panes
