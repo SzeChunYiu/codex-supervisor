@@ -50,6 +50,18 @@ def fake_run_stable(cmd, *, timeout, retries=1):
         return subprocess.CompletedProcess(cmd, 0, "3041294|cx04\n", "")
     return subprocess.CompletedProcess(cmd, 0, "captured\n", "")
 
+orig_max_run_stable = mod.MAX_RUN_STABLE_OUTPUT_BYTES
+mod.MAX_RUN_STABLE_OUTPUT_BYTES = 1024
+small_capture = mod.run_stable([sys.executable, "-c", "print('ok')"], timeout=2, retries=0)
+assert small_capture.returncode == 0 and small_capture.stdout.strip() == "ok", small_capture
+huge_capture = mod.run_stable(
+    [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
+    timeout=2,
+    retries=0,
+)
+assert huge_capture.returncode == 124 and huge_capture.stderr == "output limit exceeded", huge_capture
+mod.MAX_RUN_STABLE_OUTPUT_BYTES = orig_max_run_stable
+
 mod.run_stable = fake_run_stable
 probe = mod.probe_host("lunarc", hosts, me="mac-mini")
 assert probe["reachable"] is True, probe

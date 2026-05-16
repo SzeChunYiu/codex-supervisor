@@ -244,6 +244,7 @@ PROMPT_LANE_CACHE: dict = {}
 PROMPT_LANE_IN_FLIGHT: set[tuple] = set()
 REMOTE_CAPTURE_CACHE_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5, min_value=0.0)
 MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_000, min_value=1024)
+MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
@@ -654,26 +655,85 @@ def _kill_all_active_procs() -> None:
                 pass
 
 
+def _read_process_limited(proc: subprocess.Popen, *, timeout: float, max_bytes: int) -> tuple[int, str, str]:
+    import select
+
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    fds = {proc.stdout.fileno(): ("stdout", stdout_chunks), proc.stderr.fileno(): ("stderr", stderr_chunks)}
+    total = 0
+    deadline = time.monotonic() + max(0.01, timeout)
+    failed_rc: int | None = None
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            failed_rc = 124
+            break
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                failed_rc = 124
+                break
+            fds[fd][1].append(chunk)
+        if failed_rc is not None:
+            break
+    if failed_rc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+        return failed_rc, "", "output limit exceeded"
+    try:
+        proc.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        proc.wait()
+        return 124, "", "command timed out"
+    stdout = b"".join(stdout_chunks)
+    stderr = b"".join(stderr_chunks)
+    return proc.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
 def run_stable(cmd: list[str], *, timeout: float, retries: int = 1) -> subprocess.CompletedProcess:
     """Run a short-lived command with one retry for transient SSH failures."""
     last: subprocess.CompletedProcess | None = None
     for attempt in range(retries + 1):
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with _ACTIVE_PROCS_LOCK:
             _ACTIVE_PROCS.add(proc)
         try:
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
+            returncode, stdout, stderr = _read_process_limited(
+                proc, timeout=timeout, max_bytes=MAX_RUN_STABLE_OUTPUT_BYTES
+            )
+            if returncode == 124:
                 with _ACTIVE_PROCS_LOCK:
                     _ACTIVE_PROCS.discard(proc)
                 if attempt >= retries:
-                    raise
+                    if stderr == "command timed out":
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
                 time.sleep(0.15 * (attempt + 1))
                 continue
-            r = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            r = subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
         finally:
             with _ACTIVE_PROCS_LOCK:
                 _ACTIVE_PROCS.discard(proc)
