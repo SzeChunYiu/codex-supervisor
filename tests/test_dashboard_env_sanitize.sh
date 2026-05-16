@@ -39,6 +39,10 @@ CSUP_DASHBOARD_TMUX_DISCOVERY_TIMEOUT_SECS=bad \
 CSUP_DASHBOARD_MAX_PROJECT_SCAN_ENTRIES=bad \
 CSUP_DASHBOARD_MAX_STATE_FILES=bad \
 CSUP_DASHBOARD_STATION_GUESS_MAX=bad \
+CSUP_DASHBOARD_CODEX_SESSIONS_DIR="$(python3 - <<'PY'
+print('x' * 5000)
+PY
+)" \
 python3 - "$DASHBOARD" <<'PY'
 import importlib.machinery
 import importlib.util
@@ -142,6 +146,10 @@ assert mod.TMUX_DISCOVERY_TIMEOUT_SECS == 12.0
 assert mod.MAX_TMUX_SOCKET_SCAN == 256
 assert mod.MAX_TMUX_TMPDIR_CHARS == 4096
 assert mod.tmux_sock_dir({"TMUX_TMPDIR": "x" * (mod.MAX_TMUX_TMPDIR_CHARS + 1)}) == f"/tmp/tmux-{__import__('os').getuid()}"
+assert mod.CODEX_SESSIONS_DIR == mod.DEFAULT_CODEX_SESSIONS_DIR
+assert mod.bounded_extra_session_dirs("a:b") == [pathlib.Path("a"), pathlib.Path("b")]
+assert mod.bounded_extra_session_dirs("x" * (mod.MAX_EXTRA_CODEX_SESSION_DIRS_CHARS + 1)) == []
+assert len(mod.bounded_extra_session_dirs(":".join(f"d{i}" for i in range(mod.MAX_EXTRA_CODEX_SESSION_DIRS + 10)))) == mod.MAX_EXTRA_CODEX_SESSION_DIRS
 assert mod.station_project_filter("a,b") == {"a", "b"}
 assert mod.station_project_filter("x" * (mod.MAX_STATION_PROJECT_FILTER_CHARS + 1)) == set()
 assert mod.station_project_filter("ok," + ("x" * (mod.MAX_PROJECT_FILTER_CHARS + 1))) == {"ok"}
