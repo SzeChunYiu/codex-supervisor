@@ -1088,7 +1088,7 @@ PY
 }
 
 dashboard_force_refresh() {
-  (( DASHBOARD_ENABLED )) || return 0
+  (( $(bool_int_or_default "$DASHBOARD_ENABLED" 1) )) || return 0
   python3 - "$DASHBOARD_PORT" <<'PY' >/dev/null 2>&1
 import sys
 import urllib.request
@@ -1194,7 +1194,7 @@ replace_unhealthy_dashboard_if_owned() {
 }
 
 ensure_dashboard() {
-  (( DASHBOARD_ENABLED )) || return 0
+  (( $(bool_int_or_default "$DASHBOARD_ENABLED" 1) )) || return 0
   mkdir -p "$(dirname "$DASHBOARD_LOCK_DIR")" "$(dirname "$DASHBOARD_PID_FILE")" "$(dirname "$DASHBOARD_LOG")" 2>/dev/null || true
   if dashboard_http_ok; then
     log "dashboard already running: $(dashboard_url)"
@@ -3054,11 +3054,13 @@ count_node_panes_excluding_self() {
 # processes, so 40 panes/node keeps headroom even under peak respawn.
 ensure_node_pane_budget() {
   local incoming="${1:-${#PROMPTS[@]}}"
-  (( NODE_MAX_PANES <= 0 )) && return 0
+  local node_max_panes
+  node_max_panes=$(nonnegative_int_or_default "$NODE_MAX_PANES" 40)
+  (( node_max_panes <= 0 )) && return 0
   local existing; existing=$(count_node_panes_excluding_self)
   local total=$(( existing + incoming ))
-  if (( total > NODE_MAX_PANES )); then
-    err "node pane budget exceeded: ${existing} existing pane(s) + ${incoming} new = ${total} > ${NODE_MAX_PANES} (CODEX_SUPERVISOR_NODE_MAX_PANES)"
+  if (( total > node_max_panes )); then
+    err "node pane budget exceeded: ${existing} existing pane(s) + ${incoming} new = ${total} > ${node_max_panes} (CODEX_SUPERVISOR_NODE_MAX_PANES)"
     err "reduce panes per session, stop an idle session, or raise CODEX_SUPERVISOR_NODE_MAX_PANES only if RLIMIT_NPROC allows"
     return 1
   fi
@@ -3430,7 +3432,7 @@ cmd_start() {
     exec tmux attach -t "$SESSION"
   fi
   # Non-TTY launcher (e.g. invoked from another script): open a terminal.
-  if (( AUTO_OPEN_TERMINAL )); then
+  if (( $(bool_int_or_default "$AUTO_OPEN_TERMINAL" 1) )); then
     open_terminal_attached \
       || echo "attach: tmux attach -t $SESSION"
   else
@@ -3451,9 +3453,10 @@ _daemon_crash_handler() {
 # The actual supervisor body, run by the daemon child.
 # $1 = restart count (0 = fresh start, >0 = crash recovery restart)
 _start_supervisor_main() {
-  local _is_restart="${1:-0}" poll_interval periodic_cleanup_secs
+  local _is_restart="${1:-0}" poll_interval periodic_cleanup_secs auto_recreate_session
   poll_interval=$(positive_int_or_default "$POLL_INTERVAL" 15)
   periodic_cleanup_secs=$(nonnegative_int_or_default "$PERIODIC_CLEANUP_SECS" 120)
+  auto_recreate_session=$(bool_int_or_default "$AUTO_RECREATE_SESSION" 1)
   ensure_codex_cmd
   load_prompts
   # INT/TERM = clean stop (kills session, exits 0, self-restart loop breaks).
@@ -3519,7 +3522,7 @@ _start_supervisor_main() {
     # abandoning the team. `cmd_stop` terminates this daemon before/while
     # killing tmux, so explicit stops still stay stopped.
     if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-      if (( AUTO_RECREATE_SESSION )); then
+      if (( auto_recreate_session )); then
         recreate_missing_session || true
         continue
       fi
