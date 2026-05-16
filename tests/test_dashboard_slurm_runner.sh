@@ -69,7 +69,9 @@ assert "CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES" in remote_script
 assert "def run_capture(cmd):" in remote_script
 assert "subprocess.run(cmd, capture_output=True, text=True)" not in remote_script
 assert "subprocess.run(tx(" not in remote_script
-assert "timeout=cmd_timeout_secs" in remote_script
+assert "subprocess.Popen" in remote_script
+assert "select.select" in remote_script
+assert "output limit exceeded" in remote_script
 
 mod.run_stable = fake_run_stable
 probe = mod.probe_host("lunarc", hosts, me="mac-mini")
