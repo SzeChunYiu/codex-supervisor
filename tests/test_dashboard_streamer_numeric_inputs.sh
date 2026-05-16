@@ -70,7 +70,6 @@ class FakeSubprocess:
         self.captured = []
 
     def run(self, cmd, capture_output=True, text=True, timeout=None):
-        assert timeout is not None, cmd
         if cmd[:2] == ["tmux", "ls"]:
             return subprocess.CompletedProcess(cmd, 0, "demo\n", "")
         if cmd[:2] == ["tmux", "list-windows"]:
@@ -91,9 +90,12 @@ class FakeSubprocess:
 
 assert ns["CMD_TIMEOUT_SECS"] == 0.5
 assert ns["MAX_CMD_OUTPUT_BYTES"] == 1024
+assert "select.select" in source, "streamer command capture should read pipes incrementally"
+assert "subprocess.Popen" in source, "streamer command capture must not use unbounded subprocess.run capture_output"
+assert "output limit exceeded" in source, "streamer command capture should fail closed on oversized output"
 
 fake = FakeSubprocess()
-ns["subprocess"] = fake
+ns["run_capture"] = fake.run
 ns["list_sockets"] = lambda: ["default"]
 result = ns["capture_all"]()
 assert len(result) == 1, result

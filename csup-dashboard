@@ -853,7 +853,7 @@ _STREAMER_SCRIPT = r'''
 #     to POLL_IDLE after IDLE_AFTER_SECS of no changes. Active panes feel
 #     instant; idle panes use ~1/15 the load of the previous fixed-rate loop.
 #   * Pane removal/addition is detected and signalled via "drop" / inclusion.
-import json, math, subprocess, sys, time, os, hashlib
+import json, math, subprocess, sys, time, os, hashlib, select
 
 def env_float(name, default, min_value=None):
     try:
@@ -891,21 +891,74 @@ MAX_TMUX_SOCKET_SCAN = env_int("CSUP_MAX_TMUX_SOCKET_SCAN", 256, 1)
 CMD_TIMEOUT_SECS = env_float("CSUP_STREAMER_CMD_TIMEOUT_SECS", 2.0, 0.05)
 MAX_CMD_OUTPUT_BYTES = env_int("CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES", 1_000_000, 1024)
 
-def run_capture(cmd, *, timeout=None):
+def _read_process_limited(proc, *, timeout, max_bytes):
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_chunks = []
+    stderr_chunks = []
+    fds = {proc.stdout.fileno(): ("stdout", stdout_chunks),
+           proc.stderr.fileno(): ("stderr", stderr_chunks)}
+    total = 0
+    deadline = time.monotonic() + max(0.01, timeout)
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            return 124, "", "command timed out"
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+                return 124, "", "output limit exceeded"
+            fds[fd][1].append(chunk)
     try:
-        r = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=CMD_TIMEOUT_SECS if timeout is None else timeout,
-        )
+        proc.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        proc.wait()
+        return 124, "", "command timed out"
+    return proc.returncode, b"".join(stdout_chunks).decode("utf-8", "replace"), b"".join(stderr_chunks).decode("utf-8", "replace")
+
+def run_capture(cmd, *, timeout=None):
+    effective_timeout = CMD_TIMEOUT_SECS if timeout is None else timeout
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(cmd, 124, e.stdout or "", "command timed out")
-    stdout = r.stdout or ""
-    stderr = r.stderr or ""
-    if len(stdout.encode("utf-8", "replace")) + len(stderr.encode("utf-8", "replace")) > MAX_CMD_OUTPUT_BYTES:
-        return subprocess.CompletedProcess(cmd, 124, "", "output limit exceeded")
-    return r
+    except OSError as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+    returncode, stdout, stderr = _read_process_limited(
+        proc, timeout=effective_timeout, max_bytes=MAX_CMD_OUTPUT_BYTES
+    )
+    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
 _wide_windows = set()
 def list_sockets():
@@ -2842,7 +2895,7 @@ def capture_session(host: str, hosts: dict, me: str | None, session: str,
 
     if host != me:
         script = r'''
-import json, subprocess, sys, os, glob, stat, math
+import json, subprocess, sys, os, glob, stat, math, select, time
 session = sys.argv[1]
 def safe_int(value, default=0, min_value=0):
     try:
@@ -2862,16 +2915,71 @@ lines = safe_int(sys.argv[2], 1, 1)
 max_socket_scan = safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1)
 cmd_timeout_secs = safe_float(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_TIMEOUT_SECS"), 2.0, 0.05)
 max_cmd_output_bytes = safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024)
+def _read_process_limited(proc, *, timeout, max_bytes):
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_chunks = []
+    stderr_chunks = []
+    fds = {proc.stdout.fileno(): ("stdout", stdout_chunks),
+           proc.stderr.fileno(): ("stderr", stderr_chunks)}
+    total = 0
+    deadline = time.monotonic() + max(0.01, timeout)
+    while fds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            return 124, "", "command timed out"
+        readable, _, _ = select.select(list(fds), [], [], min(0.1, remaining))
+        if not readable and proc.poll() is not None:
+            readable, _, _ = select.select(list(fds), [], [], 0)
+            if not readable:
+                break
+        for fd in readable:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                fds.pop(fd, None)
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+                return 124, "", "output limit exceeded"
+            fds[fd][1].append(chunk)
+    try:
+        proc.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        proc.wait()
+        return 124, "", "command timed out"
+    return proc.returncode, b"".join(stdout_chunks).decode("utf-8", "replace"), b"".join(stderr_chunks).decode("utf-8", "replace")
+
 def run_capture(cmd):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=cmd_timeout_secs)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(cmd, 124, e.stdout or "", "command timed out")
-    stdout = r.stdout or ""
-    stderr = r.stderr or ""
-    if len(stdout.encode("utf-8", "replace")) + len(stderr.encode("utf-8", "replace")) > max_cmd_output_bytes:
-        return subprocess.CompletedProcess(cmd, 124, "", "output limit exceeded")
-    return r
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+    returncode, stdout, stderr = _read_process_limited(
+        proc, timeout=cmd_timeout_secs, max_bytes=max_cmd_output_bytes
+    )
+    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 # With per-session tmux sockets, the supervisor uses `tmux -L <session_name>`.
 # Find which socket hosts this session: try a socket named exactly after the
 # session first (the supervisor's default), then default socket, then any
