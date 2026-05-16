@@ -24,6 +24,9 @@ spec.loader.exec_module(mod)
 os.environ["CSUP_MAX_TMUX_SOCKET_SCAN"] = "3"
 os.environ["CSUP_STREAMER_CMD_TIMEOUT_SECS"] = "0.5"
 os.environ["CSUP_STREAMER_CMD_MAX_OUTPUT_BYTES"] = "1024"
+os.environ["CSUP_STREAMER_LINES"] = "999999"
+os.environ["CSUP_STREAMER_WIDTH"] = "999999"
+os.environ["CSUP_STREAMER_HEIGHT"] = "999999"
 source = mod._STREAMER_SCRIPT.split('# First message: full snapshot.', 1)[0]
 ns = {}
 exec(source, ns)
@@ -35,7 +38,11 @@ os.environ["CSUP_STREAMER_TEST_FLOAT"] = "nan"
 assert env_float("CSUP_STREAMER_TEST_FLOAT", 0.5, 0.01) == 0.5
 assert safe_int("bad", -1, 0) == -1
 assert safe_int("3", -1, 0) == 3
+assert safe_int("999", 5, 0, 10) == 5
 assert safe_int(float("inf"), -1, 0) == -1
+assert ns["CAP_LINES"] == 200
+assert ns["TARGET_W"] == 160
+assert ns["TARGET_H"] == 50
 
 # Socket enumeration must stream and stop at the configured cap so a malicious
 # or corrupted tmux tmpdir cannot force unbounded stat work.

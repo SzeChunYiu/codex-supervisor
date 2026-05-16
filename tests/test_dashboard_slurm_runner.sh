@@ -74,6 +74,8 @@ assert "select.select" in remote_script
 assert "output limit exceeded" in remote_script
 assert "max_capture_panes = safe_int(sys.argv[4]" in remote_script
 assert "if len(out) >= max_capture_panes:" in remote_script
+assert 'safe_int(os.environ.get("CSUP_MAX_TMUX_SOCKET_SCAN"), 256, 1, 4096)' in remote_script
+assert 'safe_int(os.environ.get("CSUP_REMOTE_CAPTURE_CMD_MAX_OUTPUT_BYTES"), 1_000_000, 1024, 10_000_000)' in remote_script
 
 mod.run_stable = fake_run_stable
 probe = mod.probe_host("lunarc", hosts, me="mac-mini")
