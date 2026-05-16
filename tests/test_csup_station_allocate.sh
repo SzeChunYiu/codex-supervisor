@@ -90,4 +90,10 @@ grep -q -- "--chdir='/remote/alloc'" "$TMPDIR/ssh.log" || {
   exit 1
 }
 
+grep -q 'CSUP_MAX_TMUX_SOCKET_SCAN' "$TMPDIR/ssh.log" || {
+  printf 'remote pane counting must cap tmux socket scans\n' >&2
+  cat "$TMPDIR/ssh.log" >&2
+  exit 1
+}
+
 echo "ok: station allocates existing slots, books new SLURM slots, and reports queue holds"
