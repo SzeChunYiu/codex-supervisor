@@ -162,10 +162,12 @@ assert not srv.errors, srv.errors
 
 
 def dashboard_ok(payload, desired="0.5"):
+    return dashboard_ok_body(json.dumps(payload).encode(), desired=desired)
+
+def dashboard_ok_body(body, desired="0.5"):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             _ = self.request.recv(4096)
-            body = json.dumps(payload).encode()
             self.request.sendall(
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: application/json\r\n"
@@ -196,13 +198,16 @@ def dashboard_ok(payload, desired="0.5"):
 
 
 script_text = script.read_text()
-assert "r.read(1_000_000)" in script_text, "dashboard health HTTP reads must be bounded"
+assert "read(MAX_HTTP_BYTES + 1)" in script_text, "dashboard health HTTP reads must detect oversized responses"
+assert "def read_json_response" in script_text, "dashboard health JSON reads should share a bounded helper"
 assert 'hashlib.sha256(open(expected_cmd, "rb").read())' not in script_text, "dashboard source hash must stream file chunks"
 assert "def file_sha256_prefix" in script_text, "dashboard source hash helper should stream chunks"
 
 dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")
+oversized_body = json.dumps({**base, "refresh_interval_secs": 0.2}).encode() + (b" " * 1_000_001)
+assert not dashboard_ok_body(oversized_body, desired="0.2"), "oversized health response should fail closed"
 assert not dashboard_ok({**base, "refresh_interval_secs": 0.5}, desired="0.2"), "0.5s dashboard is too slow for requested livestream cadence"
 assert dashboard_ok({**base, "refresh_interval_secs": 0.5})
 assert not dashboard_ok({**base, "refresh_interval_secs": 1.0}), "1s dashboard is too slow for a requested 0.5s real-time cadence"

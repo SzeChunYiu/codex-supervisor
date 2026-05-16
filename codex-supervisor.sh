@@ -1049,6 +1049,14 @@ import os
 import sys
 import urllib.request
 
+MAX_HTTP_BYTES = 1_000_000
+
+def read_json_response(response):
+    raw = response.read(MAX_HTTP_BYTES + 1)
+    if len(raw) > MAX_HTTP_BYTES:
+        raise ValueError("dashboard health response too large")
+    return json.loads(raw.decode("utf-8"))
+
 port = sys.argv[1]
 try:
     desired = float(sys.argv[2])
@@ -1068,7 +1076,7 @@ def file_sha256_prefix(path):
     return digest.hexdigest()[:16]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
-        payload = json.loads(r.read(1_000_000).decode("utf-8"))
+        payload = read_json_response(r)
     if "status" not in payload or "panes" not in payload:
         raise SystemExit(1)
     # 2026-05-15: NEVER replace a dashboard that is actively serving projects.
@@ -1114,10 +1122,18 @@ import json
 import sys
 import urllib.request
 
+MAX_HTTP_BYTES = 1_000_000
+
+def read_json_response(response):
+    raw = response.read(MAX_HTTP_BYTES + 1)
+    if len(raw) > MAX_HTTP_BYTES:
+        raise ValueError("dashboard health response too large")
+    return json.loads(raw.decode("utf-8"))
+
 port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
-        payload = json.loads(r.read(1_000_000).decode("utf-8"))
+        payload = read_json_response(r)
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     path = str(source.get("path") or "")
     if path:
@@ -1133,11 +1149,19 @@ import json
 import sys
 import urllib.request
 
+MAX_HTTP_BYTES = 1_000_000
+
+def read_json_response(response):
+    raw = response.read(MAX_HTTP_BYTES + 1)
+    if len(raw) > MAX_HTTP_BYTES:
+        raise ValueError("dashboard health response too large")
+    return json.loads(raw.decode("utf-8"))
+
 port = sys.argv[1]
 url = f"http://127.0.0.1:{port}"
 try:
     with urllib.request.urlopen(f"{url}/api/health.json", timeout=1.5) as r:
-        h = json.loads(r.read(1_000_000).decode("utf-8"))
+        h = read_json_response(r)
     print(
         "dashboard: "
         f"{h.get('status', 'unknown')} · {h.get('projects', 0)} projects · "
