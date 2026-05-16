@@ -30,6 +30,7 @@ os.environ["CSUP_STREAMER_TEST_FLOAT"] = "nan"
 assert env_float("CSUP_STREAMER_TEST_FLOAT", 0.5, 0.01) == 0.5
 assert safe_int("bad", -1, 0) == -1
 assert safe_int("3", -1, 0) == 3
+assert safe_int(float("inf"), -1, 0) == -1
 
 class FakeSubprocess:
     def __init__(self):

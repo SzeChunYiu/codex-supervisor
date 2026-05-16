@@ -22,6 +22,7 @@ spec.loader.exec_module(mod)
 # not crash state/health payload generation with ValueError/TypeError.
 assert mod.cache_timestamp("bad") == 0.0
 assert mod.cache_age(10.0, "bad") == 10.0
+assert mod.bounded_int(float("inf"), 7, min_value=0) == 7
 
 mod.start_async_metric_refresh = lambda *args, **kwargs: None
 
@@ -82,6 +83,7 @@ mod.collect_disk_health = lambda: {"reachable": True, "filesystem": "local", "pa
 assert mod.collect_storage_health(hosts={}, me="local", host_probe_cache={})["total_bytes"] >= 0
 
 assert mod.safe_float("nan") is None
+assert mod.safe_int(float("inf")) == 0
 mod.run_stable = lambda *args, **kwargs: subprocess.CompletedProcess(
     args[0] if args else [],
     0,
