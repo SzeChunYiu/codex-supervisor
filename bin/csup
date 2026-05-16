@@ -2478,7 +2478,13 @@ TUNNEL_REMOTE_PORT="${CSUP_TUNNEL_REMOTE_PORT:-7777}"
 _tunnel_state_read() {
   # Emit lines: node pid port [ssh_target]  (tab-separated)
   [[ -f "$TUNNEL_STATE" ]] || return 0
-  cat "$TUNNEL_STATE"
+  local data
+  data=$(LC_ALL=C head -c 1000001 "$TUNNEL_STATE" 2>/dev/null || true)
+  if (( ${#data} > 1000000 )); then
+    warn "tunnel state skipped: $TUNNEL_STATE is too large"
+    return 0
+  fi
+  printf '%s\n' "$data"
 }
 
 _tunnel_state_write() {

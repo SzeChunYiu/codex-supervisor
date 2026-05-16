@@ -96,6 +96,21 @@ awk -F '\t' '$1 == "cx01" && $3 == "7778" {found=1} END {exit found ? 0 : 1}' "$
   exit 1
 }
 
+python3 - <<PY
+from pathlib import Path
+Path("$TMPDIR/home/.config/csup/tunnels.tsv").write_text("x" * 1000001)
+PY
+HOME="$TMPDIR/home" \
+CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+CSUP_TUNNEL_STATE="$TMPDIR/home/.config/csup/tunnels.tsv" \
+PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" tunnel > "$TMPDIR/oversized-state.out" 2>&1
+
+grep -q 'tunnel state skipped' "$TMPDIR/oversized-state.out" || {
+  printf 'expected oversized tunnel state warning, got:\n%s\n' "$(cat "$TMPDIR/oversized-state.out")" >&2
+  exit 1
+}
+
 cat > "$TMPDIR/home/.config/csup/tunnels.tsv" <<'STATE'
 cx01	123	not-a-port	lunarc
 STATE
