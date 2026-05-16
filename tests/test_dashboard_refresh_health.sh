@@ -199,6 +199,8 @@ def dashboard_ok_body(body, desired="0.5"):
 
 script_text = script.read_text()
 assert "read(MAX_HTTP_BYTES + 1)" in script_text, "dashboard health HTTP reads must detect oversized responses"
+assert "r.read(1_000_000)" not in script_text, "dashboard HTTP reads must not silently truncate at exactly 1 MB"
+assert "dashboard refresh response too large" in script_text, "manual refresh response should fail closed when oversized"
 assert "def read_json_response" in script_text, "dashboard health JSON reads should share a bounded helper"
 assert 'hashlib.sha256(open(expected_cmd, "rb").read())' not in script_text, "dashboard source hash must stream file chunks"
 assert "def file_sha256_prefix" in script_text, "dashboard source hash helper should stream chunks"

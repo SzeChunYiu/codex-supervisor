@@ -1179,10 +1179,14 @@ dashboard_force_refresh() {
 import sys
 import urllib.request
 
+MAX_HTTP_BYTES = 1_000_000
+
 port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/refresh.json", timeout=8) as r:
-        r.read(1_000_000)
+        raw = r.read(MAX_HTTP_BYTES + 1)
+        if len(raw) > MAX_HTTP_BYTES:
+            raise ValueError("dashboard refresh response too large")
 except Exception:
     pass
 PY
