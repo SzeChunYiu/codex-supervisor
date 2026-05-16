@@ -156,6 +156,36 @@ if [[ -e "$hard_limit_respawned" ]]; then
   exit 1
 fi
 
+bad_numeric_limit="$TMPDIR/bad-numeric-limit"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_HITS=bad \
+CODEX_SUPERVISOR_RESPAWN_COOLDOWN=bad \
+CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN=bad \
+CODEX_SUPERVISOR_RESPAWN_BURST_LIMIT=bad \
+CODEX_SUPERVISOR_RESPAWN_BURST_WINDOW_SECS=bad \
+CODEX_SUPERVISOR_RESPAWN_BACKOFF_SECS=bad \
+RESPAWN_FILE="$bad_numeric_limit" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(LIMIT)
+  PROMPTS=("/goal repeat limit lane")
+  PANE_IDX=(0)
+  LIMIT_STREAK[0]=2
+  LAST_RESPAWN[0]=0
+  ITERATION_STARTED[0]=$(($(date +%s) - 10))
+  CAPTURE=$'"'"'You'"'"'"'"'"'"'"'"'ve hit your usage limit.'"'"'
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  respawn_pane_and_prompt() { printf "%s\n" "$3" > "$RESPAWN_FILE"; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ "$(cat "$bad_numeric_limit" 2>/dev/null || true)" != "usage limit recovery" ]]; then
+  echo "invalid pane health numeric env values should fall back and still recover usage limits" >&2
+  exit 1
+fi
+
 sent_text_gone="$TMPDIR/sent-text-gone"
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_ON_COMPLETE=queue \
@@ -184,6 +214,35 @@ bash -c '
 
 if [[ "$(cat "$sent_text_gone" 2>/dev/null || true)" != "/goal repeat build lane" ]]; then
   echo "continuous wildcard lanes should redo after goal-done text scrolls out under queue policy" >&2
+  exit 1
+fi
+
+bad_numeric_idle="$TMPDIR/bad-numeric-idle"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_RESEND_GRACE=bad \
+CODEX_SUPERVISOR_MIN_FREE_RAM_MB=bad \
+CODEX_SUPERVISOR_MIN_FREE_GB=bad \
+CODEX_SUPERVISOR_RESPAWN_ON_GOAL=0 \
+CODEX_SUPERVISOR_AUTO_RESEND=bad \
+SENT_FILE="$bad_numeric_idle" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(IDLE)
+  PROMPTS=("/goal repeat idle lane")
+  PANE_IDX=(0)
+  ITERATION_STARTED[0]=$(($(date +%s) - 60))
+  LAST_GOAL_DONE[0]=$(($(date +%s) - 60))
+  CAPTURE="Goal achieved"
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  pop_next_task() { return 1; }
+  send_prompt_to_pane() { printf "%s\n" "$2" > "$SENT_FILE"; return 0; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ "$(cat "$bad_numeric_idle" 2>/dev/null || true)" != "/goal repeat idle lane" ]]; then
+  echo "invalid resend/resource numeric env values should not block idle continuation" >&2
   exit 1
 fi
 
