@@ -275,6 +275,24 @@ grep -q '^/goal /goalbad should be normalized$' "$TMPDIR/home/Desktop/projects/p
   exit 1
 }
 
+long_goal="$(printf "%05000d" 0 | tr 0 x)"
+if HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" submit proj-a perf "$long_goal" >/tmp/csup-submit-long.out 2>/tmp/csup-submit-long.err; then
+  echo "submit should reject oversized goal text" >&2
+  exit 1
+fi
+grep -q "submit: goal text must be 4096 characters or fewer" /tmp/csup-submit-long.err || {
+  cat /tmp/csup-submit-long.err >&2
+  exit 1
+}
+if grep -q "$long_goal" "$TMPDIR/home/Desktop/projects/proj-a/codex-tasks/perf.txt"; then
+  echo "oversized goal text should not be written to the queue" >&2
+  exit 1
+fi
+
 if HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
   CSUP_SUPERVISOR="$TMPDIR/supervisor" \

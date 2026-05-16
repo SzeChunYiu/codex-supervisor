@@ -1481,6 +1481,7 @@ PY
   mkdir -p "$tasks_abs"
   local text="$*"
   [[ "$text" =~ ^/goal([[:space:]]|$) ]] || text="/goal $text"
+  [[ ${#text} -le 4096 ]] || { err "submit: goal text must be 4096 characters or fewer"; return 2; }
   printf '%s\n' "$text" >> "$tasks_abs/$lane.txt"
   printf 'queued %s/%s: %s\n' "$project" "$lane" "$text"
 }
