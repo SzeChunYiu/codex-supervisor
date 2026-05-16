@@ -314,8 +314,14 @@ TMUX_WINDOW_Y="${CODEX_SUPERVISOR_TMUX_Y:-70}"
 # Set to 0 to disable if an external scheduler already manages CPU pressure.
 MAX_LOAD_PER_CPU="${CODEX_SUPERVISOR_MAX_LOAD_PER_CPU:-1.25}"
 # Where per-lane task queues live. Auto-discovered: ./codex-tasks/ then ~/codex-tasks/.
-TASKS_DIR="${CODEX_SUPERVISOR_TASKS_DIR:-}"
-PROMPTS_FILE="${CODEX_SUPERVISOR_PROMPTS:-}"
+safe_optional_path_env() {
+  local name="$1" raw
+  raw="${!name:-}"
+  [[ ${#raw} -le 4096 ]] || raw=""
+  printf '%s\n' "$raw"
+}
+TASKS_DIR="$(safe_optional_path_env CODEX_SUPERVISOR_TASKS_DIR)"
+PROMPTS_FILE="$(safe_optional_path_env CODEX_SUPERVISOR_PROMPTS)"
 # Disk-space guard. start refuses below MIN_FREE_GB; warns below WARN_FREE_GB.
 # 8 codex panes with their own worktrees + node_modules can blow through ~10 GB
 # fast; refusing under 5 GB prevents the disk-full crash mode where the
