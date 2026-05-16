@@ -1384,11 +1384,21 @@ cmd_govern() {
   done
 
   local me; me=$(this_host)
-  local capacity; capacity=$(capacity_panes)
+  local capacity=0 bottleneck="unknown" total_room=0 ram_room=0 disk_room=0 load_room=0 cap_k cap_v
+  while IFS='=' read -r cap_k cap_v; do
+    case "$cap_k" in
+      available) capacity="$cap_v" ;;
+      bottleneck) bottleneck="$cap_v" ;;
+      total_room) total_room="$cap_v" ;;
+      ram_room) ram_room="$cap_v" ;;
+      disk_room) disk_room="$cap_v" ;;
+      load_room) load_room="$cap_v" ;;
+    esac
+  done < <(capacity_fields)
   local remaining="$capacity"
-  printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s)\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity"
+  printf 'csup: govern mode=%s host=%s runtime=%s capacity=%s pane(s) bottleneck=%s\n' "$mode" "$me" "$RUNTIME_ROOT" "$capacity" "$bottleneck"
   if (( remaining <= 0 )); then
-    printf 'SKIP all: no local capacity (CPU/RAM/disk budget exhausted)\n'
+    printf 'SKIP all: no local capacity (bottleneck=%s total_room=%s ram_room=%s disk_room=%s load_room=%s)\n' "$bottleneck" "$total_room" "$ram_room" "$disk_room" "$load_room"
     return 0
   fi
 

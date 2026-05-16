@@ -74,6 +74,8 @@ Run `csup capacity` first when trying to maximize parallelism. It exposes the
 same capacity calculation as `govern` with `available=<N>` and
 `bottleneck=<session_cap|ram|disk|load>`, plus the per-resource room, so the
 operator can scale workers up to the current safe ceiling instead of guessing.
+The `govern` header repeats that bottleneck so dry-runs explain why a host can
+or cannot accept another worker wave.
 
 The governor intentionally does not decide product direction. If queues grow
 without closing acceptance checklist gaps, the project validator should stop

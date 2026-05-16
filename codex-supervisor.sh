@@ -3097,10 +3097,10 @@ cmd_cleanup() {
   local cache_root
   if cleanup_global_enabled; then cache_root="$PROJECTS_ROOT"; else cache_root="$(current_project_root)"; fi
   if [[ -d "$cache_root" ]]; then
-    for cachedir in $(find "$cache_root" -maxdepth 3 -type d \( -name '.next' -o -name '.turbo' -o -name 'dist' \) -mmin +720 2>/dev/null); do
+    while IFS= read -r cachedir; do
       cleanup_global_enabled || cleanup_path_under_current_project "$cachedir" || continue
       rm -rf "$cachedir" 2>/dev/null
-    done
+    done < <(find "$cache_root" -maxdepth 3 -type d \( -name '.next' -o -name '.turbo' -o -name 'dist' \) -mmin +720 2>/dev/null)
   fi
 
   # 8) Homebrew cache + downloads.
