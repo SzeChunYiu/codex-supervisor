@@ -80,3 +80,21 @@ assert mod.bounded_float("0.1", 0.2, min_value=0.05) == 0.1
 assert "def env_float" in mod._STREAMER_SCRIPT
 assert 'CSUP_STREAMER_POLL_FAST", 0.1' in mod._STREAMER_SCRIPT
 PY
+
+CSUP_DASHBOARD_MAX_CAPTURE_PANES=999999 \
+python3 - "$DASHBOARD" <<'PY'
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader("csup_dashboard_env_cap_test", str(path))
+spec = importlib.util.spec_from_loader("csup_dashboard_env_cap_test", loader)
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+
+assert mod.MAX_CAPTURE_PANES == 512
+assert mod.env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 7, min_value=1, max_value=10) == 7
+PY
