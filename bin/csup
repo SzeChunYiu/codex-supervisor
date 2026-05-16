@@ -1568,7 +1568,7 @@ cmd_govern() {
       queued_total=0
       dynamic_total=$(dynamic_queue_goal_count "$queue_abs")
       queued_total="$dynamic_total"
-      fixed_panes="${CSUP_GOVERNOR_FIXED_PANES:-2}" # generated MANAGER + REVIEWER; CEO runs as its own session.
+      fixed_panes=$(positive_int_or_default "${CSUP_GOVERNOR_FIXED_PANES:-}" 2) # generated MANAGER + REVIEWER; CEO runs as its own session.
       lane_budget=$(( remaining - fixed_panes ))
       if (( lane_budget < 1 )); then
         if (( json )); then

@@ -95,6 +95,24 @@ if [[ "$dry_run" != *"capacity=8 pane(s) bottleneck=session_cap"* ]]; then
   exit 1
 fi
 
+bad_fixed_panes_dry_run="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SUPERVISOR="$TMPDIR/supervisor" \
+  CSUP_GOVERNOR_FIXED_PANES=bad \
+  CSUP_GOVERNOR_FREE_RAM_MB=16000 \
+  CSUP_GOVERNOR_FREE_DISK_GB=100 \
+  CSUP_GOVERNOR_LOAD1=0 \
+  CSUP_GOVERNOR_CPU_COUNT=10 \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" govern --dry-run
+)"
+
+if [[ "$bad_fixed_panes_dry_run" != *"START proj-a/mac-mini session=proj-a-main lanes=worker-a,bugs dynamic_workers=2 panes=6 queued=5"* ]]; then
+  printf 'govern should ignore invalid CSUP_GOVERNOR_FIXED_PANES instead of crashing, got:\n%s\n' "$bad_fixed_panes_dry_run" >&2
+  exit 1
+fi
+
 capped_dry_run="$(
   HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
