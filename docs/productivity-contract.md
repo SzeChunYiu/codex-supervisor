@@ -104,3 +104,4 @@ Audit-loop pathology happens because CEOs/MANAGERs naturally produce evidence-of
 - `ceo-staffing.md` — how the CEO bootstraps teams (now subject to GOAL.md gate).
 - `never-waste-workers.md` — the historical "always find work" rule (now narrowed: must be product source work).
 - `right-sizing.md` — how many panes for the actual workload.
+- `atomic-productivity.md` — implementation-first loop, prompt-engineering rules, and per-pane CPU/RAM discipline.
