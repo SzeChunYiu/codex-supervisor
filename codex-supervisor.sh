@@ -610,13 +610,19 @@ project_config_name() {
   done < "$cfg"
 }
 
+cleanup_scope_name_safe() {
+  local name="${1:-}"
+  [[ ${#name} -ge 3 && ${#name} -le 128 ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
 cleanup_scope_names() {
   local root base name variant seen=" "
   root="$(current_project_root)"
   for name in "$(basename "$root")" "$(basename "$PWD")" "$SESSION" "$(project_config_name)"; do
     [[ -n "$name" ]] || continue
     for variant in "$name" "${name//-/_}" "${name//_/-}"; do
-      [[ ${#variant} -ge 3 ]] || continue
+      cleanup_scope_name_safe "$variant" || continue
       case "$seen" in *" $variant "*) continue ;; esac
       seen="${seen}${variant} "
       printf '%s\n' "$variant"

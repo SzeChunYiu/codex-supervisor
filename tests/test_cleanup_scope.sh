@@ -82,6 +82,19 @@ CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS=0 \
       exit 1
     }
 
+    printf "%s\n" "name = \"../other-proj\"" > .codex-supervisor.toml
+    scopes="$(SESSION="../other-proj" cleanup_scope_names)"
+    if printf "%s\n" "$scopes" | grep -Eq "/|\.\."; then
+      echo "cleanup scope names should reject traversal-like session/config names:" >&2
+      printf "%s\n" "$scopes" >&2
+      exit 1
+    fi
+    long_scope="$(printf "%0129d" 0 | tr 0 x)"
+    if SESSION="$long_scope" cleanup_scope_names | grep -q "$long_scope"; then
+      echo "cleanup scope names should reject oversized session names" >&2
+      exit 1
+    fi
+
     cleanup_path_in_project_scope "$2/projects/current-proj-worker" || exit 1
     cleanup_path_under_current_project "$2/projects/current-proj/.next" || {
       echo "project cleanup should accept canonical in-project paths" >&2
