@@ -8823,7 +8823,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError:
                         pass
             return
-        if self.path.startswith("/api/pane"):
+        if request_path == "/api/pane":
             try:
                 q = parse_qs(parsed.query, max_num_fields=MAX_QUERY_FIELDS)
             except ValueError:

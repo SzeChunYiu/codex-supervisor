@@ -73,6 +73,12 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     except urllib.error.HTTPError as e:
         assert e.code == 400, e
 
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/paneevil?host=local&session=s&index=0", timeout=2)
+        raise AssertionError("near-miss pane API route should not enter pane handler")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404, e
+
     srv.shutdown()
 
 html = mod.INDEX_HTML
