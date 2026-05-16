@@ -98,7 +98,7 @@ for pane in panes:
 html = mod.INDEX_HTML
 source = dashboard_path.read_text()
 assert "const UI_REFRESH_MS = 200" in html, "browser should poll five times per second for livestream-like panes"
-assert 'CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", "0.5"' in source, "remote captures should refresh at least twice per second by default"
+assert 'CSUP_DASHBOARD_REMOTE_CAPTURE_CACHE_SECS", 0.5' in source, "remote captures should refresh at least twice per second by default"
 assert "Open latest tail" in html, "pane action should describe tail-only output, not full scrollback"
 assert "pre.innerHTML = paneTailHtml(pane)" in html, "pane updates should overwrite the visible output"
 assert '"-2000"' not in source, "on-demand pane endpoint should not fetch full scrollback by default"
