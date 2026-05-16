@@ -2288,7 +2288,7 @@ respawn_pane_and_prompt() {
 check_pane() {
   local i=$1 prompt=$2 target now since_last
   local auto_respawn_dead auto_resend respawn_on_goal_done resend_grace
-  local limit_hits respawn_cooldown hard_limit_cooldown min_free_ram min_free_gb
+  local limit_hits respawn_cooldown hard_limit_cooldown min_free_ram min_free_gb max_iteration_secs
   target=$(pane_target "$i")
   now=$(date +%s)
   auto_respawn_dead=$(nonnegative_int_or_default "$AUTO_RESPAWN_DEAD_PANES" 1)
@@ -2300,6 +2300,7 @@ check_pane() {
   hard_limit_cooldown=$(nonnegative_int_or_default "$HARD_LIMIT_COOLDOWN_SECS" 3600)
   min_free_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
   min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
+  max_iteration_secs=$(nonnegative_int_or_default "$MAX_ITERATION_SECS" 2700)
 
   if (( auto_respawn_dead )) && pane_dead "$target"; then
     respawn_pane_and_prompt "$i" "$prompt" "dead pane detected"
@@ -2565,10 +2566,10 @@ check_pane() {
   # without showing "Goal achieved", forcibly respawn — assume it's stuck
   # in a long compaction/exploration loop. Bounds context growth too,
   # which helps avoid the remote-compact-task usage-limit failure.
-  if (( MAX_ITERATION_SECS > 0 )); then
+  if (( max_iteration_secs > 0 )); then
     local started=${ITERATION_STARTED[$i]:-0}
-    if (( started > 0 )) && (( now - started >= MAX_ITERATION_SECS )); then
-      respawn_pane_and_prompt "$i" "$prompt" "iteration exceeded ${MAX_ITERATION_SECS}s"
+    if (( started > 0 )) && (( now - started >= max_iteration_secs )); then
+      respawn_pane_and_prompt "$i" "$prompt" "iteration exceeded ${max_iteration_secs}s"
     fi
   fi
 }
