@@ -4120,7 +4120,7 @@ cmd_status() {
     if [[ -n "$TASKS_DIR" ]]; then
       queue_file="$TASKS_DIR/${lane_lc}.txt"
       if [[ -f "$queue_file" ]]; then
-        queue_count=$(grep -cE '^/goal' "$queue_file" 2>/dev/null); queue_count=${queue_count:-0}
+        queue_count=$(grep -cE '^/goal([[:space:]]|$)' "$queue_file" 2>/dev/null); queue_count=${queue_count:-0}
       fi
     fi
     tail=$(capture_preview "$cap" 60)
@@ -4151,8 +4151,8 @@ cmd_queue() {
   for f in "$TASKS_DIR"/*.txt; do
     [[ -e "$f" ]] || continue
     base=$(basename "$f")
-    count=$(grep -cE '^/goal' "$f" 2>/dev/null); count=${count:-0}
-    next=$(grep -E '^/goal' "$f" 2>/dev/null | head -1 | head -c 80)
+    count=$(grep -cE '^/goal([[:space:]]|$)' "$f" 2>/dev/null); count=${count:-0}
+    next=$(grep -E '^/goal([[:space:]]|$)' "$f" 2>/dev/null | head -1 | head -c 80)
     printf '%-15s %5d  %s\n' "$base" "$count" "${next:-(empty)}"
   done
 }
