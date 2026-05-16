@@ -129,6 +129,40 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   ensure_start_resource_budget
 ' _ "$SCRIPT"
 
+CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  PROMPTS=(a)
+  free_ram_mb() { echo 4096; }
+  free_gb_on_runtime_root() { echo 100; }
+  cpu_count() { echo 4; }
+  load1() { echo 0.1; }
+  MIN_FREE_RAM_MB=999999999999999999999999
+  RAM_MB_PER_PANE=999999999999999999999999
+  MIN_FREE_GB=999999999999999999999999
+  DISK_MB_PER_PANE=999999999999999999999999
+  MAX_LOAD_PER_CPU=0
+  ensure_start_resource_budget
+' _ "$SCRIPT"
+
+ram_default="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; nonnegative_int_or_default 999999999999999999999999 600 1000000' _ "$SCRIPT")"
+[[ "$ram_default" == "600" ]] || { echo "oversized resource integer should fail closed to default, got $ram_default" >&2; exit 1; }
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  PROMPTS=(a b)
+  free_ram_mb() { echo 4096; }
+  free_gb_on_cwd() { echo 100; }
+  free_gb_on_runtime_root() { echo 100; }
+  cpu_count() { echo 4; }
+  load1() { echo 0.1; }
+  MIN_FREE_RAM_MB=999999999999
+  RAM_MB_PER_PANE=999999999999
+  MIN_FREE_GB=999999999999
+  DISK_MB_PER_PANE=999999999999
+  MAX_LOAD_PER_CPU=0
+  ensure_start_resource_budget
+' _ "$SCRIPT"
+
 headroom="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cpu_load_headroom_panes bad nan bad' _ "$SCRIPT")"
 [[ "$headroom" == "0" ]] || { echo "malformed CPU/load headroom inputs should fail closed, got $headroom" >&2; exit 1; }
 
@@ -146,6 +180,14 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
   free_gb_on_cwd() { echo 100; }
   MIN_FREE_GB=bad
   WARN_FREE_GB=bad
+  ensure_disk_space
+' _ "$SCRIPT"
+
+CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c '
+  source "$1"
+  free_gb_on_cwd() { echo 100; }
+  MIN_FREE_GB=999999999999
+  WARN_FREE_GB=999999999999
   ensure_disk_space
 ' _ "$SCRIPT"
 
@@ -184,6 +226,12 @@ stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; effective_start_
 
 stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_START_STAGGER_SECS=bad bash -c 'source "$1"; effective_start_stagger_secs 6' _ "$SCRIPT")"
 [[ "$stagger" == "0" ]] || { echo "invalid explicit stagger should sanitize to 0, got $stagger" >&2; exit 1; }
+
+stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_START_STAGGER_SECS=999999 bash -c 'source "$1"; effective_start_stagger_secs 6' _ "$SCRIPT")"
+[[ "$stagger" == "0" ]] || { echo "oversized explicit stagger should sanitize to 0, got $stagger" >&2; exit 1; }
+
+stagger="$(CODEX_SUPERVISOR_TEST_SOURCE=1 CODEX_SUPERVISOR_START_STAGGER_SECS=999999999999 bash -c 'source "$1"; effective_start_stagger_secs 6' _ "$SCRIPT")"
+[[ "$stagger" == "0" ]] || { echo "oversized explicit stagger should sanitize to 0, got $stagger" >&2; exit 1; }
 
 mkdir -p "$TMPDIR/bin"
 cat > "$TMPDIR/bin/free" <<'MOCK_FREE'

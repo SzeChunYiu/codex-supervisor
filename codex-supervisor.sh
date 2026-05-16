@@ -3153,7 +3153,7 @@ ceil_div() {
 effective_start_stagger_secs() {
   local pane_count="${1:-0}"
   if [[ -n "$START_STAGGER_SECS" ]]; then
-    nonnegative_int_or_default "$START_STAGGER_SECS" 0
+    nonnegative_int_or_default "$START_STAGGER_SECS" 0 300
   elif (( pane_count >= 6 )); then
     echo 2
   elif (( pane_count >= 3 )); then
@@ -3174,10 +3174,10 @@ ensure_start_resource_budget() {
   load=$(load1)
   max_load_per_cpu=$(nonnegative_decimal_or_default "$MAX_LOAD_PER_CPU" 1.25 100)
   load_room=$(cpu_load_headroom_panes "$cpus" "$load" "$max_load_per_cpu")
-  min_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
-  ram_per=$(nonnegative_int_or_default "$RAM_MB_PER_PANE" 600)
-  min_disk=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
-  disk_per=$(nonnegative_int_or_default "$DISK_MB_PER_PANE" 1024)
+  min_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512 1000000)
+  ram_per=$(nonnegative_int_or_default "$RAM_MB_PER_PANE" 600 1000000)
+  min_disk=$(nonnegative_int_or_default "$MIN_FREE_GB" 5 1000000)
+  disk_per=$(nonnegative_int_or_default "$DISK_MB_PER_PANE" 1024 1000000)
   need_ram=$(( min_ram + pane_count * ram_per ))
   extra_disk_gb=$(ceil_div "$(( pane_count * disk_per ))" 1024)
   need_disk_gb=$(( min_disk + extra_disk_gb ))
@@ -3213,8 +3213,8 @@ ensure_start_resource_budget() {
 ensure_disk_space() {
   local free min_free_gb warn_free_gb
   free=$(free_gb_on_cwd)
-  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
-  warn_free_gb=$(nonnegative_int_or_default "$WARN_FREE_GB" 10)
+  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5 1000000)
+  warn_free_gb=$(nonnegative_int_or_default "$WARN_FREE_GB" 10 1000000)
   if (( free < min_free_gb )); then
     err "disk too full to start: ${free}G free on $(pwd) (need >= ${min_free_gb}G)"
     err "free space first; try: $0 cleanup"
