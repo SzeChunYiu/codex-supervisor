@@ -283,16 +283,26 @@ CACHE: dict = {
 }
 
 
-def dashboard_source_info() -> dict:
-    path = pathlib.Path(__file__).resolve()
+def file_sha256_prefix(path: pathlib.Path, *, chunk_bytes: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(chunk_bytes)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def dashboard_source_info(path: pathlib.Path | None = None) -> dict:
+    path = (path or pathlib.Path(__file__)).resolve()
     try:
-        data = path.read_bytes()
         stat = path.stat()
         return {
             "path": str(path),
             "mtime": stat.st_mtime,
             "size_bytes": stat.st_size,
-            "sha256": hashlib.sha256(data).hexdigest()[:16],
+            "sha256": file_sha256_prefix(path),
         }
     except OSError as e:
         return {"path": str(path), "mtime": 0, "size_bytes": 0, "sha256": "", "error": str(e)[:160]}

@@ -6,6 +6,7 @@ SCRIPT="$ROOT/codex-supervisor.sh"
 DASHBOARD="${CSUP_DASHBOARD:-$ROOT/csup-dashboard}"
 
 python3 - "$SCRIPT" "$DASHBOARD" <<'PY'
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -67,6 +68,11 @@ health = mod.health_payload()
 assert health.get("refresh_interval_secs") == 0.5, health
 assert health.get("source", {}).get("path", "").endswith("csup-dashboard"), health
 assert health.get("source", {}).get("sha256"), health
+large_source = pathlib.Path(tempfile.mkdtemp()) / "large-dashboard"
+large_source.write_bytes((b"0123456789abcdef" * 200000) + b"tail")
+large_info = mod.dashboard_source_info(large_source)
+assert large_info["size_bytes"] == large_source.stat().st_size, large_info
+assert large_info["sha256"] == hashlib.sha256(large_source.read_bytes()).hexdigest()[:16], large_info
 assert health.get("status") == "degraded", health
 assert health.get("state_counts", {}).get("working") == 1, health
 assert health.get("state_counts", {}).get("idle") == 1, health
@@ -192,7 +198,7 @@ def dashboard_ok(payload, desired="0.5"):
 script_text = script.read_text()
 assert "r.read(1_000_000)" in script_text, "dashboard health HTTP reads must be bounded"
 
-dashboard_sha = __import__("hashlib").sha256(dashboard_path.read_bytes()).hexdigest()[:16]
+dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
 assert dashboard_ok({**base, "refresh_interval_secs": 0.2}, desired="0.2")
 assert not dashboard_ok({**base, "refresh_interval_secs": 0.5}, desired="0.2"), "0.5s dashboard is too slow for requested livestream cadence"
