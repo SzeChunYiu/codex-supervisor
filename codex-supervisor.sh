@@ -1032,6 +1032,15 @@ try:
 except (TypeError, ValueError):
     desired = 0.2
 expected_cmd = os.path.realpath(sys.argv[3])
+def file_sha256_prefix(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
         payload = json.loads(r.read(1_000_000).decode("utf-8"))
@@ -1055,7 +1064,7 @@ try:
     # genuinely broken/stale/foreign instance can be replaced.
     if not source_path or os.path.realpath(source_path) != expected_cmd:
         raise SystemExit(1)
-    expected_sha = hashlib.sha256(open(expected_cmd, "rb").read()).hexdigest()[:16]
+    expected_sha = file_sha256_prefix(expected_cmd)
     if str(source.get("sha256") or "") != expected_sha:
         raise SystemExit(1)
     try:

@@ -197,6 +197,8 @@ def dashboard_ok(payload, desired="0.5"):
 
 script_text = script.read_text()
 assert "r.read(1_000_000)" in script_text, "dashboard health HTTP reads must be bounded"
+assert 'hashlib.sha256(open(expected_cmd, "rb").read())' not in script_text, "dashboard source hash must stream file chunks"
+assert "def file_sha256_prefix" in script_text, "dashboard source hash helper should stream chunks"
 
 dashboard_sha = mod.file_sha256_prefix(dashboard_path)
 base = {"status": "ok", "panes": 1, "source": {"path": str(dashboard_path), "sha256": dashboard_sha}}
