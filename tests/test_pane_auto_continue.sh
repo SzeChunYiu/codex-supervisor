@@ -186,6 +186,37 @@ if [[ "$(cat "$bad_numeric_limit" 2>/dev/null || true)" != "usage limit recovery
   exit 1
 fi
 
+huge_numeric_limit="$TMPDIR/huge-numeric-limit"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_HITS=999999 \
+CODEX_SUPERVISOR_RESPAWN_COOLDOWN=999999 \
+CODEX_SUPERVISOR_HARD_LIMIT_COOLDOWN=999999999 \
+CODEX_SUPERVISOR_RESPAWN_BURST_LIMIT=999999 \
+CODEX_SUPERVISOR_RESPAWN_BURST_WINDOW_SECS=999999 \
+CODEX_SUPERVISOR_RESPAWN_BACKOFF_SECS=999999 \
+RESPAWN_FILE="$huge_numeric_limit" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(LIMIT)
+  PROMPTS=("/goal repeat limit lane")
+  PANE_IDX=(0)
+  LIMIT_STREAK[0]=2
+  LAST_RESPAWN[0]=0
+  ITERATION_STARTED[0]=$(($(date +%s) - 10))
+  LIMIT_PATTERN="usage limit"
+  CAPTURE="usage limit"
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  respawn_pane_and_prompt() { printf "%s\n" "$3" > "$RESPAWN_FILE"; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ "$(cat "$huge_numeric_limit" 2>/dev/null || true)" != "usage limit recovery" ]]; then
+  echo "oversized pane health numeric env values should fall back and still recover usage limits" >&2
+  exit 1
+fi
+
 sent_text_gone="$TMPDIR/sent-text-gone"
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_ON_COMPLETE=queue \

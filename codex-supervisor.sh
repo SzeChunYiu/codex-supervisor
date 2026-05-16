@@ -2451,8 +2451,8 @@ wait_ready_and_send() {
   local i=$1 prompt=$2 target s cap
   local ready_timeout ready_settle
   target=$(pane_target "$i")
-  ready_timeout=$(positive_int_or_default "$READY_TIMEOUT" 600)
-  ready_settle=$(nonnegative_int_or_default "$READY_SETTLE_SECS" 5)
+  ready_timeout=$(positive_int_or_default "$READY_TIMEOUT" 600 3600)
+  ready_settle=$(nonnegative_int_or_default "$READY_SETTLE_SECS" 5 60)
   for ((s=2; s<=ready_timeout; s+=2)); do
     cap=$(capture_tail "$target")
     if capture_has "$cap" "$READY_PATTERN" \
@@ -2494,9 +2494,9 @@ wait_ready_and_send() {
 respawn_rate_limit_check() {
   local now burst_window burst_limit backoff_secs
   now=$(date +%s)
-  burst_window=$(nonnegative_int_or_default "$RESPAWN_BURST_WINDOW_SECS" 10)
-  burst_limit=$(positive_int_or_default "$RESPAWN_BURST_LIMIT" 3)
-  backoff_secs=$(nonnegative_int_or_default "$RESPAWN_BACKOFF_SECS" 30)
+  burst_window=$(nonnegative_int_or_default "$RESPAWN_BURST_WINDOW_SECS" 10 3600)
+  burst_limit=$(positive_int_or_default "$RESPAWN_BURST_LIMIT" 3 100)
+  backoff_secs=$(nonnegative_int_or_default "$RESPAWN_BACKOFF_SECS" 30 3600)
   if (( RESPAWN_BACKOFF_UNTIL > now )); then
     return 1
   fi
@@ -2544,15 +2544,15 @@ check_pane() {
   local limit_hits respawn_cooldown hard_limit_cooldown min_free_ram min_free_gb max_iteration_secs
   target=$(pane_target "$i")
   now=$(date +%s)
-  auto_respawn_dead=$(nonnegative_int_or_default "$AUTO_RESPAWN_DEAD_PANES" 1)
-  auto_resend=$(nonnegative_int_or_default "$AUTO_RESEND" 1)
-  respawn_on_goal_done=$(nonnegative_int_or_default "$RESPAWN_ON_GOAL_DONE" 1)
-  resend_grace=$(nonnegative_int_or_default "$RESEND_GRACE_SECS" 30)
-  limit_hits=$(positive_int_or_default "$LIMIT_HITS_BEFORE_KILL" 3)
-  respawn_cooldown=$(nonnegative_int_or_default "$RESPAWN_COOLDOWN_SECS" 300)
-  hard_limit_cooldown=$(nonnegative_int_or_default "$HARD_LIMIT_COOLDOWN_SECS" 3600)
-  min_free_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512)
-  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5)
+  auto_respawn_dead=$(nonnegative_int_or_default "$AUTO_RESPAWN_DEAD_PANES" 1 1)
+  auto_resend=$(nonnegative_int_or_default "$AUTO_RESEND" 1 1)
+  respawn_on_goal_done=$(nonnegative_int_or_default "$RESPAWN_ON_GOAL_DONE" 1 1)
+  resend_grace=$(nonnegative_int_or_default "$RESEND_GRACE_SECS" 30 3600)
+  limit_hits=$(positive_int_or_default "$LIMIT_HITS_BEFORE_KILL" 3 100)
+  respawn_cooldown=$(nonnegative_int_or_default "$RESPAWN_COOLDOWN_SECS" 300 86400)
+  hard_limit_cooldown=$(nonnegative_int_or_default "$HARD_LIMIT_COOLDOWN_SECS" 3600 604800)
+  min_free_ram=$(nonnegative_int_or_default "$MIN_FREE_RAM_MB" 512 1000000)
+  min_free_gb=$(nonnegative_int_or_default "$MIN_FREE_GB" 5 1000000)
   max_iteration_secs=$(nonnegative_int_or_default "$MAX_ITERATION_SECS" 2700 86400)
 
   if (( auto_respawn_dead )) && pane_dead "$target"; then
@@ -3669,8 +3669,8 @@ _daemon_crash_handler() {
 # $1 = restart count (0 = fresh start, >0 = crash recovery restart)
 _start_supervisor_main() {
   local _is_restart="${1:-0}" poll_interval periodic_cleanup_secs auto_recreate_session
-  poll_interval=$(positive_int_or_default "$POLL_INTERVAL" 15)
-  periodic_cleanup_secs=$(nonnegative_int_or_default "$PERIODIC_CLEANUP_SECS" 120)
+  poll_interval=$(positive_int_or_default "$POLL_INTERVAL" 15 300)
+  periodic_cleanup_secs=$(nonnegative_int_or_default "$PERIODIC_CLEANUP_SECS" 120 86400)
   auto_recreate_session=$(bool_int_or_default "$AUTO_RECREATE_SESSION" 1)
   ensure_codex_cmd
   load_prompts
