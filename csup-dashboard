@@ -115,13 +115,16 @@ DEFAULT_TAIL = 12
 DEFAULT_REFRESH = 0.2
 SSH_TIMEOUT = 20
 
-def env_int(name: str, default: int, *, min_value: int | None = None) -> int:
+def env_int(name: str, default: int, *, min_value: int | None = None,
+            max_value: int | None = None) -> int:
     raw = os.environ.get(name)
     try:
         value = int(str(raw if raw is not None else default))
     except (TypeError, ValueError, OverflowError):
         value = default
     if min_value is not None and value < min_value:
+        return default
+    if max_value is not None and value > max_value:
         return default
     return value
 
@@ -248,7 +251,7 @@ MAX_REMOTE_JSON_CHARS = env_int("CSUP_DASHBOARD_MAX_REMOTE_JSON_CHARS", 2_000_00
 MAX_RUN_STABLE_OUTPUT_BYTES = env_int("CSUP_DASHBOARD_RUN_STABLE_MAX_OUTPUT_BYTES", 1_000_000, min_value=1024)
 MAX_STREAM_LINE_CHARS = env_int("CSUP_DASHBOARD_STREAM_LINE_MAX_CHARS", 2_000_000, min_value=1024)
 MAX_SOURCE_HASH_BYTES = env_int("CSUP_DASHBOARD_SOURCE_HASH_MAX_BYTES", 50_000_000, min_value=1024)
-MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1)
+MAX_CAPTURE_PANES = env_int("CSUP_DASHBOARD_MAX_CAPTURE_PANES", 512, min_value=1, max_value=4096)
 REMOTE_CAPTURE_ERROR_RETRY_SECS = env_float("CSUP_DASHBOARD_REMOTE_CAPTURE_ERROR_RETRY_SECS", 15.0, min_value=0.0)
 # How long to keep showing the last-known panes for a session whose host went
 # unreachable. Without this, a momentary SSH/SLURM/tmux hiccup wipes the pane
