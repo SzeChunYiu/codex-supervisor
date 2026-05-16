@@ -73,6 +73,41 @@ out_gm_boot="$(
   exit 1
 }
 
+cat > "$TMPDIR/bin/ssh" <<'SSH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+  *"squeue"*"csup-station"*) echo "111|cx01"; exit 0 ;;
+  *"tmux list-panes"*) echo 0; exit 0 ;;
+  *"os.getloadavg"*) echo 9999; exit 0 ;;
+  *"tmux -L"*"proj-lunarc-station-1"*"has-session"*"proj-lunarc-station-1"*) echo yes; exit 0 ;;
+  *) echo remote-ok ;;
+esac
+SSH
+chmod +x "$TMPDIR/bin/ssh"
+: > "$FAKE_SSH_LOG"
+
+out_gm_wake="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_SLURM_WAIT_SECS=0 \
+  PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" gm-start proj --host=lunarc --apply 2>&1
+)"
+[[ "$out_gm_wake" == *"SKIP proj/lunarc slot=1 job=111 node=cx01 session=proj-lunarc-station-1 reason=session_running"* ]] || {
+  printf 'expected gm-start to detect running CEO station session, got:\n%s\n' "$out_gm_wake" >&2
+  exit 1
+}
+[[ "$out_gm_wake" == *"CEO-WAKE proj/lunarc: queued re-run task in ceo.txt"* ]] || {
+  printf 'expected gm-start to queue CEO wake task, got:\n%s\n' "$out_gm_wake" >&2
+  exit 1
+}
+if ! grep -q -- "-o ControlPath=.*ceo.txt" "$FAKE_SSH_LOG"; then
+  printf 'CEO wake remote write must use ssh_exec with the managed ControlPath/stdin guard\n' >&2
+  cat "$FAKE_SSH_LOG" >&2
+  exit 1
+fi
+
 cat > "$TMPDIR/home/Desktop/projects/proj/codex-tasks/open.txt" <<'TASKS'
 /goal One
 /goal Two
