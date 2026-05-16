@@ -1106,11 +1106,17 @@ queue_lanes_for_tasks_dir() {
   for f in "$tasks_dir"/*.txt; do
     [[ -e "$f" ]] || continue
     lane="${f##*/}"; lane="${lane%.txt}"
+    is_safe_lane_token "$lane" || continue
     is_dynamic_queue_lane "$lane" && continue
     count=$(grep -cE '^/goal' "$f" 2>/dev/null || true)
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     (( count > 0 )) && printf '%06d %s\n' "$count" "$lane"
   done | sort -rn
+}
+
+is_safe_lane_token() {
+  local lane="$1"
+  [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]]
 }
 
 is_dynamic_queue_lane() {
@@ -1168,6 +1174,7 @@ factory_lane_goal_count() {
   for f in "$tasks_dir"/*.txt; do
     [[ -e "$f" ]] || continue
     lane="${f##*/}"; lane="${lane%.txt}"
+    is_safe_lane_token "$lane" || continue
     is_dynamic_queue_lane "$lane" && continue
     count=$(goal_count_file "$f")
     total=$((total + count))
@@ -1445,7 +1452,7 @@ cmd_submit() {
     esac
   done
   [[ -n "$project" && -n "$lane" && $# -gt 0 ]] || { err "usage: csup submit <project> <lane> <goal text...>"; return 2; }
-  [[ "$lane" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$lane" != *..* ]] || {
+  is_safe_lane_token "$lane" || {
     err "submit: lane must be a safe filename token"
     return 2
   }
