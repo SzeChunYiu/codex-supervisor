@@ -89,6 +89,8 @@ cloned = mod.clone_jsonable({float("nan"): float("inf"), "nested": [float("-inf"
 assert cloned["nan"] is None, cloned
 assert cloned["nested"] == [None], cloned
 json.dumps(cloned, allow_nan=False)
+api_payload = mod.json_api_bytes({"bad": float("nan"), "ok": 1})
+assert b"NaN" not in api_payload and b"null" in api_payload, api_payload
 mod.run_stable = lambda *args, **kwargs: subprocess.CompletedProcess(
     args[0] if args else [],
     0,
