@@ -2926,16 +2926,18 @@ import math
 import sys
 
 try:
-    cpus = max(1, int(float(sys.argv[1])))
-    load = max(0.0, float(sys.argv[2]))
+    cpus_raw = float(sys.argv[1])
+    load_raw = float(sys.argv[2])
     limit = float(sys.argv[3])
+    if not all(math.isfinite(v) for v in (cpus_raw, load_raw, limit)) or limit < 0:
+        raise ValueError("non-finite load headroom input")
+    cpus = max(1, int(cpus_raw))
+    load = max(0.0, load_raw)
 except Exception:
     print(0)
     raise SystemExit(0)
 
-if not all(math.isfinite(v) for v in (float(cpus), load, limit)) or limit < 0:
-    print(0)
-elif limit <= 0:
+if limit <= 0:
     print(999999)
 else:
     print(max(0, int(math.floor(cpus * limit - load))))

@@ -112,6 +112,9 @@ headroom="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cpu_load_headro
 headroom="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cpu_load_headroom_panes 4 0 nan' _ "$SCRIPT")"
 [[ "$headroom" == "0" ]] || { echo "non-finite CPU/load limit should fail closed, got $headroom" >&2; exit 1; }
 
+headroom="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cpu_load_headroom_panes 4 nan 1.25' _ "$SCRIPT")"
+[[ "$headroom" == "0" ]] || { echo "non-finite CPU/load sample should fail closed, got $headroom" >&2; exit 1; }
+
 headroom="$(CODEX_SUPERVISOR_TEST_SOURCE=1 bash -c 'source "$1"; cpu_load_headroom_panes 4 0 0' _ "$SCRIPT")"
 [[ "$headroom" == "999999" ]] || { echo "zero CPU/load limit should still mean unlimited, got $headroom" >&2; exit 1; }
 
