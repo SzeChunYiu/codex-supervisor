@@ -222,6 +222,7 @@ CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_RESEND_GRACE=bad \
 CODEX_SUPERVISOR_MIN_FREE_RAM_MB=bad \
 CODEX_SUPERVISOR_MIN_FREE_GB=bad \
+CODEX_SUPERVISOR_MAX_ITERATION_SECS=bad \
 CODEX_SUPERVISOR_RESPAWN_ON_GOAL=0 \
 CODEX_SUPERVISOR_AUTO_RESEND=bad \
 SENT_FILE="$bad_numeric_idle" \
@@ -243,6 +244,31 @@ bash -c '
 
 if [[ "$(cat "$bad_numeric_idle" 2>/dev/null || true)" != "/goal repeat idle lane" ]]; then
   echo "invalid resend/resource numeric env values should not block idle continuation" >&2
+  exit 1
+fi
+
+bad_iteration_cap="$TMPDIR/bad-iteration-cap"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_SUPERVISOR_MAX_ITERATION_SECS=bad \
+RESPAWN_FILE="$bad_iteration_cap" \
+bash -c '
+  source "$1"
+  LANE_LABELS=(WORK)
+  PROMPTS=("/goal repeat work lane")
+  PANE_IDX=(0)
+  ITERATION_STARTED[0]=$(($(date +%s) - 3600))
+  LAST_GOAL_DONE[0]=0
+  CAPTURE="Working"
+  pane_target() { echo "session:0.0"; }
+  pane_dead() { return 1; }
+  capture_tail() { printf "%s\n" "$CAPTURE"; }
+  pane_capture_active() { return 0; }
+  respawn_pane_and_prompt() { printf "%s\n" "$3" > "$RESPAWN_FILE"; }
+  check_pane 0 "${PROMPTS[0]}"
+' _ "$SCRIPT" > /dev/null
+
+if [[ "$(cat "$bad_iteration_cap" 2>/dev/null || true)" != "iteration exceeded 2700s" ]]; then
+  echo "invalid iteration cap should fall back to default instead of crashing" >&2
   exit 1
 fi
 
