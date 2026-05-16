@@ -2424,6 +2424,8 @@ cmd_stop() {
 TUNNEL_STATE="${CSUP_TUNNEL_STATE:-$HOME/.config/csup/tunnels.tsv}"
 TUNNEL_BASE_PORT="${CSUP_TUNNEL_BASE_PORT:-7778}"
 TUNNEL_REMOTE_PORT="${CSUP_TUNNEL_REMOTE_PORT:-7777}"
+[[ "$TUNNEL_BASE_PORT" =~ ^[0-9]+$ && "$TUNNEL_BASE_PORT" -gt 0 ]] || TUNNEL_BASE_PORT=7778
+[[ "$TUNNEL_REMOTE_PORT" =~ ^[0-9]+$ && "$TUNNEL_REMOTE_PORT" -gt 0 ]] || TUNNEL_REMOTE_PORT=7777
 
 _tunnel_state_read() {
   # Emit lines: node pid port [ssh_target]  (tab-separated)
@@ -2447,13 +2449,14 @@ _tunnel_port_for_node() {
   local node="$1"
   local existing
   existing=$(grep -m1 "^${node}	" "$TUNNEL_STATE" 2>/dev/null | cut -f3)
-  if [[ -n "$existing" ]]; then
+  if [[ "$existing" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "$existing"
     return
   fi
   # Find highest used port and add 1
   local max_port=$(( TUNNEL_BASE_PORT - 1 ))
   while IFS=$'\t' read -r _n _p port _target; do
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
     [[ -n "$port" && "$port" -gt "$max_port" ]] && max_port="$port"
   done < <(_tunnel_state_read)
   printf '%d\n' $(( max_port + 1 ))

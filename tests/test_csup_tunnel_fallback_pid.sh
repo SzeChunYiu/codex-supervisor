@@ -63,4 +63,52 @@ grep -q 'tunnel already up: cx01' "$TMPDIR/second.out"
 second_launches=$(grep -c -- '-N' "$TMPDIR/ssh.log" || true)
 [[ "$second_launches" == "1" ]] || { cat "$TMPDIR/ssh.log" >&2; exit 1; }
 
+bad_port_help="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_TUNNEL_STATE="$TMPDIR/home/.config/csup/tunnels.tsv" \
+  CSUP_TUNNEL_BASE_PORT=bad \
+  CSUP_TUNNEL_REMOTE_PORT=bad \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" tunnel --help 2>&1
+)"
+[[ "$bad_port_help" == *"starting at port 7778"* ]] || {
+  printf 'expected invalid tunnel port env values to fall back to defaults, got:\n%s\n' "$bad_port_help" >&2
+  exit 1
+}
+[[ "$bad_port_help" != *"invalid number"* ]] || {
+  printf 'invalid tunnel port env should not leak printf/arithmetic errors, got:\n%s\n' "$bad_port_help" >&2
+  exit 1
+}
+
+cat > "$TMPDIR/home/.config/csup/tunnels.tsv" <<'STATE'
+old-node	123	not-a-port	lunarc
+STATE
+HOME="$TMPDIR/home" \
+CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+CSUP_TUNNEL_STATE="$TMPDIR/home/.config/csup/tunnels.tsv" \
+PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" tunnel > "$TMPDIR/bad-state.out"
+
+awk -F '\t' '$1 == "cx01" && $3 == "7778" {found=1} END {exit found ? 0 : 1}' "$TMPDIR/home/.config/csup/tunnels.tsv" || {
+  printf 'expected invalid persisted tunnel ports to be ignored; state:\n' >&2
+  cat "$TMPDIR/home/.config/csup/tunnels.tsv" >&2
+  exit 1
+}
+
+cat > "$TMPDIR/home/.config/csup/tunnels.tsv" <<'STATE'
+cx01	123	not-a-port	lunarc
+STATE
+HOME="$TMPDIR/home" \
+CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+CSUP_TUNNEL_STATE="$TMPDIR/home/.config/csup/tunnels.tsv" \
+PATH="$TMPDIR/bin:$PATH" \
+  "$CSUP" tunnel > "$TMPDIR/bad-existing.out"
+
+awk -F '\t' '$1 == "cx01" && $3 == "7778" {found=1} END {exit found ? 0 : 1}' "$TMPDIR/home/.config/csup/tunnels.tsv" || {
+  printf 'expected invalid existing node port to be replaced with a default-based port; state:\n' >&2
+  cat "$TMPDIR/home/.config/csup/tunnels.tsv" >&2
+  exit 1
+}
+
 echo "ok: csup tunnel records fallback ssh pids and avoids duplicate forwards"
