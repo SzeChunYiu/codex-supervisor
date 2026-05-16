@@ -1728,6 +1728,11 @@ bounded_run_file_env() {
   esac
 }
 
+# The dashboard lock is an internal coordination primitive. Keep it under the
+# supervisor run dir even when an inherited environment tries to point it at an
+# arbitrary path; stale-lock cleanup may remove this directory after timeout.
+DASHBOARD_LOCK_DIR="$(bounded_run_file_env CODEX_SUPERVISOR_DASHBOARD_LOCK_DIR "$SUPERVISOR_ROOT/run/csup-dashboard.lock")"
+
 # Per-session state file remembers the prompts file path the supervisor was
 # started with, so subsequent `status` / `send` / `restart` etc. don't have
 # to be invoked from the project dir or with the env var set.
