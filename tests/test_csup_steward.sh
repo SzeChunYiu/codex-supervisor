@@ -6,7 +6,7 @@ CSUP="$ROOT/bin/csup"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-grep -q 'r.read(2_000_000)' "$CSUP" || { echo "csup steward dashboard reads must be bounded" >&2; exit 1; }
+grep -q 'MAX_DASHBOARD_STATE_BYTES + 1' "$CSUP" || { echo "csup steward dashboard reads must detect oversized payloads" >&2; exit 1; }
 
 cat > "$TMPDIR/state.json" <<'JSON'
 {
@@ -69,9 +69,19 @@ done
 port="$(cat "$TMPDIR/port")"
 
 out="$("$CSUP" steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:$port")"
+python3 - "$TMPDIR/state.json" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_text('{"projects":[]}' + (' ' * 2_000_001))
+PY
+set +e
+oversized_out="$("$CSUP" steward demo --sample-secs=0 --dashboard-url="http://127.0.0.1:$port" 2>&1)"
+oversized_status=$?
+set -e
 kill "$server_pid" 2>/dev/null || true
 wait "$server_pid" 2>/dev/null || true
 
+(( oversized_status != 0 )) || { printf 'oversized dashboard state should fail closed:\n%s\n' "$oversized_out" >&2; exit 1; }
+[[ "$oversized_out" == *"dashboard state payload too large"* ]] || { printf 'missing oversized payload detail:\n%s\n' "$oversized_out" >&2; exit 1; }
 [[ "$out" == *"STEWARD summary"* ]] || { printf 'missing summary:\n%s\n' "$out" >&2; exit 1; }
 [[ "$out" == *"done=1"* ]] || { printf 'missing done count:\n%s\n' "$out" >&2; exit 1; }
 [[ "$out" == *"blocked=1"* ]] || { printf 'missing blocked count:\n%s\n' "$out" >&2; exit 1; }
