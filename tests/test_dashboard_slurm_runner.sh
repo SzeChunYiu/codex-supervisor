@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import pathlib
 import concurrent.futures as cf
+import os
 import subprocess
 import sys
 import threading
@@ -65,6 +66,12 @@ remote_cmd = seen[-1][-1]
 assert "srun --jobid=3041294 --overlap" in remote_cmd, remote_cmd
 assert "env-shared.sh" in remote_cmd, remote_cmd
 assert "tmux capture-pane -t session:.1 -p" in remote_cmd, remote_cmd
+
+os.environ["CSUP_DASHBOARD_SRUN_TIMEOUT_SECS"] = "bad"
+result = runner(["tmux", "display-message", "-p", "ok"])
+assert result.stdout == "captured\n"
+assert "timeout 20s srun --jobid=3041294" in seen[-1][-1], seen[-1][-1]
+os.environ.pop("CSUP_DASHBOARD_SRUN_TIMEOUT_SECS", None)
 
 probe_alias = mod.probe_host("lunarc-c", hosts, me="mac-mini")
 assert probe_alias["reachable"] is True, probe_alias

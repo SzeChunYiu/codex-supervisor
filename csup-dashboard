@@ -1869,7 +1869,7 @@ def host_runner(host: str, hosts: dict, me: str | None, *,
             inner = " ".join(shlex.quote(str(c)) for c in cmd)
             if env_cmd:
                 inner = f"{env_cmd}; {inner}"
-            srun_timeout = max(1, int(float(os.environ.get("CSUP_DASHBOARD_SRUN_TIMEOUT_SECS", str(timeout)))))
+            srun_timeout = int(env_float("CSUP_DASHBOARD_SRUN_TIMEOUT_SECS", float(timeout), min_value=1.0))
             remote_cmd = f"timeout {srun_timeout}s srun --jobid={shlex.quote(jobid)} --overlap bash -lc {shlex.quote(inner)}"
             return run_ssh_stable(ssh_target, ["ssh", *SSH_BASE_OPTS, ssh_command_target(ssh_target), remote_cmd],
                                   timeout=max(timeout, srun_timeout + 2), retries=retries)
