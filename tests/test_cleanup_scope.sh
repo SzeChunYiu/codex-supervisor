@@ -27,6 +27,7 @@ touch -t 202001010000 \
   "$TMPDIR/projects/current-proj/.next" \
   "$TMPDIR/projects/current-proj/app with spaces/.next" \
   "$TMPDIR/projects/other-proj/.next"
+ln -s ../other-proj "$TMPDIR/projects/current-proj/link-out"
 
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_SUPERVISOR_SESSION=current-proj \
@@ -57,8 +58,20 @@ CODEX_SUPERVISOR_PERIODIC_CLEANUP_SECS=0 \
     cd "$2/projects/current-proj"
 
     cleanup_path_in_project_scope "$2/projects/current-proj-worker" || exit 1
+    cleanup_path_under_current_project "$2/projects/current-proj/.next" || {
+      echo "project cleanup should accept canonical in-project paths" >&2
+      exit 1
+    }
     if cleanup_path_in_project_scope "$2/projects/other-proj-worker"; then
       echo "project cleanup scope should not match sibling project worker" >&2
+      exit 1
+    fi
+    if cleanup_path_under_current_project "$2/projects/current-proj/../other-proj/.next"; then
+      echo "project cleanup should reject parent traversal outside current project" >&2
+      exit 1
+    fi
+    if cleanup_path_under_current_project "$2/projects/current-proj/link-out/.next"; then
+      echo "project cleanup should reject symlink traversal outside current project" >&2
       exit 1
     fi
 

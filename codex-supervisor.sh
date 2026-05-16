@@ -602,10 +602,18 @@ cleanup_path_in_project_scope() {
 }
 
 cleanup_path_under_current_project() {
-  local path="$1" root
+  local path="$1" root root_real path_real path_dir path_base
   cleanup_global_enabled && return 0
   root="$(current_project_root)"
-  case "$path" in "$root"|"$root"/*) return 0 ;; esac
+  root_real="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+  if [[ -d "$path" ]]; then
+    path_real="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
+  else
+    path_dir="$(dirname "$path")"
+    path_base="$(basename "$path")"
+    path_real="$(cd "$path_dir" 2>/dev/null && pwd -P)/$path_base" || return 1
+  fi
+  case "$path_real" in "$root_real"|"$root_real"/*) return 0 ;; esac
   return 1
 }
 
