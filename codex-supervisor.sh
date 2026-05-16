@@ -867,9 +867,15 @@ from pathlib import Path
 
 cfg = Path(sys.argv[1])
 project_dir = sys.argv[2]
-if cfg.exists() and cfg.stat().st_size > 2_000_000:
-    raise SystemExit(f"refusing to edit oversized codex config: {cfg}")
-text = cfg.read_text(encoding="utf-8", errors="replace") if cfg.exists() else ""
+max_cfg_bytes = 2_000_000
+if cfg.exists():
+    with cfg.open("rb") as f:
+        raw = f.read(max_cfg_bytes + 1)
+    if len(raw) > max_cfg_bytes:
+        raise SystemExit(f"refusing to edit oversized codex config: {cfg}")
+    text = raw.decode("utf-8", "replace")
+else:
+    text = ""
 lines = text.splitlines()
 escaped = project_dir.replace("\\", "\\\\").replace('"', '\\"')
 header = f'[projects."{escaped}"]'
