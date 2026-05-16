@@ -42,6 +42,9 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     thread.start()
 
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state.json", timeout=2) as r:
+        assert r.headers.get("X-Content-Type-Options") == "nosniff", r.headers
+        assert r.headers.get("X-Frame-Options") == "DENY", r.headers
+        assert r.headers.get("Referrer-Policy") == "no-referrer", r.headers
         first = json.loads(r.read().decode())
     assert calls["n"] == 0, first
 
@@ -89,6 +92,7 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
         raise AssertionError("near-miss pane API route should not enter pane handler")
     except urllib.error.HTTPError as e:
         assert e.code == 404, e
+        assert e.headers.get("X-Content-Type-Options") == "nosniff", e.headers
 
     srv.shutdown()
 
