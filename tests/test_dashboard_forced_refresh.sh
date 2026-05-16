@@ -13,6 +13,7 @@ import socket
 import socketserver
 import sys
 import threading
+import urllib.error
 import urllib.request
 
 dashboard_path = pathlib.Path(sys.argv[1])
@@ -54,11 +55,29 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", 0), mod.Handler) as srv:
     assert calls["n"] == 2, endpoint
     assert endpoint["refresh_count"] == 2, endpoint
 
+    try:
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/state.json?" + ("x" * (mod.MAX_REQUEST_PATH_CHARS + 1)),
+            timeout=2,
+        )
+        raise AssertionError("oversized dashboard request path should be rejected")
+    except urllib.error.HTTPError as e:
+        assert e.code == 414, e
+
+    try:
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/state.json?" + "&".join(f"k{i}=v" for i in range(mod.MAX_QUERY_FIELDS + 1)),
+            timeout=2,
+        )
+        raise AssertionError("dashboard query with too many fields should be rejected")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, e
+
     srv.shutdown()
 
 html = mod.INDEX_HTML
 assert "refreshNow.addEventListener('click', () => tick(true))" in html
 assert "if (force) params.set('refresh', '1')" in html
 assert "const url = '/api/state.json' + (query ? '?' + query : '')" in html
-print("ok: dashboard manual refresh forces server-side capture")
+print("ok: dashboard manual refresh and query guards work")
 PY

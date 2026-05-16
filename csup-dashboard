@@ -36,6 +36,9 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
+MAX_REQUEST_PATH_CHARS = 8192
+MAX_QUERY_FIELDS = 20
+
 HOSTS_FILE = pathlib.Path.home() / ".config/csup/hosts.toml"
 PROJECT_ROOTS_FILE = pathlib.Path(os.environ.get(
     "CSUP_PROJECT_ROOTS_FILE",
@@ -8326,6 +8329,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def do_GET(self):
+        if len(self.path) > MAX_REQUEST_PATH_CHARS:
+            self.send_error(414, "request path too long")
+            return
         parsed = urlparse(self.path)
         request_path = parsed.path
         if request_path == "/" or self.path.startswith("/project/"):
@@ -8335,7 +8341,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(INDEX_HTML.encode())
             return
         if request_path in ("/api/state.json", "/api/refresh.json"):
-            q = parse_qs(parsed.query)
+            try:
+                q = parse_qs(parsed.query, max_num_fields=MAX_QUERY_FIELDS)
+            except ValueError:
+                self.send_error(400, "too many query fields")
+                return
             if request_path == "/api/refresh.json" or q.get("refresh", ["0"])[0].lower() in {"1", "true", "yes"}:
                 try:
                     refresh_once()
@@ -8400,7 +8410,11 @@ class Handler(BaseHTTPRequestHandler):
                         pass
             return
         if self.path.startswith("/api/pane"):
-            q = parse_qs(parsed.query)
+            try:
+                q = parse_qs(parsed.query, max_num_fields=MAX_QUERY_FIELDS)
+            except ValueError:
+                self.send_error(400, "too many query fields")
+                return
             host = q.get("host", [""])[0]
             session = q.get("session", [""])[0]
             idx = q.get("index", ["0"])[0]
