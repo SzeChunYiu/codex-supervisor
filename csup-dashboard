@@ -3864,6 +3864,7 @@ def refresh(lines: int):
                     host_probe_cache[host] = {"reachable": False, "latency_ms": None, "error": str(e)[:160]}
 
     add_live_station_instances(project_instances_by_project, discovered_projects, hosts, me, host_probe_cache)
+    show_empty_projects = station_project_filter(os.environ.get("CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS", ""))
 
     def build_instance(proj: dict, hcfg: dict) -> tuple[str, dict | None]:
         host = hcfg.get("host", "")
@@ -3978,9 +3979,7 @@ def refresh(lines: int):
         # cards.
         if instance["panes"]:
             return project_identity(proj), instance
-        show_empty_raw = os.environ.get("CSUP_DASHBOARD_SHOW_EMPTY_PROJECTS", "").strip()
-        show_empty = {part.strip() for part in show_empty_raw.split(",") if part.strip()}
-        if show_empty and proj.get("name", "") in show_empty:
+        if show_empty_projects and proj.get("name", "") in show_empty_projects:
             return project_identity(proj), instance
         return project_identity(proj), None
 
