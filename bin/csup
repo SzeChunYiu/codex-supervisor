@@ -1108,7 +1108,7 @@ queue_lanes_for_tasks_dir() {
     lane="${f##*/}"; lane="${lane%.txt}"
     is_safe_lane_token "$lane" || continue
     is_dynamic_queue_lane "$lane" && continue
-    count=$(grep -cE '^/goal' "$f" 2>/dev/null || true)
+    count=$(grep -cE '^/goal([[:space:]]|$)' "$f" 2>/dev/null || true)
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     (( count > 0 )) && printf '%06d %s\n' "$count" "$lane"
   done | sort -rn
@@ -1133,7 +1133,7 @@ dynamic_queue_goal_count() {
   for token in ${CSUP_DYNAMIC_QUEUE_LANES:-blockers blocker open worker workers dynamic}; do
     file="$tasks_dir/$token.txt"
     [[ -f "$file" ]] || continue
-    count=$(grep -cE '^/goal' "$file" 2>/dev/null || true)
+    count=$(grep -cE '^/goal([[:space:]]|$)' "$file" 2>/dev/null || true)
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     total=$((total + count))
   done
@@ -1143,7 +1143,7 @@ dynamic_queue_goal_count() {
 goal_count_file() {
   local file="$1" count
   [[ -f "$file" ]] || { echo 0; return; }
-  count=$(grep -cE '^/goal' "$file" 2>/dev/null || true)
+  count=$(grep -cE '^/goal([[:space:]]|$)' "$file" 2>/dev/null || true)
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   echo "$count"
 }
