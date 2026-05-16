@@ -111,6 +111,26 @@ test -e "$FULL_SUP_CODEX_HOME/skills"
 test -e "$FULL_SUP_CODEX_HOME/memories"
 test -e "$FULL_SUP_CODEX_HOME/plugins"
 
+EXTRA_SRC_HOME="$TMPDIR/extra-src/real-codex"
+EXTRA_SUP_HOME="$TMPDIR/extra-dst/supervisor-codex"
+mkdir -p "$EXTRA_SRC_HOME/custom" "$TMPDIR/extra-src/victim" "$TMPDIR/extra-dst/victim"
+printf 'model = "gpt-5.5"\n' > "$EXTRA_SRC_HOME/config.toml"
+printf 'custom payload\n' > "$EXTRA_SRC_HOME/custom/payload.txt"
+printf 'source escape payload\n' > "$TMPDIR/extra-src/victim/payload.txt"
+printf 'must survive\n' > "$TMPDIR/extra-dst/victim/sentinel.txt"
+CODEX_SUPERVISOR_TEST_SOURCE=1 \
+CODEX_HOME="$EXTRA_SRC_HOME" \
+CODEX_SUPERVISOR_CODEX_HOME="$EXTRA_SUP_HOME" \
+CODEX_SUPERVISOR_CODEX_HOME_EXTRA_ITEMS="custom ../victim" \
+  bash -c 'cd "$2"; source "$1"; prepare_codex_home' \
+  _ "$SCRIPT" "$ROOT"
+test -e "$EXTRA_SUP_HOME/custom/payload.txt"
+if [[ ! -e "$TMPDIR/extra-dst/victim/sentinel.txt" ]]; then
+  echo "unsafe CODEX_HOME extra item should not delete or write outside the supervisor CODEX_HOME" >&2
+  find "$TMPDIR/extra-dst" -maxdepth 2 -print >&2
+  exit 1
+fi
+
 CODEX_SUPERVISOR_TEST_SOURCE=1 \
 CODEX_HOME="$REAL_CODEX_HOME" \
 CODEX_SUPERVISOR_MCP_MODE=inherit \
