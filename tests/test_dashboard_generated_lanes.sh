@@ -48,5 +48,10 @@ with tempfile.TemporaryDirectory() as d:
     assert lanes[0] == "huge", lanes
     assert lanes[2] == "ok", lanes
 
+with tempfile.TemporaryDirectory() as d:
+    prompts = pathlib.Path(d) / "prompts.txt"
+    prompts.write_text("/goal You are PANE 0, lane huge. Work.\n" + ("#" * 1_000_001))
+    assert mod.parse_lanes(prompts) == {}
+
 print("ok: dashboard labels generated CEO panes")
 PY

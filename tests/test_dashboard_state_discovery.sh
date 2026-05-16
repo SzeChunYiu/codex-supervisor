@@ -21,6 +21,10 @@ TASKS_DIR=
 PROJECT_ROOT=$TMPDIR/home/Desktop/projects/example
 STARTED_AT=2026-05-11 00:00:00
 STATE
+python3 - <<PY
+from pathlib import Path
+Path("$TMPDIR/home/.codex-supervisor-huge.state").write_text("PROJECT_ROOT=$TMPDIR/home/Desktop/projects/example\n" + ("#" * 1_000_001))
+PY
 
 python3 - "$DASHBOARD" "$TMPDIR/home" <<'PY'
 import importlib.util
@@ -60,6 +64,7 @@ instances = [
     for inst in mod.project_instances(project)
 ]
 assert any(inst["session"] == "example-batch" for inst in instances), projects
+assert not any(inst["session"] == "huge" for inst in instances), projects
 state_inst = next(inst for inst in instances if inst["session"] == "example-batch")
 assert state_inst["host"] == "local-test", state_inst
 assert state_inst["prompts"].endswith("docs/prompts.txt"), state_inst
