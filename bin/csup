@@ -1800,9 +1800,17 @@ cmd_factory_run() {
     elif [[ "$h" == "$me" ]]; then
       printf 'FACTORY-RUN %s/%s scenario=%s work=%s blockers=%s mode=%s delegate=govern\n' "$project_name" "$h" "$scenario" "$work" "$blockers" "$mode"
       if [[ "$mode" == "apply" ]]; then
-        cmd_govern --project="$project" --host="$h" --apply
+        if [[ -n "$max_panes_override" ]]; then
+          cmd_govern --project="$project" --host="$h" --apply --max-panes="$max_panes_override"
+        else
+          cmd_govern --project="$project" --host="$h" --apply
+        fi
       else
-        cmd_govern --project="$project" --host="$h" --dry-run
+        if [[ -n "$max_panes_override" ]]; then
+          cmd_govern --project="$project" --host="$h" --dry-run --max-panes="$max_panes_override"
+        else
+          cmd_govern --project="$project" --host="$h" --dry-run
+        fi
       fi
     elif host_is_lunarc "$h"; then
       printf 'HOLD %s/%s reason=lunarc_requires_slurm_station\n' "$project_name" "$h"
