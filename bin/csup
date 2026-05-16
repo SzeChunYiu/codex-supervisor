@@ -764,6 +764,11 @@ capacity_fields() {
   cpus=$(cpu_count)
   load=$(load1)
   running=$(running_local_panes)
+  free_ram=$(nonnegative_int_or_default "$free_ram" 0)
+  free_disk=$(nonnegative_int_or_default "$free_disk" 0)
+  cpus=$(positive_int_or_default "$cpus" 1)
+  load=$(nonnegative_decimal_or_default "$load" 0)
+  running=$(nonnegative_int_or_default "$running" 0)
   max_total=$(positive_int_or_default "${CSUP_GOVERNOR_MAX_TOTAL_PANES:-}" 8)
   ram_per=$(positive_int_or_default "${CSUP_GOVERNOR_RAM_MB_PER_PANE:-}" 700)
   disk_per=$(positive_int_or_default "${CSUP_GOVERNOR_DISK_MB_PER_PANE:-}" 1024)
@@ -774,7 +779,8 @@ capacity_fields() {
   (( ram_room < 0 )) && ram_room=0
   disk_room=$(( (free_disk - reserve_disk) * 1024 / disk_per ))
   (( disk_room < 0 )) && disk_room=0
-  local load_limit="${CSUP_GOVERNOR_MAX_LOAD_PER_CPU:-1.25}"
+  local load_limit
+  load_limit=$(nonnegative_decimal_or_default "${CSUP_GOVERNOR_MAX_LOAD_PER_CPU:-}" 1.25)
   load_room=$(python3 - "$cpus" "$load" "$load_limit" <<'PY'
 import math, sys
 try:
@@ -848,6 +854,15 @@ positive_int_or_default() {
 nonnegative_int_or_default() {
   local value="$1" default="$2"
   if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$default"
+  fi
+}
+
+nonnegative_decimal_or_default() {
+  local value="$1" default="$2"
+  if [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     printf '%s' "$value"
   else
     printf '%s' "$default"

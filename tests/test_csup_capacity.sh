@@ -62,6 +62,28 @@ cap_limited="$(
   exit 1
 }
 
+malformed_inputs="$(
+  HOME="$TMPDIR/home" \
+  CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
+  CSUP_GOVERNOR_FREE_RAM_MB=bad \
+  CSUP_GOVERNOR_FREE_DISK_GB=bad \
+  CSUP_GOVERNOR_LOAD1=bad \
+  CSUP_GOVERNOR_CPU_COUNT=bad \
+  CSUP_GOVERNOR_RUNNING_PANES=bad \
+  CSUP_GOVERNOR_MAX_LOAD_PER_CPU=bad \
+  PATH="$TMPDIR/bin:$PATH" \
+    "$CSUP" capacity
+)"
+
+[[ "$malformed_inputs" == *"available=0"* && "$malformed_inputs" == *"bottleneck=ram"* ]] || {
+  printf 'capacity should sanitize malformed measured resource values, got:\n%s\n' "$malformed_inputs" >&2
+  exit 1
+}
+[[ "$malformed_inputs" == *"max_load_per_cpu=1.25"* && "$malformed_inputs" == *"running=0"* ]] || {
+  printf 'capacity should sanitize malformed load/running values, got:\n%s\n' "$malformed_inputs" >&2
+  exit 1
+}
+
 json_out="$(
   HOME="$TMPDIR/home" \
   CSUP_HOSTS_FILE="$TMPDIR/home/.config/csup/hosts.toml" \
