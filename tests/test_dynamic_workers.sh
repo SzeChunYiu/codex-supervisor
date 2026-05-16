@@ -73,3 +73,23 @@ valid_remaining_open="$(grep -cE '^/goal([[:space:]]|$)' "$TMPDIR/codex-tasks/op
   printf 'expected one valid open task remaining, got %s\n' "$valid_remaining_open" >&2
   exit 1
 }
+
+mkdir -p "$TMPDIR/unsafe-env/codex-tasks"
+cat > "$TMPDIR/unsafe-env/escape.txt" <<'TASKS'
+/goal escaped task outside tasks dir
+TASKS
+cat > "$TMPDIR/unsafe-env/codex-tasks/open.txt" <<'TASKS'
+/goal safe open task from tasks dir
+TASKS
+
+unsafe_env_worker="$(
+  CODEX_SUPERVISOR_TEST_SOURCE=1 \
+  CODEX_SUPERVISOR_TASKS_DIR="$TMPDIR/unsafe-env/codex-tasks" \
+  CODEX_SUPERVISOR_BLOCKER_QUEUE_LANES="../escape blockers" \
+  CODEX_SUPERVISOR_DYNAMIC_QUEUE_LANES="../escape open" \
+  bash -c 'source "$1"; pop_next_task "WORKER-9"' _ "$SCRIPT"
+)"
+[[ "$unsafe_env_worker" == "/goal safe open task from tasks dir" ]] || {
+  printf 'dynamic queue env should ignore unsafe queue tokens, got: %s\n' "$unsafe_env_worker" >&2
+  exit 1
+}
