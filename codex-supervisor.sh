@@ -1002,12 +1002,18 @@ dashboard_http_ok() {
   python3 - "$DASHBOARD_PORT" "$DASHBOARD_REFRESH" "$DASHBOARD_CMD" <<'PY' >/dev/null 2>&1
 import json
 import hashlib
+import math
 import os
 import sys
 import urllib.request
 
 port = sys.argv[1]
-desired = float(sys.argv[2])
+try:
+    desired = float(sys.argv[2])
+    if not math.isfinite(desired) or desired <= 0:
+        desired = 0.2
+except (TypeError, ValueError):
+    desired = 0.2
 expected_cmd = os.path.realpath(sys.argv[3])
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health.json", timeout=1.5) as r:
@@ -1035,7 +1041,12 @@ try:
     expected_sha = hashlib.sha256(open(expected_cmd, "rb").read()).hexdigest()[:16]
     if str(source.get("sha256") or "") != expected_sha:
         raise SystemExit(1)
-    actual = float(payload.get("refresh_interval_secs"))
+    try:
+        actual = float(payload.get("refresh_interval_secs"))
+        if not math.isfinite(actual):
+            actual = 0.0
+    except (TypeError, ValueError):
+        actual = 0.0
     # A dashboard with a much slower server refresh loop looks "healthy" but
     # serves stale panes. Treat old/slow instances as replaceable so `start`
     # upgrades localhost:7777 to the requested real-time cadence.
@@ -2922,7 +2933,9 @@ except Exception:
     print(0)
     raise SystemExit(0)
 
-if limit <= 0:
+if not all(math.isfinite(v) for v in (float(cpus), load, limit)) or limit < 0:
+    print(0)
+elif limit <= 0:
     print(999999)
 else:
     print(max(0, int(math.floor(cpus * limit - load))))
