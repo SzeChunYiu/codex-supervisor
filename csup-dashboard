@@ -509,8 +509,27 @@ def _span(text: str, style: dict[str, object]) -> str:
     return f'<span style="{";".join(css)}">{escaped}</span>'
 
 
+def _parse_sgr_params(raw_params: str) -> list[int]:
+    params: list[int] = []
+    for raw in raw_params.replace(":", ";").split(";"):
+        if not raw:
+            params.append(0)
+            continue
+        # SGR values are small control/color codes. A pane can still print an
+        # arbitrarily long digit run that matches ANSI_SGR_RE; never let Python
+        # bigint parsing limits or CPU-heavy conversion crash the dashboard.
+        if len(raw) > 4:
+            params.append(-1)
+            continue
+        try:
+            params.append(int(raw))
+        except ValueError:
+            params.append(-1)
+    return params or [0]
+
+
 def _apply_sgr(style: dict[str, object], raw_params: str) -> None:
-    params = [int(p) if p else 0 for p in raw_params.replace(":", ";").split(";")]
+    params = _parse_sgr_params(raw_params)
     if not params:
         params = [0]
     i = 0
@@ -551,11 +570,13 @@ def _apply_sgr(style: dict[str, object], raw_params: str) -> None:
             key = "fg" if p == 38 else "bg"
             mode = params[i + 1]
             if mode == 5 and i + 2 < len(params):
-                style[key] = xterm_color(params[i + 2])
+                if params[i + 2] >= 0:
+                    style[key] = xterm_color(params[i + 2])
                 i += 2
             elif mode == 2 and i + 4 < len(params):
                 r, g, b = params[i + 2:i + 5]
-                style[key] = f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}"
+                if r >= 0 and g >= 0 and b >= 0:
+                    style[key] = f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}"
                 i += 4
             else:
                 i += 1
